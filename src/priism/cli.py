@@ -49,7 +49,7 @@ def _acid_mix(args: argparse.Namespace) -> None:
     settings = MixSettings(chunk_s=args.chunk, acid_prob=args.acid_prob)
     out = acid_mix(args.backgrounds, args.acid, args.out, args.count, seed=args.seed, settings=settings,
                    start_index=args.start_index, with_mixture=args.with_mixture,
-                   fmt="wav" if args.wav else "flac")
+                   fmt="wav" if args.wav else "flac", cache_size=args.cache)
     print(f"{len(out)} examples in {args.out}")
 
 
@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--start-index", type=int, default=0, help="first example number, to add to a dataset")
     p.add_argument("--with-mixture", action="store_true", help="also write the mixture (validation sets)")
     p.add_argument("--wav", action="store_true", help="write WAV instead of FLAC (validation sets)")
+    p.add_argument("--cache", type=int, default=64, help="decoded backgrounds kept in memory")
     p.set_defaults(func=_acid_mix)
 
     p = sub.add_parser("train-init", help="config + checkpoint to fine-tune a RoFormer on new stems")

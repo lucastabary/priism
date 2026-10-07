@@ -96,10 +96,12 @@ def _load_slots(folder: Path, names: list[str]) -> dict[str, np.ndarray]:
 def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: str | Path, count: int,
              slots: list[str] = ("drums", "bass", "acid", "rest"), acid_slot: str = "acid",
              seed: int = 0, settings: MixSettings | None = None, start_index: int = 0,
-             with_mixture: bool = False, fmt: str = "flac") -> list[Path]:
+             with_mixture: bool = False, fmt: str = "flac", cache_size: int = 64) -> list[Path]:
     """Write ``count`` chunk folders of real backgrounds with synthetic acid on top.
 
     ``with_mixture`` also writes ``mixture.flac``, which MSST validation needs.
+    ``cache_size`` bounds how many decoded backgrounds stay in memory (~250 MB each
+    for a MUSDB track); lower it when several processes run side by side.
     """
     s = settings or MixSettings()
     rng = np.random.default_rng(seed)
@@ -120,7 +122,7 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
             raise RuntimeError("backgrounds are too quiet or too short to fill the dataset")
         bg_path = backgrounds[rng.integers(len(backgrounds))]
         if bg_path not in cache:
-            if len(cache) > 64:  # keep memory bounded on large datasets
+            if len(cache) >= cache_size:  # keep memory bounded on large datasets
                 cache.pop(next(iter(cache)))
             cache[bg_path] = _load_slots(bg_path, bg_slots)
         bg = cache[bg_path]
