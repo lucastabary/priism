@@ -1,3 +1,4 @@
+# after: 0030
 # GPU: short runs to check that fine-tuning works and to pick the learning rate.
 # Baseline SDR of the untrained 4-stem model, then 3 learning rates x 2 short
 # epochs, validated on 40 held-out examples. Writes runs/sweep/best_lr, which

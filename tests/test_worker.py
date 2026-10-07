@@ -86,3 +86,25 @@ def test_files_can_be_listed_downloaded_and_resumed(tmp_path):
         assert e.value.code == 403
     finally:
         srv.shutdown()
+
+
+def test_cpu_and_gpu_lanes_run_side_by_side_and_respect_after(tmp_path):
+    import time
+
+    q = Queue(tmp_path)
+    q.add("0010-data.sh", "# lane: cpu\nsleep 1\necho data > data.txt\n")
+    q.add("0020-more-data.sh", "# lane: cpu\necho more\n")
+    q.add("0090-test.sh", "# after: 0010\ncat data.txt > seen.txt\n")
+    q.add("0100-train.sh", "echo train\n")
+    # The GPU lane may not start 0090 before 0010 is over, and 0100 keeps its place behind it.
+    assert q.next_job("gpu") is None
+    t = threading.Thread(target=q.run_next, args=("cpu",))
+    t.start()
+    time.sleep(0.3)
+    assert q.list("running") == ["0010-data.sh"] and q.next_job("gpu") is None
+    t.join()
+    assert q.next_job("gpu") == "0090-test.sh"
+    assert q.run_next("gpu") == "0090-test.sh"
+    assert (tmp_path / "seen.txt").read_text().strip() == "data"
+    assert q.run_next("cpu") == "0020-more-data.sh"
+    assert q.run_next("gpu") == "0100-train.sh"

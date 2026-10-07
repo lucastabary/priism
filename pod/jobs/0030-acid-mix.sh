@@ -1,3 +1,4 @@
+# lane: cpu
 # CPU: training and validation examples, synthetic acid over MUSDB backgrounds.
 # Training runs as 8 shards in parallel (one process is ~1 example/s); each shard
 # has its own seed and index range, so the set is reproducible.

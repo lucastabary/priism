@@ -1,8 +1,12 @@
 """Job queue that keeps a rented GPU busy without anyone watching it.
 
-Jobs are shell scripts in ``<queue>/pending``; the worker runs them one at a
-time in name order, so the next job starts the moment the previous one
-ends. A small HTTP API (bearer token) lets a remote session add jobs, read
+Jobs are shell scripts in ``<queue>/pending``; the worker runs them in name
+order, so the next job starts the moment the previous one ends. There are two
+lanes that run side by side, so CPU work (data preparation) does not leave
+the GPU idle: a job runs in the ``cpu`` lane if its script has a
+``# lane: cpu`` line, in the ``gpu`` lane otherwise. Each lane runs one job at
+a time. A ``# after: 0030 0031`` line makes a job wait until no job with those
+numbers is pending or running, whichever lane they are in. A small HTTP API (bearer token) lets a remote session add jobs, read
 logs, check GPU use and download results (checkpoints, logs) through the
 provider's HTTPS proxy. Pod disks are not persistent, so results must be
 pulled off the pod before it is stopped.
@@ -30,6 +34,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 STATES = ("pending", "running", "done", "failed")
+LANES = ("gpu", "cpu")
+_LANE_RE = re.compile(r"^#\s*lane:\s*(\w+)", re.M)
+_AFTER_RE = re.compile(r"^#\s*after:\s*(.+)$", re.M)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.sh$")
 
 
@@ -38,8 +45,7 @@ class Queue:
         self.root = Path(root)
         for d in (*STATES, "logs"):
             (self.root / d).mkdir(parents=True, exist_ok=True)
-        self.current: subprocess.Popen | None = None
-        self.current_name: str | None = None
+        self.current: dict[str, tuple[str, subprocess.Popen]] = {}  # lane -> running job
         self._lock = threading.Lock()
 
     def list(self, state: str) -> list[str]:
@@ -62,9 +68,10 @@ class Queue:
             pending.unlink()
             return "removed"
         with self._lock:
-            if self.current_name == name and self.current:
-                os.killpg(self.current.pid, signal.SIGTERM)
-                return "stopping"
+            for job, proc in self.current.values():
+                if job == name:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    return "stopping"
         raise FileNotFoundError(name)
 
     def log(self, name: str, tail: int = 200) -> str:
@@ -76,27 +83,50 @@ class Queue:
             f.seek(max(0, f.tell() - 200 * tail))
             return b"\n".join(f.read().splitlines()[-tail:]).decode(errors="replace")
 
-    def run_next(self) -> str | None:
-        """Run the first pending job to completion; None when the queue is empty."""
-        pending = self.list("pending")
-        if not pending:
-            return None
-        name = pending[0]
-        running = self.root / "running" / name
-        shutil.move(self.root / "pending" / name, running)
+    def _header(self, name: str) -> tuple[str, list[str]]:
+        text = (self.root / "pending" / name).read_text(errors="replace")
+        m = _LANE_RE.search(text)
+        lane = m.group(1) if m and m.group(1) in LANES else "gpu"
+        m = _AFTER_RE.search(text)
+        return lane, (m.group(1).split() if m else [])
+
+    def _blocked(self, after: list[str]) -> bool:
+        busy = self.list("pending") + self.list("running")
+        return any(job.startswith(f"{num}-") for num in after for job in busy)
+
+    def next_job(self, lane: str | None = None) -> str | None:
+        """First pending job of ``lane`` (any lane when None), if it may start now.
+
+        Jobs of a lane keep their order: a blocked job holds back the ones after it.
+        """
+        for name in self.list("pending"):
+            job_lane, after = self._header(name)
+            if lane is None or job_lane == lane:
+                return None if self._blocked(after) else name
+        return None
+
+    def run_next(self, lane: str | None = None) -> str | None:
+        """Run the next job of ``lane`` to completion; None when there is nothing to run."""
+        with self._lock:
+            name = self.next_job(lane)
+            if name is None:
+                return None
+            running = self.root / "running" / name
+            shutil.move(self.root / "pending" / name, running)
+        key = lane or "any"
         log = (self.root / "logs" / name.replace(".sh", ".log")).open("ab")
         log.write(f"### start {time.strftime('%Y-%m-%d %H:%M:%S')}\n".encode())
         log.flush()
         with self._lock:
-            self.current = subprocess.Popen(["bash", str(running)], stdout=log, stderr=subprocess.STDOUT,
-                                            cwd=self.root, start_new_session=True)
-            self.current_name = name
-        code = self.current.wait()
+            proc = subprocess.Popen(["bash", str(running)], stdout=log, stderr=subprocess.STDOUT,
+                                    cwd=self.root, start_new_session=True)
+            self.current[key] = (name, proc)
+        code = proc.wait()
         log.write(f"### end {time.strftime('%Y-%m-%d %H:%M:%S')} exit={code}\n".encode())
         log.close()
         with self._lock:
-            self.current = self.current_name = None
-        shutil.move(running, self.root / ("done" if code == 0 else "failed") / name)
+            del self.current[key]
+            shutil.move(running, self.root / ("done" if code == 0 else "failed") / name)
         return name
 
     def status(self) -> dict:
@@ -236,9 +266,15 @@ def serve(queue_dir: str | Path, port: int, token: str, files_root: str | Path |
     server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(queue, token, root))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"worker on :{port}, queue {queue.root}", flush=True)
-    while True:
-        if queue.run_next() is None:
-            time.sleep(poll_s)
+
+    def lane_loop(lane: str) -> None:
+        while True:
+            if queue.run_next(lane) is None:
+                time.sleep(poll_s)
+
+    for lane in LANES[1:]:
+        threading.Thread(target=lane_loop, args=(lane,), daemon=True).start()
+    lane_loop(LANES[0])
 
 
 def derive_token(secret: str, pod_name: str) -> str:

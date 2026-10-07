@@ -65,7 +65,10 @@ registre.
 ## Entraînement sur un pod GPU (RunPod)
 
 Le pod fait tourner une file de jobs (`pod/jobs/*.sh`, exécutés dans l'ordre
-des noms) pour que la carte enchaîne sans attendre personne.
+des noms) pour que la carte enchaîne sans attendre personne. Deux voies
+tournent en parallèle : un job marqué `# lane: cpu` (préparation de données)
+passe dans la voie CPU, les autres dans la voie GPU. Une ligne
+`# after: 0030` fait attendre un job jusqu'à la fin du job 0030.
 
 1. Créer le pod avec comme commande de démarrage
    `bash -c "curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh | bash"`,

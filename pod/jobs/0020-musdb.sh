@@ -1,3 +1,4 @@
+# lane: cpu
 # CPU: MUSDB18-HQ (Zenodo, ~23 GB), mapped to drums / bass / rest.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace}
