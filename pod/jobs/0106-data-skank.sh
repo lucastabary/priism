@@ -1,14 +1,15 @@
 # lane: cpu
 # after: 0030
 # CPU: dub skank lines, mixed over MUSDB as skank / rest with 303 lines as a
-# distractor that belongs to rest. Training set in 8 parallel shards.
+# distractor that belongs to rest. PRIISM_PREP_PROCS processes (default 4) leave
+# CPU to the dataloader of a training running alongside.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace}
 [ -f "$W/data/.ready-skank" ] && exit 0
-N=$(nproc)
+N=${PRIISM_PREP_PROCS:-4}
 priism synth skank --out "$W/data/skank_train" --count 6000 --seed 0 --duration 16 --workers "$N"
 priism synth skank --out "$W/data/skank_valid" --count 300 --seed 1000000 --duration 16 --workers "$N"
-SHARDS=8 PER=750
+SHARDS=$N PER=$((6000 / N))
 seq 0 $((SHARDS - 1)) | xargs -P "$SHARDS" -I{} sh -c \
   "priism synth-mix '$W/data/slots_musdb_train' --slots skank rest --fold rest \
      --layer skank='$W/data/skank_train':0.8 --layer rest='$W/data/acid_train':0.3:-20:-6 \
