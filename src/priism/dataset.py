@@ -78,6 +78,9 @@ class MixSettings:
     acid_prob: float = 0.8
     acid_rel_db: tuple[float, float] = (-14.0, 2.0)  # acid RMS relative to the background
     min_background_rms: float = 0.005
+    # Validation sets: skip chunks where a background slot is (nearly) silent, since
+    # SDR of a silent target is meaningless (it reads -100 dB and wrecks averages).
+    min_slot_rms: float = 0.0
 
 
 def _rms(x: np.ndarray) -> float:
@@ -133,6 +136,8 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
         chunk = {k: v[off : off + n] for k, v in bg.items()}
         bg_rms = _rms(sum(chunk.values()))
         if bg_rms < s.min_background_rms:
+            continue
+        if s.min_slot_rms and min(_rms(v) for v in chunk.values()) < s.min_slot_rms:
             continue
 
         acid = np.zeros((n, 2), np.float32)

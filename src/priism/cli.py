@@ -46,7 +46,7 @@ def _restem(args: argparse.Namespace) -> None:
 def _acid_mix(args: argparse.Namespace) -> None:
     from .dataset import MixSettings, acid_mix
 
-    settings = MixSettings(chunk_s=args.chunk, acid_prob=args.acid_prob)
+    settings = MixSettings(chunk_s=args.chunk, acid_prob=args.acid_prob, min_slot_rms=args.min_slot_rms)
     out = acid_mix(args.backgrounds, args.acid, args.out, args.count, seed=args.seed, settings=settings,
                    start_index=args.start_index, with_mixture=args.with_mixture,
                    fmt="wav" if args.wav else "flac", cache_size=args.cache)
@@ -154,6 +154,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--with-mixture", action="store_true", help="also write the mixture (validation sets)")
     p.add_argument("--wav", action="store_true", help="write WAV instead of FLAC (validation sets)")
     p.add_argument("--cache", type=int, default=64, help="decoded backgrounds kept in memory")
+    p.add_argument("--min-slot-rms", type=float, default=0.0,
+                   help="skip chunks where a background slot is quieter than this (validation sets)")
     p.set_defaults(func=_acid_mix)
 
     p = sub.add_parser("train-init", help="config + checkpoint to fine-tune a RoFormer on new stems")
