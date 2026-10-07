@@ -101,7 +101,7 @@ passe dans la voie CPU, les autres dans la voie GPU. Une ligne
 
 Après `acid-v1`, 0105/0106 préparent sur CPU les données des spécialistes
 « adaptateur » (`pod/adapter.sh` : modèle gelé + LoRA + têtes propres), et
-0110 (la 303 en adaptateur, pour comparer au fine-tuning complet) puis 0120
+0110 (la 303 en LoRA + têtes) et 0115 (la 303, têtes seules), pour comparer au fine-tuning complet, puis 0120
 (skank dub) les entraînent 10 époques chacun.
 
 Les jobs 0010 à 0030 (lignes acid, MUSDB18-HQ, mélanges) n'utilisent que le
