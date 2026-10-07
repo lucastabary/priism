@@ -1,14 +1,15 @@
 # GPU: fine-tune BS-Roformer-SW into drums / bass / acid / rest.
-# Full fine-tune at a low learning rate; the acid and rest heads start as copies
+# Full fine-tune at the learning rate 0090 picked (1e-5 without it); the acid and rest heads start as copies
 # of "other". Runs until stopped, keeping the best checkpoint by validation SDR.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace}
 RUN="$W/runs/acid-v1"
 mkdir -p "$RUN"
+LR=$(cat "$W/runs/sweep/best_lr" 2>/dev/null || echo 1e-5)  # picked by 0090
 if [ ! -f "$RUN/config.yaml" ]; then
   priism train-init --config "$W/models/BS-Roformer-SW.yaml" --ckpt "$W/models/BS-Roformer-SW.ckpt" \
     --map drums=drums bass=bass acid=other rest=other --out "$RUN" \
-    --overrides '{"audio": {"min_mean_abs": 0.0}, "training": {"lr": 1e-5, "num_epochs": 1000, "num_steps": 1000, "batch_size": 2}}'
+    --overrides '{"audio": {"min_mean_abs": 0.0}, "training": {"lr": '"$LR"', "num_epochs": 1000, "num_steps": 1000, "batch_size": 2}}'
 fi
 # Resume from the last weights (with optimizer and epoch) after a restart.
 START="$RUN/init.ckpt"
