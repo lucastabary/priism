@@ -99,6 +99,11 @@ passe dans la voie CPU, les autres dans la voie GPU. Une ligne
    `priism pod pull runs --url ... --dest <dossier>` (reprend les
    téléchargements interrompus).
 
+Après `acid-v1`, 0105/0106 préparent sur CPU les données des spécialistes
+« adaptateur » (`pod/adapter.sh` : modèle gelé + LoRA + têtes propres), et
+0110 (la 303 en adaptateur, pour comparer au fine-tuning complet) puis 0120
+(skank dub) les entraînent 10 époques chacun.
+
 Les jobs 0010 à 0030 (lignes acid, MUSDB18-HQ, mélanges) n'utilisent que le
 CPU ; 0100 fine-tune BS-Roformer-SW en batterie / basse / acid / reste, avec
 les têtes acid et reste initialisées depuis « other ».

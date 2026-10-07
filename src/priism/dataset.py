@@ -21,6 +21,7 @@ Train with ``audio.min_mean_abs: 0`` so silent targets are kept.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -251,3 +252,44 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
         meta["acid"] = meta.pop("layers")["acid"]
         (dest / "meta.json").write_text(json.dumps(meta))
     return out
+
+
+def _fold_one(args: tuple[Path, Path, list[str], str]) -> Path:
+    src, dest, keep, into = args
+    dest.mkdir(parents=True, exist_ok=True)
+    total = None
+    fmt = "flac"
+    for f in sorted(src.iterdir()):
+        name, ext = f.stem, f.suffix.lstrip(".")
+        if ext not in FORMATS:
+            if f.is_file():  # meta.json and the like
+                (dest / f.name).write_bytes(f.read_bytes())
+            continue
+        if name in keep or name == "mixture":
+            target = dest / f.name
+            if not target.exists():
+                os.link(f, target)  # same audio, no extra disk
+            continue
+        fmt = ext
+        audio, _ = sf.read(f, dtype="float32", always_2d=True)
+        total = audio if total is None else total + audio
+    if total is not None:
+        _write(dest / into, total, fmt)
+    return dest
+
+
+def fold_slots(src_dirs: list[str | Path], out_dir: str | Path, keep: list[str], into: str = "rest",
+               workers: int = 1) -> list[Path]:
+    """Copy example folders keeping the ``keep`` stems and summing every other stem into ``into``.
+
+    Turns a 4-slot set (drums / bass / acid / rest) into the 2-slot set of an adapter
+    specialist (acid / rest) without remixing, so both are trained on the same audio.
+    Kept stems and mixtures are hard links.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    out_dir = Path(out_dir)
+    jobs = [(d, out_dir / d.name, list(keep), into)
+            for s in map(Path, src_dirs) for d in sorted(s.iterdir()) if d.is_dir()]
+    with ProcessPoolExecutor(max(1, workers)) as ex:
+        return list(ex.map(_fold_one, jobs, chunksize=8))

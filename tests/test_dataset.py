@@ -111,3 +111,24 @@ def test_synth_mix_folds_background_slots_for_a_two_stem_specialist(tmp_path):
         expected = expected[:, ::-1]
     np.testing.assert_allclose(rest, expected, atol=1e-3)
     assert sorted(p.name for p in out[0].iterdir()) == ["meta.json", "rest.flac", "skank.flac"]
+
+
+def test_fold_sums_other_stems_and_links_kept_ones(tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from priism.dataset import fold_slots
+
+    ex = tmp_path / "src" / "mix_0000000"
+    ex.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    stems = {k: (rng.standard_normal((4410, 2)) * 0.1).astype(np.float32) for k in ("drums", "bass", "acid", "rest")}
+    for k, v in stems.items():
+        sf.write(ex / f"{k}.wav", v, 44100, subtype="FLOAT")
+    (ex / "meta.json").write_text("{}")
+    fold_slots([tmp_path / "src"], tmp_path / "out", keep=["acid"], into="rest")
+    out = tmp_path / "out" / "mix_0000000"
+    assert sorted(p.name for p in out.iterdir()) == ["acid.wav", "meta.json", "rest.wav"]
+    assert (out / "acid.wav").stat().st_ino == (ex / "acid.wav").stat().st_ino
+    rest, _ = sf.read(out / "rest.wav", dtype="float32")
+    np.testing.assert_allclose(rest, stems["drums"] + stems["bass"] + stems["rest"], atol=1e-4)

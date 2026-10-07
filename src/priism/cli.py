@@ -78,6 +78,13 @@ def _synth_mix(args: argparse.Namespace) -> None:
     print(f"{len(out)} examples in {args.out}")
 
 
+def _fold(args: argparse.Namespace) -> None:
+    from .dataset import fold_slots
+
+    out = fold_slots(args.inputs, args.out, args.keep, args.into, workers=args.workers)
+    print(f"{len(out)} examples in {args.out}")
+
+
 def _train_init(args: argparse.Namespace) -> None:
     import json
 
@@ -210,6 +217,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-slot-rms", type=float, default=0.0,
                    help="skip chunks where a background slot is quieter than this (validation sets)")
     p.set_defaults(func=_synth_mix)
+
+    p = sub.add_parser("fold", help="sum every stem but --keep into one slot (4-slot set -> adapter set)")
+    p.add_argument("inputs", nargs="+", help="folders of example folders (acid-mix, restem output)")
+    p.add_argument("--keep", nargs="+", required=True, help="stems kept as they are, e.g. acid")
+    p.add_argument("--into", default="rest", help="slot that receives the sum of the other stems")
+    p.add_argument("--out", required=True)
+    p.add_argument("--workers", type=int, default=1)
+    p.set_defaults(func=_fold)
 
     p = sub.add_parser("train-init", help="config + checkpoint to fine-tune a RoFormer on new stems")
     p.add_argument("--config", required=True, help="pretrained model's MSST yaml")
