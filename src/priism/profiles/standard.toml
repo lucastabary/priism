@@ -1,0 +1,9 @@
+# The usual 4 stems, as most DJ software expects them.
+name = "standard"
+model = "htdemucs_ft.yaml"
+
+[slots]
+drums = ["drums"]
+bass = ["bass"]
+other = "residual"
+vocals = ["vocals"]

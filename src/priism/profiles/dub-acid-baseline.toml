@@ -1,0 +1,12 @@
+# Baseline for dub and acid before any fine-tuning. No pretrained model has
+# an acid stem, so the acid slot takes "other", where most 303 lines land
+# (with the rest of the synths). This is the reference the fine-tuned model
+# has to beat.
+name = "dub-acid-baseline"
+model = "BS-Roformer-SW.ckpt"  # 6 stems: bass, drums, guitar, other, piano, vocals
+
+[slots]
+drums = ["drums"]
+bass = ["bass"]
+acid = ["other"]
+rest = "residual"
