@@ -10,13 +10,14 @@ SMALL="$W/data/valid_acid_small"
 mkdir -p "$SW" "$SMALL"
 # Hard-linked copies: MSST finds validation files with Path.rglob, which skips symlinked folders.
 for d in $(ls "$W/data/valid_acid" | head -40); do [ -d "$SMALL/$d" ] || cp -al "$W/data/valid_acid/$d" "$SMALL/$d"; done
-# Batch 2 of 13 s chunks does not fit in 24 GB: batch 1, gradients accumulated over 2.
+# 13 s chunks do not fit in 24 GB even at batch 1: activation checkpointing, batch 1,
+# gradients accumulated over 2.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 init() {  # init <dir> <lr>
   [ -f "$1/init.ckpt" ] || priism train-init --config "$W/models/BS-Roformer-SW.yaml" --ckpt "$W/models/BS-Roformer-SW.ckpt" \
     --map drums=drums bass=bass acid=other rest=other --out "$1" \
-    --overrides "{\"audio\": {\"min_mean_abs\": 0.0}, \"training\": {\"lr\": $2, \"num_epochs\": 2, \"num_steps\": 400, \"batch_size\": 1, \"gradient_accumulation_steps\": 2}}"
+    --overrides "{\"audio\": {\"min_mean_abs\": 0.0}, \"model\": {\"use_torch_checkpoint\": true}, \"training\": {\"lr\": $2, \"num_epochs\": 2, \"num_steps\": 400, \"batch_size\": 1, \"gradient_accumulation_steps\": 2}}"
 }
 
 cd "$W/msst"
