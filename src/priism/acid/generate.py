@@ -1,4 +1,4 @@
-"""Render synthetic acid lines to disk, one WAV and one JSON per line."""
+"""Render synthetic acid lines to disk, one FLAC and one JSON per line."""
 
 from __future__ import annotations
 
@@ -27,9 +27,13 @@ def _render_one(args: tuple[int, float, int, str]) -> str:
     seed, duration_s, sample_rate, out_dir = args
     p = sample_params(seed, duration_s=duration_s, sample_rate=sample_rate)
     stem = Path(out_dir) / f"acid_{seed:07d}"
-    sf.write(stem.with_suffix(".wav"), render(p), sample_rate, subtype="FLOAT")
+    if stem.with_suffix(".json").exists():  # written last, so the line is complete; lets a job resume
+        return str(stem.with_suffix(".flac"))
+    # 24-bit FLAC: lines are peak-normalised, so this loses nothing audible at
+    # about a third of the size of float WAV, which matters at 10k+ lines.
+    sf.write(stem.with_suffix(".flac"), render(p), sample_rate, format="FLAC", subtype="PCM_24")
     stem.with_suffix(".json").write_text(json.dumps(p.to_dict(), indent=1))
-    return str(stem.with_suffix(".wav"))
+    return str(stem.with_suffix(".flac"))
 
 
 def generate(out_dir: str | Path, count: int, start_seed: int = 0, duration_s: float = 8.0,

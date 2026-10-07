@@ -22,7 +22,7 @@ python -m venv .venv
 priism acid --out data/acid --count 1000 --workers 8
 ```
 
-Chaque ligne donne un WAV stéréo 44,1 kHz et un JSON avec tous ses paramètres
+Chaque ligne donne un FLAC stéréo 44,1 kHz et un JSON avec tous ses paramètres
 (seed, motif, réglages du synthé et des effets), ce qui permet de la
 régénérer à l'identique.
 
@@ -61,3 +61,24 @@ registre.
 ```bash
 .venv/bin/python -m pytest
 ```
+
+## Entraînement sur un pod GPU (RunPod)
+
+Le pod fait tourner une file de jobs (`pod/jobs/*.sh`, exécutés dans l'ordre
+des noms) pour que la carte enchaîne sans attendre personne.
+
+1. Créer le pod avec comme commande de démarrage
+   `bash -c "curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh | bash"`,
+   la variable `PRIISM_WORKER_TOKEN` (donnée par `priism pod token`) et le
+   port HTTP 8000 exposé.
+2. Suivre et piloter depuis n'importe où :
+   `priism pod status --url https://<pod>-8000.proxy.runpod.net`, puis
+   `log`, `add`, `cancel`.
+3. Le disque du pod n'est pas persistant : rapatrier les résultats avant
+   de l'arrêter, avec
+   `priism pod pull runs --url ... --dest <dossier>` (reprend les
+   téléchargements interrompus).
+
+Les jobs 0010 à 0030 (lignes acid, MUSDB18-HQ, mélanges) n'utilisent que le
+CPU ; 0100 fine-tune BS-Roformer-SW en batterie / basse / acid / reste, avec
+les têtes acid et reste initialisées depuis « other ».

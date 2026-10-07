@@ -16,6 +16,8 @@ separate = ["audio-separator[gpu]>=0.30", "audioread"]
 separate-cpu = ["audio-separator[cpu]>=0.30", "audioread"]
 # Speeds up the 303 filter loop roughly 50x; the pure Python fallback is used otherwise.
 fast = ["numba>=0.59"]
+# Checkpoint preparation for fine-tuning (MSST itself is installed by pod/setup.sh).
+train = ["pyyaml", "torch"]
 dev = ["pytest>=8"]
 
 [project.scripts]

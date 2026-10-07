@@ -1,0 +1,10 @@
+# Mapping used by "priism restem" to turn MUSDB18-HQ style multitracks (or
+# tracks separated with the standard profile) into dub/acid training slots.
+# The model field is unused here.
+name = "musdb-to-dub-acid"
+model = "-"
+
+[slots]
+drums = ["drums"]
+bass = ["bass"]
+rest = "residual"
