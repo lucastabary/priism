@@ -2,4 +2,5 @@
 # GPU: the 303 as an adapter specialist (frozen base + LoRA), on the same audio as
 # acid-v1, to compare full fine-tune against adapter on the acid SDR.
 W=${PRIISM_WORKSPACE:-/workspace}
+git -C "$W/priism" pull -q --ff-only || true  # adapter.sh as of now, not as of the pod start
 exec bash "$W/priism/pod/adapter.sh" acid-adapter acid "$W/data/train_acid_fold" "$W/data/valid_acid_fold" "$W/data/.ready-acid-fold"
