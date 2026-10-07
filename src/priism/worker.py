@@ -250,6 +250,10 @@ def derive_token(secret: str, pod_name: str) -> str:
     return hmac.new(secret.encode(), f"priism-worker:{pod_name}".encode(), "sha256").hexdigest()
 
 
+# The RunPod HTTPS proxy (Cloudflare) answers 403 to urllib's default User-Agent.
+USER_AGENT = "priism-worker-client/1"
+
+
 def download(base_url: str, token: str, rel: str, dest: str | Path) -> Path:
     """Fetch one file from the worker, resuming a partial ``dest.part`` if present."""
     import urllib.request
@@ -259,7 +263,7 @@ def download(base_url: str, token: str, rel: str, dest: str | Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     have = part.stat().st_size if part.exists() else 0
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT}
     if have:
         headers["Range"] = f"bytes={have}-"
     req = urllib.request.Request(base_url.rstrip("/") + "/files/" + quote(rel), headers=headers)
@@ -275,6 +279,7 @@ def client(base_url: str, token: str, method: str, path: str, body: dict | None 
 
     req = urllib.request.Request(base_url.rstrip("/") + path, method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                          "User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as r:
         return r.read().decode()
