@@ -85,6 +85,19 @@ seulement à extraire sa source du mix. Ses données se font avec
 `--slots skank rest --fold rest`, qui verse drums et bass du fond dans `rest`. Batterie et basse viennent du modèle
 de base. Les noms de modules LoRA sont à valider au premier essai sur le pod.
 
+Les adaptateurs ne sont **jamais empilés ni fusionnés** : chacun a été
+entraîné seul sur le tronc d'origine, donc on fait une passe par spécialiste
+(tronc + son LoRA + sa tête). Additionner des LoRA entraînés séparément les
+ferait interférer ; une passe de plus par stem ne coûte que du temps de
+calcul, ce qui ne gêne pas un traitement par lots hors ligne.
+
+Une tête seule (tronc entièrement gelé) est le niveau le moins cher, mais
+probablement insuffisant : la tête n'est qu'un petit réseau par bande de
+fréquences qui lit les représentations du tronc, et celui-ci n'a jamais eu à
+distinguer une 303 ou un skank des autres synthés rangés dans `other`. On
+mesurera les trois niveaux sur la 303 avec les mêmes données : tête seule,
+LoRA + tête, fine-tune complet (`acid-v1`).
+
 Pour trancher entre A et B, on entraînera la 303 aussi en mode B, sur les
 mêmes données qu'`acid-v1`, et on compare les SDR.
 
