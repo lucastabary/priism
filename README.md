@@ -33,6 +33,23 @@ sont tirés au hasard : saturation, delay à feedback qui s'assombrit (style
 dub), reverb, largeur stéréo. La cible « acid » garde ses effets, puisque dans
 un vrai morceau les retours de delay de la 303 appartiennent à la 303.
 
+## Autres stems : sources synthétiques et entraînement modulaire
+
+L'acid n'est qu'une source parmi d'autres. `priism synth list` montre les
+générateurs (aujourd'hui `acid` et `skank`, le contretemps dub/reggae), et
+`priism synth-mix` pose n'importe quelle combinaison de couches sur de vrais
+morceaux, cibles ou distracteurs :
+
+```bash
+priism synth skank --out data/skank --count 1000 --workers 8
+priism synth-mix data/slots_musdb_train --slots drums bass skank rest \
+  --layer skank=data/skank --layer rest=data/acid:0.3:-20:-6 --out data/train_skank
+```
+
+La conception (une source + un jeu de données + un adaptateur par stem, puis
+des profils qui choisissent 4 slots) est dans
+[docs/modular-training.md](docs/modular-training.md).
+
 ## Séparer des morceaux
 
 ```bash

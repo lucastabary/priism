@@ -14,6 +14,20 @@ def _acid(args: argparse.Namespace) -> None:
     print(f"{len(files)} acid lines written to {args.out}")
 
 
+def _synth(args: argparse.Namespace) -> None:
+    from .sources import SOURCES, generate
+
+    if args.source == "list":
+        for src in SOURCES.values():
+            print(f"{src.name:8} {src.description}")
+        return
+    if not args.out:
+        sys.exit("--out is required")
+    files = generate(args.source, args.out, args.count, start_seed=args.seed, duration_s=args.duration,
+                     sample_rate=args.sample_rate, workers=args.workers)
+    print(f"{len(files)} {args.source} examples written to {args.out}")
+
+
 def _separate(args: argparse.Namespace) -> None:
     from .separate import find_tracks, load_profile, separate_track
 
@@ -50,6 +64,17 @@ def _acid_mix(args: argparse.Namespace) -> None:
     out = acid_mix(args.backgrounds, args.acid, args.out, args.count, seed=args.seed, settings=settings,
                    start_index=args.start_index, with_mixture=args.with_mixture,
                    fmt="wav" if args.wav else "flac", cache_size=args.cache)
+    print(f"{len(out)} examples in {args.out}")
+
+
+def _synth_mix(args: argparse.Namespace) -> None:
+    from .dataset import MixSettings, parse_layer, synth_mix
+
+    layers = [parse_layer(spec) for spec in args.layer]
+    settings = MixSettings(chunk_s=args.chunk, min_slot_rms=args.min_slot_rms)
+    out = synth_mix(args.backgrounds, layers, args.out, args.count, args.slots, seed=args.seed, settings=settings,
+                    start_index=args.start_index, with_mixture=args.with_mixture,
+                    fmt="wav" if args.wav else "flac", cache_size=args.cache, fold_into=args.fold)
     print(f"{len(out)} examples in {args.out}")
 
 
@@ -125,6 +150,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workers", type=int, default=1)
     p.set_defaults(func=_acid)
 
+    p = sub.add_parser("synth", help="generate synthetic examples of a source (acid, skank; 'list' shows them)")
+    p.add_argument("source", help="source name, or 'list'")
+    p.add_argument("--out", help="output folder")
+    p.add_argument("--count", type=int, default=100)
+    p.add_argument("--seed", type=int, default=0, help="first seed; example i uses seed + i")
+    p.add_argument("--duration", type=float, default=8.0, help="seconds per example")
+    p.add_argument("--sample-rate", type=int, default=44100)
+    p.add_argument("--workers", type=int, default=1)
+    p.set_defaults(func=_synth)
+
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
     p.add_argument("--profile", default="dub-acid-baseline", help="profile name or path to a .toml")
@@ -157,6 +192,24 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--min-slot-rms", type=float, default=0.0,
                    help="skip chunks where a background slot is quieter than this (validation sets)")
     p.set_defaults(func=_acid_mix)
+
+    p = sub.add_parser("synth-mix", help="lay synthetic layers (any source) over chunks of real backgrounds")
+    p.add_argument("backgrounds", nargs="+", help="slot folders written by restem")
+    p.add_argument("--slots", nargs="+", required=True, help="output stems, e.g. drums bass skank rest")
+    p.add_argument("--fold", help="slot that takes the background slots not listed in --slots (e.g. rest)")
+    p.add_argument("--layer", action="append", required=True,
+                   help="slot=dir[:prob[:min_db:max_db]], repeatable; a layer into a background slot is a distractor")
+    p.add_argument("--out", required=True)
+    p.add_argument("--count", type=int, default=1000)
+    p.add_argument("--chunk", type=float, default=13.35, help="seconds per example")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--start-index", type=int, default=0, help="first example number, to add to a dataset")
+    p.add_argument("--with-mixture", action="store_true", help="also write the mixture (validation sets)")
+    p.add_argument("--wav", action="store_true", help="write WAV instead of FLAC (validation sets)")
+    p.add_argument("--cache", type=int, default=64, help="decoded backgrounds kept in memory")
+    p.add_argument("--min-slot-rms", type=float, default=0.0,
+                   help="skip chunks where a background slot is quieter than this (validation sets)")
+    p.set_defaults(func=_synth_mix)
 
     p = sub.add_parser("train-init", help="config + checkpoint to fine-tune a RoFormer on new stems")
     p.add_argument("--config", required=True, help="pretrained model's MSST yaml")

@@ -7,13 +7,15 @@ Two steps:
   file per slot, through the same slot mapping as the separation profiles.
   These full tracks have no acid and teach the model to keep drums, bass and
   the rest right (no catastrophic forgetting).
-* ``acid_mix``: cut random chunks of those slot folders and lay a synthetic
-  acid line over most of them. The acid target is the synthetic line, the
-  other slots stay what they were, so ground truth is exact. Some chunks get
-  no acid on purpose, so the model learns to leave the acid slot empty.
+* ``synth_mix``: cut random chunks of those slot folders and lay synthetic
+  examples (acid lines, skanks, any source of ``priism.sources``) over most
+  of them. A layer's target is the synthetic audio, the other slots stay
+  what they were, so ground truth is exact. Some chunks get no layer on
+  purpose, so the model learns to leave a slot empty. ``acid_mix`` is the
+  single-layer case the acid-v1 run was built with.
 
 Both write MSST "type 4" folders (aligned stems, mixture = sum of stems).
-Train with ``audio.min_mean_abs: 0`` so silent acid targets are kept.
+Train with ``audio.min_mean_abs: 0`` so silent targets are kept.
 """
 
 from __future__ import annotations
@@ -96,25 +98,78 @@ def _load_slots(folder: Path, names: list[str]) -> dict[str, np.ndarray]:
     return {k: (np.zeros((n, 2), np.float32) if v is None else v) for k, v in out.items()}
 
 
-def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: str | Path, count: int,
-             slots: list[str] = ("drums", "bass", "acid", "rest"), acid_slot: str = "acid",
-             seed: int = 0, settings: MixSettings | None = None, start_index: int = 0,
-             with_mixture: bool = False, fmt: str = "flac", cache_size: int = 64) -> list[Path]:
-    """Write ``count`` chunk folders of real backgrounds with synthetic acid on top.
+@dataclass
+class Layer:
+    """Synthetic examples from ``dir`` laid over the background into ``slot``.
 
-    ``with_mixture`` also writes ``mixture.flac``, which MSST validation needs.
-    ``cache_size`` bounds how many decoded backgrounds stay in memory (~250 MB each
-    for a MUSDB track); lower it when several processes run side by side.
+    ``slot`` can be a new stem (``acid``, ``skank``) or a background slot: a
+    layer into ``rest`` is a distractor, e.g. synthetic acid lines a skank
+    model must learn to leave alone. Its level is drawn relative to the
+    background RMS, and it is present in a share ``prob`` of the examples.
+    """
+
+    slot: str
+    dir: str | Path
+    prob: float = 0.8
+    rel_db: tuple[float, float] = (-14.0, 2.0)
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        self.name = self.name or self.slot
+
+
+def parse_layer(spec: str) -> Layer:
+    """``slot=dir[:prob[:min_db:max_db]]``, e.g. ``skank=data/skank:0.8`` or ``rest=data/acid:0.3:-20:-6``."""
+    slot, _, rest = spec.partition("=")
+    if not slot or not rest:
+        raise ValueError(f"layer {spec!r}: expected slot=dir[:prob[:min_db:max_db]]")
+    parts = rest.split(":")
+    layer = Layer(slot=slot, dir=parts[0])
+    if len(parts) > 1:
+        layer.prob = float(parts[1])
+    if len(parts) == 4:
+        layer.rel_db = (float(parts[2]), float(parts[3]))
+    elif len(parts) not in (1, 2):
+        raise ValueError(f"layer {spec!r}: give both min_db and max_db")
+    return layer
+
+
+def synth_mix(background_dirs: list[str | Path], layers: list[Layer], out_dir: str | Path, count: int,
+              slots: list[str], seed: int = 0, settings: MixSettings | None = None, start_index: int = 0,
+              with_mixture: bool = False, fmt: str = "flac", cache_size: int = 64,
+              fold_into: str | None = None) -> list[Path]:
+    """Write ``count`` chunk folders of real backgrounds with synthetic layers on top.
+
+    Background slots are read from the restem folders (a slot missing there is
+    silent); each layer adds a random excerpt of one of its examples to its
+    slot. ``with_mixture`` also writes ``mixture.*``, which MSST validation
+    needs. ``cache_size`` bounds how many decoded backgrounds stay in memory
+    (~250 MB each for a MUSDB track); lower it when several processes run
+    side by side. ``fold_into`` adds the background slots that are not in
+    ``slots`` to that slot, e.g. ``slots=["skank", "rest"], fold_into="rest"``
+    for a two-stem specialist trained on drums/bass/rest backgrounds.
     """
     s = settings or MixSettings()
     rng = np.random.default_rng(seed)
     out_dir = Path(out_dir)
+    missing = [layer.slot for layer in layers if layer.slot not in slots]
+    if missing:
+        raise ValueError(f"layers target slots {missing} that are not in {list(slots)}")
     backgrounds = sorted(p for d in map(Path, background_dirs) for p in d.iterdir() if p.is_dir())
-    acids = sorted(p for p in Path(acid_dir).iterdir() if p.suffix in (".flac", ".wav"))
-    if not backgrounds or not acids:
-        raise ValueError(f"need backgrounds ({len(backgrounds)}) and acid lines ({len(acids)})")
+    pools = [sorted(p for p in Path(layer.dir).iterdir() if p.suffix in (".flac", ".wav")) for layer in layers]
+    if not backgrounds or not all(pools):
+        raise ValueError(f"need backgrounds ({len(backgrounds)}) and examples for every layer "
+                         f"({ {layer.name: len(pool) for layer, pool in zip(layers, pools)} })")
     n = int(round(s.chunk_s * SR))
-    bg_slots = [x for x in slots if x != acid_slot]
+    # Slots only layers write to (e.g. acid) are not read from the backgrounds.
+    new_slots = {layer.slot for layer in layers}
+    bg_slots = [x for x in slots if x not in new_slots or _has_slot(backgrounds[0], x)]
+    folded = []
+    if fold_into:
+        if fold_into not in slots:
+            raise ValueError(f"fold_into {fold_into!r} is not in {list(slots)}")
+        folded = sorted({f.stem for f in backgrounds[0].iterdir() if f.suffix in (".flac", ".wav")}
+                        - set(slots) - {"mixture"})
     written = []
     cache: dict[Path, dict[str, np.ndarray]] = {}
     i = start_index
@@ -127,7 +182,10 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
         if bg_path not in cache:
             if len(cache) >= cache_size:  # keep memory bounded on large datasets
                 cache.pop(next(iter(cache)))
-            cache[bg_path] = _load_slots(bg_path, bg_slots)
+            loaded = _load_slots(bg_path, bg_slots + folded)
+            for k in folded:
+                loaded[fold_into] = loaded.get(fold_into, 0) + loaded.pop(k)
+            cache[bg_path] = loaded
         bg = cache[bg_path]
         length = len(next(iter(bg.values())))
         if length < n:
@@ -140,20 +198,22 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
         if s.min_slot_rms and min(_rms(v) for v in chunk.values()) < s.min_slot_rms:
             continue
 
-        acid = np.zeros((n, 2), np.float32)
-        meta = {"background": str(bg_path), "offset": off, "acid": None}
-        if rng.random() < s.acid_prob:
-            acid_path = acids[rng.integers(len(acids))]
-            line, _ = sf.read(acid_path, dtype="float32", always_2d=True)
-            if len(line) < n:  # loop short lines to fill the chunk
+        stems = {k: chunk.get(k, np.zeros((n, 2), np.float32)) for k in slots}
+        meta = {"background": str(bg_path), "offset": off, "layers": {}}
+        for layer, pool in zip(layers, pools):
+            meta["layers"][layer.name] = None
+            if rng.random() >= layer.prob:
+                continue
+            path = pool[rng.integers(len(pool))]
+            line, _ = sf.read(path, dtype="float32", always_2d=True)
+            if len(line) < n:  # loop short examples to fill the chunk
                 line = np.tile(line, (int(np.ceil(n / len(line))), 1))
-            a_off = int(rng.integers(len(line) - n + 1))
-            acid = line[a_off : a_off + n]
-            rel_db = rng.uniform(*s.acid_rel_db)
-            acid = acid * (bg_rms * 10 ** (rel_db / 20) / _rms(acid))
-            meta["acid"] = {"file": str(acid_path), "offset": a_off, "rel_db": rel_db}
+            l_off = int(rng.integers(len(line) - n + 1))
+            audio = line[l_off : l_off + n]
+            rel_db = rng.uniform(*layer.rel_db)
+            stems[layer.slot] = stems[layer.slot] + audio * (bg_rms * 10 ** (rel_db / 20) / _rms(audio))
+            meta["layers"][layer.name] = {"file": str(path), "offset": l_off, "rel_db": rel_db}
 
-        stems = {**chunk, acid_slot: acid}
         mix = sum(stems.values())
         peak = float(np.max(np.abs(mix)))
         gain = min(1.0, 0.98 / peak) * 10 ** (rng.uniform(-6, 0) / 20)
@@ -171,3 +231,23 @@ def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: s
         written.append(dest)
         i += 1
     return written
+
+
+def _has_slot(folder: Path, name: str) -> bool:
+    return any((folder / f"{name}{ext}").exists() for ext in (".flac", ".wav"))
+
+
+def acid_mix(background_dirs: list[str | Path], acid_dir: str | Path, out_dir: str | Path, count: int,
+             slots: list[str] = ("drums", "bass", "acid", "rest"), acid_slot: str = "acid",
+             seed: int = 0, settings: MixSettings | None = None, start_index: int = 0,
+             with_mixture: bool = False, fmt: str = "flac", cache_size: int = 64) -> list[Path]:
+    """``synth_mix`` with a single acid layer (the acid-v1 training set)."""
+    s = settings or MixSettings()
+    layer = Layer(slot=acid_slot, dir=acid_dir, prob=s.acid_prob, rel_db=s.acid_rel_db, name="acid")
+    out = synth_mix(background_dirs, [layer], out_dir, count, list(slots), seed=seed, settings=s,
+                    start_index=start_index, with_mixture=with_mixture, fmt=fmt, cache_size=cache_size)
+    for dest in out:  # keep the meta layout acid-v1 datasets were written with
+        meta = json.loads((dest / "meta.json").read_text())
+        meta["acid"] = meta.pop("layers")["acid"]
+        (dest / "meta.json").write_text(json.dumps(meta))
+    return out
