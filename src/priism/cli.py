@@ -46,6 +46,7 @@ def _train_sep(args: argparse.Namespace) -> None:
           exist_weight=args.exist_weight,
           save_every=args.save_every, stream=args.stream, stream_workers=args.stream_workers,
           stream_songs=args.stream_songs, stream_duration=args.stream_duration, init=args.init,
+          real=args.real, real_every=args.real_every, real_weight=args.real_weight,
           stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
           log_every=args.log_every, core_lr_scale=args.core_lr_scale,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
@@ -288,6 +289,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stream-duration", type=float, default=30.0, help="seconds per generated song")
     p.add_argument("--stream-sources", help="sources per generated song, LO:HI (default: the generator's 2:16)")
     p.add_argument("--init", help="start from these weights (model.pt of an earlier run)")
+    p.add_argument("--real", help="folder of real songs (no stems) for distillation from the pretrained model")
+    p.add_argument("--real-every", type=int, default=2, help="one distillation batch every N steps")
+    p.add_argument("--real-weight", type=float, default=1.0, help="weight of the distillation loss")
     p.add_argument("--out", required=True, help="run folder (config.json, model.pt, history.json)")
     p.add_argument("--preset", choices=["tiny", "small", "base", "msst"], default="tiny",
                    help="msst: pretrained MSST BS-RoFormer core (--msst-config/--msst-ckpt/--msst-path)")

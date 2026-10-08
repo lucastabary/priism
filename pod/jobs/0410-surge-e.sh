@@ -1,4 +1,7 @@
 # after: 0330 0401 0402
+# Every 2nd step also distils the pretrained BS-Roformer-SW on real FMA songs (outputs grouped per
+# teacher stem): fine-tuning on synthetic songs alone made the core forget real music (NI: SW +8.1 dB
+# per stem, our stage B +2.5 dB).
 # GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
 # pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
 # Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
@@ -25,4 +28,5 @@ priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-c
   --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
   --valid data/gen_valid data/gen_valid_twins --out runs/surge-e \
   --steps 10000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
+  --real data/fma --real-every 2 \
   --save-every 1000 --log-every 50

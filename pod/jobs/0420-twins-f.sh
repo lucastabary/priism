@@ -1,4 +1,7 @@
 # after: 0410
+# Every 2nd step also distils the pretrained BS-Roformer-SW on real FMA songs (outputs grouped per
+# teacher stem): fine-tuning on synthetic songs alone made the core forget real music (NI: SW +8.1 dB
+# per stem, our stage B +2.5 dB).
 # GPU: stage F, twins. Continues stage E with 70 % of songs holding a twin pair (same instrument,
 # two parts) and a 3x heavier count loss: B left twins merged and output too few tracks.
 # Judge F on valid_gen_valid_twins_* and the NI songs (data/gen_valid is the old generator).
@@ -25,4 +28,5 @@ priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-c
   --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
   --valid data/gen_valid data/gen_valid_twins --out runs/twins-f --exist-weight 3 \
   --steps 10000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
+  --real data/fma --real-every 2 \
   --save-every 1000 --log-every 50

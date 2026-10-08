@@ -67,12 +67,15 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           exist_weight: float = 1.0,
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
-          init: str | Path | None = None, log=print) -> list[dict]:
+          init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
+          real_weight: float = 1.0, log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
     With ``stream`` (a local folder), training songs are generated during training by
     ``stream_workers`` processes (rolling pool of ``stream_songs``) instead of read from ``data``.
     ``init`` starts from the weights of an earlier run (``model.pt``), e.g. the previous curriculum stage.
+    ``real`` (a folder of real songs, msst preset only) adds, every ``real_every`` steps, a distillation
+    batch: the frozen pretrained model's stems guide our outputs grouped per stem (see distill.py).
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
@@ -123,9 +126,20 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     valid = [valid] if isinstance(valid, (str, Path)) else list(valid or [])
     vds = [(("" if i == 0 else Path(v).name + "_"), SongChunks(v, chunk_s, sr, items_per_song=1, seed=1))
            for i, v in enumerate(valid)]
+    teach = None
+    if real:
+        from .distill import RealCrops, load_teacher
+
+        if preset != "msst":
+            raise ValueError("real-song distillation needs the msst preset (its pretrained model is the teacher)")
+        rdl = DataLoader(RealCrops(real, chunk_s, sr, seed=seed), batch_size=batch, num_workers=2,
+                         persistent_workers=True)
+        teach = {"it": iter(rdl), "model": load_teacher(msst["config"], msst["ckpt"], msst["path"], device),
+                 "every": real_every, "weight": real_weight}
+        log(f"distillation on {len(rdl.dataset.files)} real songs, every {real_every} steps")
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-              save_every, log, exist_weight)
+              save_every, log, exist_weight, teach)
     finally:
         if pool:
             pool.stop()
@@ -133,7 +147,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
 
 def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-          save_every, log, exist_weight=1.0):
+          save_every, log, exist_weight=1.0, teach=None):
     t0 = time.time()
     it = iter(dl)
     model.train()
@@ -150,6 +164,17 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
                                exist_weight=exist_weight)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if teach and step % teach["every"] == 0:
+            # Separate backward: both graphs at once would not fit in 24 GB.
+            from .distill import group_loss
+
+            real_mix = next(teach["it"]).to(device)
+            with torch.no_grad(), amp:
+                refs = teach["model"](real_mix).float()  # (B, stems, C, S)
+            with amp:
+                ro = model(real_mix)
+            rloss, stats["real_snr"] = group_loss(ro["sources"].float(), refs)
+            (teach["weight"] * rloss).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step()
         sched.step()

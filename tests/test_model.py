@@ -140,3 +140,53 @@ def test_stream_curriculum_limits_sources(tmp_path):
         pool.stop()
     for song in ready_songs(tmp_path / "pool"):
         assert 2 <= len(json.loads((song / "meta.json").read_text())["sources"]) <= 3
+
+
+def test_group_loss_rewards_outputs_that_sum_to_the_stems():
+    from priism.model.distill import group_loss
+
+    torch.manual_seed(0)
+    refs = torch.randn(1, 3, 2, 800)
+    good = torch.stack([0.5 * refs[0, 0], 0.5 * refs[0, 0], refs[0, 1], refs[0, 2]])[None]
+    bad = torch.randn(1, 4, 2, 800)
+    assert group_loss(good, refs)[1] > 25 > group_loss(bad, refs)[1]
+
+
+def test_msst_training_with_real_song_distillation(tmp_path):
+    import os
+
+    import numpy as np
+    import soundfile as sf
+
+    from priism.gen.song import write_song
+    from priism.model.train import train
+
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    pytest.importorskip("rotary_embedding_torch")
+    bands = ", ".join(["2"] * 24 + ["4"] * 8 + ["8"] * 4 + ["17"])  # 129 bins for n_fft 256
+    cfg = tmp_path / "small.yaml"
+    cfg.write_text(f"""audio:
+  sample_rate: 22050
+model:
+  dim: 16
+  depth: 1
+  stereo: true
+  num_stems: 4
+  freqs_per_bands: !!python/tuple [{bands}]
+  dim_head: 8
+  heads: 2
+  stft_n_fft: 256
+  stft_hop_length: 64
+  stft_win_length: 256
+  flash_attn: false
+""")
+    write_song(1, tmp_path / "songs", duration_s=3, sample_rate=22050, n_sources=2)
+    (tmp_path / "real").mkdir()
+    sf.write(tmp_path / "real" / "a.flac", 0.1 * np.random.randn(22050 * 3, 2), 22050)
+    logs = []
+    h = train(tmp_path / "songs", tmp_path / "run", preset="msst", steps=2, batch=1, chunk_s=0.5, log_every=1,
+              msst={"config": cfg, "ckpt": None, "path": msst, "max_sources": 4}, real=tmp_path / "real",
+              real_every=1, log=logs.append)
+    assert "real_snr" in h[-1] and any("distillation on 1 real songs" in m for m in logs)
