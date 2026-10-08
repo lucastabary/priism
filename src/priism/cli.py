@@ -28,6 +28,14 @@ def _gen(args: argparse.Namespace) -> None:
     print(f"{len(folders)} songs written to {args.out}")
 
 
+def _fma(args: argparse.Namespace) -> None:
+    from .data import fma
+
+    out = fma.fetch(args.out, genres=args.genres or None, subset=args.subset, limit_per_genre=args.limit,
+                    meta_dir=args.metadata)
+    print(f"tracks and manifest.csv in {out}")
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -190,6 +198,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--sample-rate", type=int, default=44100)
     p.add_argument("--workers", type=int, default=1)
     p.set_defaults(func=_gen)
+
+    p = sub.add_parser("fma", help="download chosen genres of the Free Music Archive (real songs, no stems)")
+    p.add_argument("--out", required=True, help="output folder (<id>.mp3 + manifest.csv)")
+    p.add_argument("--genres", nargs="*", help="FMA genre titles; default: electronic/dub genres useful to Priism")
+    p.add_argument("--subset", choices=["full", "large"], default="full", help="full tracks or 30 s clips")
+    p.add_argument("--limit", type=int, default=200, help="tracks per genre")
+    p.add_argument("--metadata", help="folder holding tracks.csv/genres.csv (fetched if missing)")
+    p.set_defaults(func=_fma)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
