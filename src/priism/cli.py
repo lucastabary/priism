@@ -40,7 +40,10 @@ def _train_sep(args: argparse.Namespace) -> None:
     from .model.train import train
 
     train(args.data, args.out, preset=args.preset, steps=args.steps, batch=args.batch, chunk_s=args.chunk,
-          lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy)
+          lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy, valid=args.valid,
+          save_every=args.save_every, log_every=args.log_every, core_lr_scale=args.core_lr_scale,
+          msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
+                "max_sources": args.max_sources} if args.preset == "msst" else None)
 
 
 def _synth(args: argparse.Namespace) -> None:
@@ -219,7 +222,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("train-sep", help="train the class-agnostic attractor separator on songs from `priism gen`")
     p.add_argument("--data", required=True, help="folder of generated songs")
     p.add_argument("--out", required=True, help="run folder (config.json, model.pt, history.json)")
-    p.add_argument("--preset", choices=["tiny", "small", "base"], default="tiny")
+    p.add_argument("--preset", choices=["tiny", "small", "base", "msst"], default="tiny",
+                   help="msst: pretrained MSST BS-RoFormer core (--msst-config/--msst-ckpt/--msst-path)")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--chunk", type=float, default=3.0, help="seconds per training crop")
@@ -227,6 +231,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument("--workers", type=int, default=0, help="data loader processes")
     p.add_argument("--lossy", type=float, default=0.0, help="probability of an MP3/AAC/Opus pass on the mix")
+    p.add_argument("--valid", help="folder of fixed validation songs, scored at every save")
+    p.add_argument("--save-every", type=int, default=1000, help="steps between checkpoints (resumable last.pt)")
+    p.add_argument("--log-every", type=int, default=10)
+    p.add_argument("--core-lr-scale", type=float, default=0.1, help="learning-rate factor of the pretrained core")
+    p.add_argument("--msst-config", help="MSST YAML of the pretrained model")
+    p.add_argument("--msst-ckpt", help="its checkpoint")
+    p.add_argument("--msst-path", help="MSST checkout")
+    p.add_argument("--max-sources", type=int, default=16, help="attractor slots of the msst preset")
     p.set_defaults(func=_train_sep)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")

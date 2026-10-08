@@ -128,8 +128,16 @@ passe dans la voie CPU, les autres dans la voie GPU. Une ligne
    autres dossiers). Le volume survit à l'arrêt du pod ; les résultats se
    rapatrient aussi par `priism pod pull runs --url ... --dest <dossier>`.
 
-Jobs actuels : 0200 récupère les genres électroniques et dub de FMA (morceaux
-réels sans stems, plafonné à 90 Go et arrêt s'il reste moins de 15 Go sur le
-volume), 0210 rend le jeu de validation fixe du générateur v2. Les jobs du
-premier plan (4 stems fixes, fine-tune acid, spécialistes LoRA) sont archivés
-dans `pod/jobs-v1/` et ne sont plus mis en file.
+Jobs actuels :
+- 0200 et 0210 (CPU) rendent les chansons du générateur v2 : 200 de
+  validation et 1500 d'entraînement, 30 s chacune (~35 Go en tout).
+- 0300 (GPU) : 500 pas du séparateur à attracteurs sur le cœur
+  BS-Roformer-SW pré-entraîné, pour vérifier la mémoire et le début
+  d'apprentissage ; 0310 enchaîne le long entraînement (reprend depuis
+  `last.pt` si le pod a été arrêté).
+- 0230 (CPU, après les chansons synthétiques) récupère les genres
+  électroniques et dub de FMA (plafonné à 60 Go, arrêt s'il reste moins de
+  15 Go sur le volume).
+
+Les jobs du premier plan (4 stems fixes, fine-tune acid, spécialistes LoRA)
+sont archivés dans `pod/jobs-v1/` et ne sont plus mis en file.

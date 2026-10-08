@@ -2,7 +2,7 @@
 
 The pretrained band-split core keeps everything it knows about music. Its
 fixed per-stem mask estimators are replaced by one estimator, initialised from
-a pretrained one (``other`` by default) and conditioned by FiLM on each
+a pretrained one (``other``, index 2 in BS-Roformer-SW) and conditioned by FiLM on each
 attractor. FiLM starts near identity, so at step 0 every slot behaves like the
 pretrained head and training only has to teach slots to specialise.
 
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .separator import AttractorDecoder
 
@@ -40,9 +41,10 @@ def load_msst_roformer(config_path: str | Path, ckpt_path: str | Path | None, ms
 
 class MsstAttractorSeparator(nn.Module):
     def __init__(self, roformer: nn.Module, max_sources: int = 16, decoder_depth: int = 2, heads: int = 8,
-                 init_head: int = -1, film_init_std: float = 0.01):
+                 init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False):
         super().__init__()
         self.r = roformer
+        self.grad_checkpoint = grad_checkpoint  # recompute activations in backward: long chunks fit in 24 GB
         dim = roformer.final_norm.gamma.shape[-1]
         self.attractors = AttractorDecoder(dim, heads, decoder_depth, max_sources)
         self.film = nn.Linear(dim, 2 * dim)
@@ -73,15 +75,27 @@ class MsstAttractorSeparator(nn.Module):
             if r.skip_connection:
                 for j in range(i):
                     x = x + store[j]
-            x = rearrange(x, "b t f d -> b f t d")
-            x, ps = pack([x], "* t d")
-            x, = unpack(time_t(x), ps, "* t d")
-            x = rearrange(x, "b f t d -> b t f d")
-            x, ps = pack([x], "* f d")
-            x, = unpack(freq_t(x), ps, "* f d")
+            x = self._ckpt(self._axial, x, time_t, freq_t)
             if r.skip_connection:
                 store[i] = x
         return r.final_norm(x), stft_repr, window
+
+    def _ckpt(self, fn, *args):
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            return checkpoint(fn, *args, use_reentrant=False)
+        return fn(*args)
+
+    @staticmethod
+    def _axial(x, time_t, freq_t):
+        from einops import pack, rearrange, unpack
+
+        x = rearrange(x, "b t f d -> b f t d")
+        x, ps = pack([x], "* t d")
+        x, = unpack(time_t(x), ps, "* t d")
+        x = rearrange(x, "b f t d -> b t f d")
+        x, ps = pack([x], "* f d")
+        x, = unpack(freq_t(x), ps, "* f d")
+        return x
 
     def forward(self, mix: torch.Tensor) -> dict[str, torch.Tensor]:
         from einops import rearrange
@@ -93,7 +107,7 @@ class MsstAttractorSeparator(nn.Module):
         K = a.shape[1]
         gamma, beta = self.film(a).chunk(2, dim=-1)
         xk = x[:, None] * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]  # (B, K, T, Nb, D)
-        mask = self.head(xk.flatten(0, 1))  # (B*K, T, F*C*2)
+        mask = self._ckpt(self.head, xk.flatten(0, 1))  # (B*K, T, F*C*2)
         mask = rearrange(mask, "(b k) t (f c) -> b k f t c", b=B, c=2)
         spec = torch.view_as_complex(stft_repr.contiguous())[:, None] * torch.view_as_complex(mask.contiguous())
         spec = rearrange(spec, "b k (f s) t -> (b k s) f t", s=C)
