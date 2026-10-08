@@ -12,6 +12,8 @@ W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
 # This job needs the corrected generator: update the checkout (the running jobs already imported theirs).
 git -C priism pull -q --ff-only
+# 0331's last fallback runs the old code: if it got through anyway, keep its stage D.
+if [ -f runs/gen-real-d/DONE ]; then echo "stage D already done by 0331"; exit 0; fi
 rm -rf runs/gen-real-d runs/gen-real-d-failed-*
 # Training songs are generated on the pod's local disk while the GPU trains
 # (rolling pool, nothing stored on the volume). Most CPU cores generate.
