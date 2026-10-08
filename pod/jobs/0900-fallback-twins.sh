@@ -17,7 +17,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=${PRIISM_SURGE_P:-0.6} PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=${PRIISM_SURGE_P:-0.6} PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5 PRIISM_TWIN_SPREAD=0.8
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 INIT=runs/curr-c/model.pt
 for r in gen-real-d surge-e twins-f; do [ -f runs/$r/DONE ] && INIT=runs/$r/model.pt; done

@@ -109,3 +109,26 @@ def test_multi_twins_give_three_or_more_parts_of_one_instrument(monkeypatch):
     monkeypatch.setattr(song, "TWIN_P", 0.3)
     monkeypatch.setattr(song, "TWIN_EXTRA_P", 0.0)
     assert [song.plan_song(seed, 30.0) for seed in range(40)] == base  # off by default: songs unchanged
+
+
+def test_twin_spread_moves_the_twin_sound_only(monkeypatch):
+    from priism.gen import song
+
+    monkeypatch.setattr(song, "TWIN_P", 1.0)
+    base = {"cutoff": 800.0, "res": 0.5, "osc": "saw", "drive": 0.0}
+    assert song._drift(base, song._PATCH_DRIFT, 1) == base  # spread 0: exact copy
+    monkeypatch.setattr(song, "TWIN_SPREAD", 1.0)
+    moved = song._drift(base, song._PATCH_DRIFT, 1)
+    assert moved["osc"] == "saw" and moved["cutoff"] != 800.0 and base["cutoff"] == 800.0
+    assert 100 <= moved["cutoff"] <= 12000 and 0 <= moved["res"] <= 0.9
+    for seed in range(30):
+        _, _, meta = song.render_song(seed, duration_s=4, sample_rate=22050)
+        tw = [s for s in meta["sources"] if s["twin_of"] is not None and s["merge_group"] is None
+              and s["kind"] not in song.DRUM_KINDS]
+        if tw:
+            orig = meta["sources"][tw[0]["twin_of"]]
+            key = "synth" if orig["kind"] == "acid" else "patch"
+            if key in orig["params"] and "surge_patch" not in orig["params"]:
+                assert tw[0]["params"][key] != orig["params"][key]
+                return
+    raise AssertionError("no tonal twin in 30 songs")

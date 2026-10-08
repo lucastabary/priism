@@ -5,6 +5,8 @@
 # GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
 # pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
 # Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
+# Twins drift from their original's sound (PRIISM_TWIN_SPREAD 1): an easier, realistic step toward
+# separating identical twins; the twin validation sets keep exact copies (the hard case).
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -23,7 +25,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.4
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.4 PRIISM_TWIN_SPREAD=1.0
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.

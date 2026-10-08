@@ -27,6 +27,28 @@ TWIN_P = float(os.environ.get("PRIISM_TWIN_P", "0.3"))
 # Share of twin songs where the instrument plays 3 or 4 parts (several melodic 303s, several hat patterns...).
 # Drawn from its own generator: with the default 0, every song stays exactly as before.
 TWIN_EXTRA_P = float(os.environ.get("PRIISM_TWIN_EXTRA_P", "0"))
+# How far a twin's sound may drift from its original's (filter, resonance, envelope, drive): each twin
+# draws a drift in [0, PRIISM_TWIN_SPREAD]. Real "two 303s" rarely share every knob; 0 (default) keeps
+# exact copies and every song as before (own generator).
+TWIN_SPREAD = float(os.environ.get("PRIISM_TWIN_SPREAD", "0"))
+_ACID_DRIFT = {"cutoff_hz": (80, 3000), "resonance": (0.0, 0.97), "env_mod_oct": (0.3, 6.0), "decay_s": (0.05, 2.0),
+               "accent_amount": (0.1, 1.0), "gate_fraction": (0.3, 0.9)}
+_PATCH_DRIFT = {"cutoff": (100, 12000), "res": (0.0, 0.9), "env_oct": (0.0, 5.0), "f_decay": (0.02, 1.5),
+                "decay": (0.03, 2.0), "drive": (0.0, 2.0), "detune_cents": (0.0, 50.0)}
+
+
+def _drift(params: dict, ranges: dict, seed: int) -> dict:
+    """A twin's copy of its original's settings, each knob moved by up to the drawn spread (log scale)."""
+    if TWIN_SPREAD <= 0:
+        return dict(params)
+    rng = np.random.default_rng(seed + 555)
+    spread = rng.uniform(0, TWIN_SPREAD)
+    out = dict(params)
+    for k, (lo, hi) in ranges.items():
+        if isinstance(out.get(k), (int, float)) and not isinstance(out[k], bool):
+            v = max(float(out[k]), 1e-3) * float(np.exp(rng.normal(0, 0.7 * spread)))
+            out[k] = float(np.clip(v if out[k] > 0 else v - 1e-3, lo, hi))
+    return out
 TWINNABLE = ["acid", "lead", "arp", "pluck", "stab", "bass", "hat_closed", "conga"]
 AMBIGUOUS_P = 0.06  # share of songs with an indistinguishable pair (same patch, same register, interleaved notes)
 AMBIGUOUS_KINDS = ["lead", "arp", "pluck", "bass"]
@@ -199,7 +221,7 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
         synth = None
         shift = 0
         if s["twin_of"] is not None and s["twin_of"] in twin_state:
-            synth = twin_state[s["twin_of"]]["synth"]
+            synth = _drift(twin_state[s["twin_of"]]["synth"], _ACID_DRIFT, s["seed"])
             shift = int(rng.choice([0, 1]))
         y, info = tonal.render_acid(h, s["role"] or str(rng.choice(["rhythmic", "melodic"])), n, sr, bpm, rng,
                                     s["seed"], synth=synth, octave_shift=shift)
@@ -212,7 +234,7 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
         y, info = tonal.render_noise_fx(bars, plan["block_starts"], n, sr, bpm, rng)
     else:
         if s["twin_of"] is not None and s["twin_of"] in twin_state:
-            patch = dict(twin_state[s["twin_of"]]["patch"])
+            patch = _drift(twin_state[s["twin_of"]]["patch"], _PATCH_DRIFT, s["seed"])
             surge_patch = twin_state[s["twin_of"]].get("surge_patch")  # a twin keeps its original's instrument
         else:
             patch = tonal.sample_patch(kind, rng)

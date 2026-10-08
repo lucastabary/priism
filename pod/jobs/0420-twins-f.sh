@@ -5,6 +5,7 @@
 # GPU: stage F, twins. Continues stage E with 70 % of songs holding a twin pair (same instrument,
 # two parts) and a 3x heavier count loss: B left twins merged and output too few tracks.
 # Judge F on valid_gen_valid_twins_* and the NI songs (data/gen_valid is the old generator).
+# Twins drift less from their original's sound than in E (PRIISM_TWIN_SPREAD 0.6): toward exact copies.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -23,7 +24,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5 PRIISM_TWIN_SPREAD=0.6
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
