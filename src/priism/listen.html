@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Écoute · __TITLE__</title>
+<style>
+:root{--bg:#f7f7f5;--panel:#ffffff;--fg:#1c1c1a;--muted:#77756f;--line:#e2e1dc;--accent:#2f6fde;--wave:#2f6fde;--off:#c9c7c0;--mix:#b4561f;--loop:rgba(47,111,222,.12);--head:#d6331f;--ctl:360px}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--panel:#1f1f1d;--fg:#ecebe6;--muted:#9a988f;--line:#33322f;--accent:#7aa7ff;--wave:#7aa7ff;--off:#4a4945;--mix:#e58a4e;--loop:rgba(122,167,255,.16);--head:#ff6b55;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#161615;--panel:#1f1f1d;--fg:#ecebe6;--muted:#9a988f;--line:#33322f;--accent:#7aa7ff;--wave:#7aa7ff;--off:#4a4945;--mix:#e58a4e;--loop:rgba(122,167,255,.16);--head:#ff6b55;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,sans-serif}
+main{max-width:1200px;margin:auto;padding:16px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-bottom:12px}
+h1{font-size:18px;margin:0;font-weight:600}
+a{color:var(--accent)}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:2;background:var(--bg);display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 0 12px;border-bottom:1px solid var(--line);margin-bottom:8px}
+button{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;min-width:32px}
+button:hover{border-color:var(--muted)}
+button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+button.mute.on{background:var(--muted);border-color:var(--muted)}
+#play{min-width:96px;font-weight:600}
+.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:6px 0 0 6px}.seg button:last-child{border-radius:0 6px 6px 0;border-left:0}
+.seg button.on.mixb{background:var(--mix);border-color:var(--mix)}
+#time{font-variant-numeric:tabular-nums;min-width:130px}
+#loop{color:var(--muted)}
+.hint{color:var(--muted);font-size:12px;margin:4px 0 12px}
+.rows{position:relative}
+.row{display:grid;grid-template-columns:var(--ctl) 1fr;gap:8px;align-items:center;padding:3px 0}
+.ctl{display:flex;align-items:center;gap:6px;min-width:0}
+.key{color:var(--muted);width:16px;text-align:right;font-variant-numeric:tabular-nums;font-size:12px}
+.name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.db{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;width:44px;text-align:right}
+.ctl button{padding:2px 0;width:28px;min-width:28px;font-size:12px}
+input[type=range]{width:64px;accent-color:var(--accent)}
+canvas{width:100%;height:44px;display:block;background:var(--panel);border-radius:4px;cursor:crosshair;touch-action:none}
+.row.mixrow canvas{height:56px}
+.row.silent .name{color:var(--muted)}
+.group{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;padding:10px 0 2px}
+.overlay{position:absolute;top:0;bottom:0;left:calc(var(--ctl) + 8px);right:0;pointer-events:none}
+.head{position:absolute;top:0;bottom:0;width:2px;background:var(--head);transform:translateX(-1px)}
+.loopr{position:absolute;top:0;bottom:0;background:var(--loop);border-left:1px solid var(--accent);border-right:1px solid var(--accent);display:none}
+#status{color:var(--muted)}
+@media (max-width:700px){:root{--ctl:180px}input[type=range],.db{display:none}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>__TITLE__</h1><span id="status">Décodage…</span><span id="back"></span></header>
+<div class="bar">
+  <button id="play" disabled>▶ Lecture</button>
+  <span id="time">0:00.0 / 0:00.0</span>
+  <span class="seg" id="modeseg"><button id="mPistes" class="on">Pistes</button><button id="mMix" class="mixb">Mix original</button></span>
+  <span id="loop"></span>
+</div>
+<div class="hint">Espace lecture/pause · clic sur une forme d'onde : aller à · glisser : boucle · ←/→ ±5 s · X mix/pistes · 1–9, 0 : solo exclusif d'une piste · Échap : tout réinitialiser · Maj+clic sur S : solo exclusif</div>
+<div class="rows" id="rows"><div class="overlay"><div class="loopr" id="loopr"></div><div class="head" id="head"></div></div></div>
+</main>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const $ = id => document.getElementById(id);
+const ctx = new (window.AudioContext || window.webkitAudioContext)();
+const master = ctx.createGain(); master.connect(ctx.destination);
+const rows = []; let mixRow = null, mode = 'pistes', dur = 0;
+let playing = false, t0 = 0, off = 0, nodes = [], loop = null, drag = null;
+
+if (D.back) $('back').innerHTML = '<a href="' + D.back + '">← tous les morceaux</a>';
+
+function b64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; }
+function fmt(t) { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - 60 * m; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1); }
+function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+
+function makeRow(t, isMix, idx) {
+  const r = { name: t.name, entry: t, isMix, mute: false, solo: false, vol: 1, buf: null, gain: ctx.createGain() };
+  r.gain.connect(master);
+  const row = el('div', 'row' + (isMix ? ' mixrow' : '')), c = el('div', 'ctl');
+  c.append(el('span', 'key', isMix ? '' : (idx < 10 ? String((idx + 1) % 10) : '')));
+  const n = el('span', 'name', isMix ? 'Mix original' : t.name); n.title = t.name; c.append(n);
+  r.dbEl = el('span', 'db', ''); c.append(r.dbEl);
+  if (!isMix) {
+    r.mBtn = el('button', 'mute', 'M'); r.mBtn.title = 'Couper';
+    r.sBtn = el('button', 'solo', 'S'); r.sBtn.title = 'Solo (Maj+clic : exclusif)';
+    r.mBtn.onclick = () => { r.mute = !r.mute; mode = 'pistes'; apply(); };
+    r.sBtn.onclick = e => { if (e.shiftKey) exclusive(r); else { r.solo = !r.solo; mode = 'pistes'; apply(); } };
+    c.append(r.mBtn, r.sBtn);
+  }
+  const v = el('input'); v.type = 'range'; v.min = 0; v.max = 2; v.step = 0.01; v.value = 1; v.title = 'Volume';
+  v.oninput = () => { r.vol = +v.value; apply(); }; v.ondblclick = () => { v.value = 1; r.vol = 1; apply(); };
+  c.append(v);
+  r.canvas = el('canvas'); row.append(c, r.canvas); r.row = row;
+  wireCanvas(r.canvas);
+  $('rows').append(row);
+  return r;
+}
+
+function build() {
+  if (D.mix) { mixRow = makeRow(D.mix, true, -1); }
+  let i = 0;
+  const showGroups = D.groups.length > 1 || (D.groups[0] && D.groups[0].name);
+  for (const g of D.groups) {
+    if (showGroups) $('rows').append(el('div', 'group', (g.name || 'pistes') + ' · ' + g.tracks.length));
+    for (const t of g.tracks) rows.push(makeRow(t, false, i++));
+  }
+  if (!mixRow) $('modeseg').style.display = 'none';
+}
+
+async function decodeAll() {
+  const all = (mixRow ? [mixRow] : []).concat(rows);
+  let done = 0;
+  for (const r of all) {
+    r.buf = await ctx.decodeAudioData(b64(r.entry.data));
+    r.entry.data = null;
+    dur = Math.max(dur, r.buf.duration);
+    let s = 0, n = 0; for (let c = 0; c < r.buf.numberOfChannels; c++) { const d = r.buf.getChannelData(c); for (let i = 0; i < d.length; i += 4) { s += d[i] * d[i]; n++; } }
+    r.rms = 10 * Math.log10(s / Math.max(n, 1) + 1e-12);
+    r.dbEl.textContent = r.rms < -90 ? '−∞' : r.rms.toFixed(0) + ' dB'; r.dbEl.title = 'Niveau RMS (dBFS)';
+    $('status').textContent = 'Décodage ' + (++done) + '/' + all.length + '…';
+  }
+  $('status').textContent = rows.length + ' pistes · ' + fmt(dur);
+  $('play').disabled = false;
+  drawAll(); apply(); tick();
+}
+
+function peaks(buf, w) {
+  const out = new Float32Array(w), per = dur * buf.sampleRate / w, chans = [];
+  for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
+  for (let x = 0; x < w; x++) {
+    const a = Math.floor(x * per), b = Math.min(Math.floor((x + 1) * per), buf.length); let m = 0;
+    for (const d of chans) for (let i = a; i < b; i += 2) { const v = Math.abs(d[i]); if (v > m) m = v; }
+    out[x] = m;
+  }
+  return out;
+}
+
+function draw(r) {
+  if (!r.buf) return;
+  const cv = r.canvas, dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.floor(cv.clientWidth * dpr)), h = Math.floor(cv.clientHeight * dpr);
+  if (!r.pk || r.pk.length !== w) r.pk = peaks(r.buf, w);
+  cv.width = w; cv.height = h;
+  const g = cv.getContext('2d'), css = getComputedStyle(document.documentElement);
+  let top = 0; for (const v of r.pk) if (v > top) top = v;
+  g.fillStyle = css.getPropertyValue(r.audible ? (r.isMix ? '--mix' : '--wave') : '--off').trim();
+  const mid = h / 2, k = top > 0 ? (h / 2 - 1) / top : 0;
+  for (let x = 0; x < w; x++) { const y = Math.max(0.5, r.pk[x] * k); g.fillRect(x, mid - y, 1, 2 * y); }
+}
+function drawAll() { for (const r of (mixRow ? [mixRow] : []).concat(rows)) draw(r); }
+
+function apply() {
+  const anySolo = rows.some(r => r.solo);
+  for (const r of rows) {
+    r.audible = mode === 'pistes' && !r.mute && (!anySolo || r.solo);
+    r.gain.gain.setTargetAtTime(r.audible ? r.vol : 0, ctx.currentTime, 0.008);
+    r.mBtn.classList.toggle('on', r.mute); r.sBtn.classList.toggle('on', r.solo);
+    r.row.classList.toggle('silent', !r.audible);
+  }
+  if (mixRow) {
+    mixRow.audible = mode === 'mix';
+    mixRow.gain.gain.setTargetAtTime(mixRow.audible ? mixRow.vol : 0, ctx.currentTime, 0.008);
+    mixRow.row.classList.toggle('silent', !mixRow.audible);
+  }
+  $('mPistes').classList.toggle('on', mode === 'pistes'); $('mMix').classList.toggle('on', mode === 'mix');
+  drawAll();
+}
+
+function exclusive(r) {
+  const only = r.solo && rows.every(o => o === r || !o.solo);
+  for (const o of rows) o.solo = false;
+  r.solo = !only; mode = 'pistes'; apply();
+}
+
+function pos() {
+  if (!playing) return off;
+  let p = off + ctx.currentTime - t0;
+  if (loop && off < loop[1] && p >= loop[1]) p = loop[0] + (p - loop[0]) % (loop[1] - loop[0]);
+  return Math.max(0, p);
+}
+
+function start() {
+  ctx.resume();
+  const when = ctx.currentTime + 0.04;
+  nodes = [];
+  for (const r of (mixRow ? [mixRow] : []).concat(rows)) {
+    const s = ctx.createBufferSource(); s.buffer = r.buf;
+    if (loop) { s.loop = true; s.loopStart = loop[0]; s.loopEnd = loop[1]; }
+    s.connect(r.gain); s.start(when, Math.min(off, r.buf.duration)); nodes.push(s);
+  }
+  t0 = when; playing = true; $('play').textContent = '❚❚ Pause';
+}
+function stop() { off = pos(); for (const s of nodes) { try { s.stop(); } catch (e) {} } nodes = []; playing = false; $('play').textContent = '▶ Lecture'; }
+function toggle() { if (playing) stop(); else start(); }
+function seek(t) {
+  t = Math.min(Math.max(0, t), dur);
+  if (loop && (t < loop[0] || t > loop[1])) { loop = null; showLoop(); }
+  const was = playing; if (was) stop(); off = t; if (was) start();
+}
+function setLoop(a, b) {
+  loop = b - a > 0.05 ? [a, b] : null;
+  if (loop && (pos() < a || pos() > b)) seek(a); else if (playing) { stop(); start(); }
+  showLoop();
+}
+function showLoop() {
+  const lr = $('loopr');
+  if (!loop) { lr.style.display = 'none'; $('loop').textContent = ''; return; }
+  lr.style.display = 'block'; lr.style.left = (100 * loop[0] / dur) + '%'; lr.style.width = (100 * (loop[1] - loop[0]) / dur) + '%';
+  $('loop').innerHTML = 'Boucle ' + fmt(loop[0]) + ' – ' + fmt(loop[1]) + ' <button id="noloop" title="Supprimer la boucle">✕</button>';
+  $('noloop').onclick = () => setLoop(0, 0);
+}
+
+function wireCanvas(cv) {
+  const at = e => { const b = cv.getBoundingClientRect(); return Math.min(Math.max(0, (e.clientX - b.left) / b.width), 1) * dur; };
+  cv.addEventListener('pointerdown', e => { if (!dur) return; cv.setPointerCapture(e.pointerId); drag = { x: e.clientX, t: at(e) }; });
+  cv.addEventListener('pointermove', e => {
+    if (!drag || Math.abs(e.clientX - drag.x) < 5) return;
+    const t = at(e), a = Math.min(drag.t, t), b = Math.max(drag.t, t), lr = $('loopr');
+    lr.style.display = 'block'; lr.style.left = (100 * a / dur) + '%'; lr.style.width = (100 * (b - a) / dur) + '%';
+  });
+  cv.addEventListener('pointerup', e => {
+    if (!drag) return; const d = drag; drag = null;
+    if (Math.abs(e.clientX - d.x) < 5) seek(d.t);
+    else { const t = at(e); setLoop(Math.min(d.t, t), Math.max(d.t, t)); }
+  });
+}
+
+function tick() {
+  let p = pos();
+  if (playing && !loop && p >= dur) { stop(); off = 0; p = 0; }
+  $('head').style.left = (dur ? 100 * p / dur : 0) + '%';
+  $('time').textContent = fmt(p) + ' / ' + fmt(dur);
+  requestAnimationFrame(tick);
+}
+
+$('play').onclick = toggle;
+$('mPistes').onclick = () => { mode = 'pistes'; apply(); };
+$('mMix').onclick = () => { mode = 'mix'; apply(); };
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+  if (!dur) return;
+  if (e.key === ' ') { e.preventDefault(); toggle(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); seek(pos() - (e.shiftKey ? 1 : 5)); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); seek(pos() + (e.shiftKey ? 1 : 5)); }
+  else if (e.key === 'Home') seek(loop ? loop[0] : 0);
+  else if ((e.key === 'x' || e.key === 'X') && mixRow) { mode = mode === 'mix' ? 'pistes' : 'mix'; apply(); }
+  else if (/^[0-9]$/.test(e.key)) { const r = rows[(+e.key + 9) % 10]; if (r) exclusive(r); }
+  else if (e.key === 'Escape') { for (const r of rows) { r.solo = false; r.mute = false; } mode = 'pistes'; setLoop(0, 0); apply(); }
+});
+let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(drawAll, 150); });
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawAll);
+
+build();
+decodeAll().catch(err => { $('status').textContent = 'Erreur de décodage : ' + err; });
+</script>
+</body>
+</html>

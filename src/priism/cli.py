@@ -51,6 +51,13 @@ def _train_sep(args: argparse.Namespace) -> None:
                 "max_sources": args.max_sources} if args.preset == "msst" else None)
 
 
+def _listen(args: argparse.Namespace) -> None:
+    from .listen import build
+
+    for page in build(args.folders, out=args.out, bitrate=args.bitrate):
+        print(page)
+
+
 def _eval_sep(args: argparse.Namespace) -> None:
     from .model.evaluate import evaluate_folder
 
@@ -269,6 +276,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
     p.add_argument("--limit", type=int, help="first N songs only")
     p.set_defaults(func=_eval_sep)
+
+    p = sub.add_parser("listen", help="HTML page to play a mix and its tracks in sync (mute, solo, loop)")
+    p.add_argument("folders", nargs="+", help="song folders (mix.* + tracks or subfolders of tracks), "
+                   "or a folder of songs (one page each + index.html)")
+    p.add_argument("--out", help="page path for a single song (default <folder>/ecoute.html)")
+    p.add_argument("--bitrate", help="re-encode every file to MP3 at this bitrate (e.g. 128k) for a lighter page")
+    p.set_defaults(func=_listen)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
