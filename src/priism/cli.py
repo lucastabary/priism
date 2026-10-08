@@ -69,6 +69,36 @@ def _split(args: argparse.Namespace) -> None:
                    device=args.device, msst_path=args.msst_path, start_s=args.start, duration_s=args.duration)
 
 
+def _mixit_tags(args: argparse.Namespace) -> None:
+    import csv
+    import json as _json
+    from pathlib import Path
+
+    from .data.tempo_key import describe, find_pairs
+
+    files = []
+    for x in args.inputs:
+        x = Path(x)
+        files += sorted(f for f in x.rglob("*") if f.suffix.lower() in (".mp3", ".flac", ".wav", ".mp4", ".m4a")) \
+            if x.is_dir() else [x]
+    tags = {}
+    for f in files:
+        try:
+            tags[str(f)] = describe(str(f))
+        except Exception as e:  # one unreadable file must not stop the batch
+            print(f"{f}: {e!r}")
+            continue
+        print(f"{f.name}\t{tags[str(f)]['bpm']}\t{tags[str(f)]['key']}", flush=True)
+    with open(args.out, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["file", "bpm", "key", "tonic", "mode", "key_strength"])
+        for f, t in tags.items():
+            w.writerow([f, t["bpm"], t["key"], t["tonic"], t["mode"], t["key_strength"]])
+    pairs = find_pairs(tags, args.max_shift, args.max_stretch)
+    with_partner = len({p[0] for p in pairs} | {p[1] for p in pairs})
+    print(_json.dumps({"songs": len(tags), "pairs": len(pairs), "songs_with_a_partner": with_partner}))
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -293,6 +323,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
     p.set_defaults(func=_split)
+
+    p = sub.add_parser("mixit-tags", help="tempo and key of real songs, and how many MixIT pairs they give")
+    p.add_argument("inputs", nargs="+", help="audio files or folders")
+    p.add_argument("--out", required=True, help="TSV of tempo and key per file")
+    p.add_argument("--max-shift", type=int, default=2, help="largest pitch-shift to align two songs (semitones)")
+    p.add_argument("--max-stretch", type=float, default=0.06, help="largest tempo change (0.06 = 6 %%)")
+    p.set_defaults(func=_mixit_tags)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
