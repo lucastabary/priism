@@ -8,6 +8,7 @@ or a scalar. A source's effects (delay, reverb) stay in its own track.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ import soundfile as sf
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
-from . import drums, tonal
+from . import drums, surge, tonal
 from .fx import apply_fx, sample_fx
 from .genres import DRUM_KINDS, GENRES
 
@@ -32,6 +33,18 @@ LEVEL_DB = {"kick": 0, "snare": -4, "clap": -5, "rim": -13, "hat_closed": -15, "
             "crash": -18, "tom": -9, "cowbell": -16, "clave": -17, "conga": -12, "shaker": -19,
             "sub": -2, "bass": -2, "acid": -6, "skank": -9, "stab": -8, "pad": -10, "lead": -9, "arp": -12,
             "pluck": -12, "siren": -15, "noise_fx": -18}
+# Share of bass, lead, pad, pluck, arp and stab parts played by Surge XT patches (needs surgepy).
+# Opt-in (PRIISM_SURGE_P=0.6 for example), so a run never changes data because surgepy got installed.
+SURGE_P = float(os.environ.get("PRIISM_SURGE_P", "0"))
+_SURGE: list[bool] = []
+
+
+def _surge_ok() -> bool:
+    if not _SURGE:
+        _SURGE.append(surge.available())
+    return _SURGE[0]
+
+
 FAMILY = {**{k: "drums" for k in DRUM_KINDS}, "sub": "bass", "bass": "bass", "acid": "synth", "skank": "chords",
           "stab": "chords", "pad": "chords", "lead": "melody", "arp": "melody", "pluck": "melody", "siren": "fx",
           "noise_fx": "fx"}
@@ -186,8 +199,13 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
     else:
         if s["twin_of"] is not None and s["twin_of"] in twin_state:
             patch = dict(twin_state[s["twin_of"]]["patch"])
+            surge_patch = twin_state[s["twin_of"]].get("surge_patch")  # a twin keeps its original's instrument
         else:
             patch = tonal.sample_patch(kind, rng)
+            # Own generator for this choice, so songs without Surge stay exactly as before.
+            srng = np.random.default_rng(s["seed"] + 4242)
+            surge_patch = surge.sample_patch(kind, srng) if (
+                kind in surge.KINDS and srng.random() < SURGE_P and _surge_ok()) else None
         split = s["split_notes"]
         # A split pair draws its notes from the group's own generator, then each keeps every other note.
         nrng = np.random.default_rng(plan["sources"][s["merge_group"]]["seed"] + 99) if split else rng
@@ -203,8 +221,14 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
             notes = tonal.melody_notes(kind, h, bars, nrng)
         if split:
             notes = sorted(notes, key=lambda x: (x.start, x.pitch))[0 if split == "even" else 1::2]
-        y = tonal.render_notes(notes, patch, n, sr, bpm, rng)
+        y = surge.render_notes(notes, surge_patch, n, sr, bpm) if surge_patch else None
+        if y is not None and not np.sqrt(np.mean(y ** 2)) > 1e-5:  # some patches need a controller to sound
+            y, surge_patch = None, None
+        if y is None:
+            y = tonal.render_notes(notes, patch, n, sr, bpm, rng)
         info = {"patch": patch, "notes": len(notes)}
+        if surge_patch:
+            info["surge_patch"] = surge_patch
     return y, info
 
 
