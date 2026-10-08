@@ -38,12 +38,26 @@ def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module,
         import yaml
 
         m = dict(msst or {})
-        roformer = load_msst_roformer(m["config"], m.get("ckpt"), m["path"])
-        model = MsstAttractorSeparator(roformer, max_sources=m.get("max_sources", 16), grad_checkpoint=True)
+        ckpt = m.get("ckpt")
+        roformer = load_msst_roformer(m["config"], ckpt if ckpt not in (None, "None") else None, m["path"])
+        model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True)
         sr = yaml.load(Path(m["config"]).read_text(), Loader=yaml.FullLoader)["audio"]["sample_rate"]
-        return model, sr, {"preset": preset, **{k: str(v) for k, v in m.items()}}
+        return model, sr, {"preset": preset, **{k: str(v) if isinstance(v, Path) else v for k, v in m.items()}}
     cfg = PRESETS[preset]
     return AttractorSeparator(cfg), cfg.sample_rate, {"preset": preset, **cfg.to_dict()}
+
+
+def load_run(run: str | Path, device: str = "cpu", msst_path: str | Path | None = None) -> tuple[torch.nn.Module, int]:
+    """Trained model (weights of ``run/model.pt``) and its sample rate. The MSST checkout can be moved."""
+    cfg = json.loads((Path(run) / "config.json").read_text())
+    preset = cfg.pop("preset")
+    if preset == "msst":
+        cfg = {**cfg, "ckpt": None, **({"path": msst_path} if msst_path else {})}
+        model, sr, _ = build_model(preset, cfg)
+    else:
+        model, sr, _ = build_model(preset)
+    model.load_state_dict(torch.load(Path(run) / "model.pt", map_location="cpu"))
+    return model.to(device).eval(), sr
 
 
 def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps: int = 200, batch: int = 4,

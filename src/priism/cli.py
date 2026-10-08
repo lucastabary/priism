@@ -49,6 +49,13 @@ def _train_sep(args: argparse.Namespace) -> None:
                 "max_sources": args.max_sources} if args.preset == "msst" else None)
 
 
+def _eval_sep(args: argparse.Namespace) -> None:
+    from .model.evaluate import evaluate_folder
+
+    evaluate_folder(args.run, args.data, args.out, segment_s=args.segment, segments=args.segments,
+                    device=args.device, msst_path=args.msst_path, limit=args.limit)
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -247,6 +254,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-path", help="MSST checkout")
     p.add_argument("--max-sources", type=int, default=16, help="attractor slots of the msst preset")
     p.set_defaults(func=_train_sep)
+
+    p = sub.add_parser("eval-sep", help="score a train-sep run on real songs with grouped stems (NI .stem.mp4)")
+    p.add_argument("--run", required=True, help="run folder of train-sep (config.json + model.pt)")
+    p.add_argument("--data", required=True, help="folder of .stem.mp4 files (optional INDEX.tsv)")
+    p.add_argument("--out", required=True, help="writes summary.json and per_song.json")
+    p.add_argument("--segment", type=float, default=8.0, help="seconds per scored excerpt")
+    p.add_argument("--segments", type=int, default=3, help="excerpts per song")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
+    p.add_argument("--limit", type=int, help="first N songs only")
+    p.set_defaults(func=_eval_sep)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")

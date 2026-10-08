@@ -112,3 +112,12 @@ def test_streamed_songs_feed_training(tmp_path):
     it = iter(LiveSongs(tmp_path / "pool", chunk_s=1.0, sample_rate=22050))
     mix, tg = next(it)
     assert mix.shape == (2, 22050) and tg.shape[1:] == (2, 22050)
+
+
+def test_group_outputs_sums_outputs_into_their_stem():
+    from priism.model.evaluate import group_outputs
+
+    torch.manual_seed(0)
+    refs = torch.randn(3, 2, 500)
+    est = torch.stack([0.6 * refs[0], 0.4 * refs[0], refs[2], refs[1]])
+    torch.testing.assert_close(group_outputs(est, refs), refs)
