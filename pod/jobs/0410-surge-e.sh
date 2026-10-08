@@ -1,4 +1,4 @@
-# after: 0330 0400
+# after: 0330 0401
 # GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
 # pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
 # Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
@@ -7,7 +7,7 @@ W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
 # This job needs the Surge generator: update the checkout (the running jobs already imported theirs).
 git -C priism pull -q --ff-only
-python3 -c "import surgepy" || { echo "surgepy missing: job 0400 must build it first"; exit 1; }
+python3 -c "import surgepy" || { echo "surgepy missing: job 0401 must build it first"; exit 1; }
 # Training songs are generated on the pod's local disk while the GPU trains
 # (rolling pool, nothing stored on the volume). Most CPU cores generate.
 # nproc can show every core of the host: the container's CPU quota is the real limit.
