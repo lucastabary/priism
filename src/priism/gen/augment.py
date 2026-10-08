@@ -18,10 +18,10 @@ def lossy(mix: np.ndarray, sr: int, codec: str = "mp3", kbps: int = 192) -> np.n
     enc, fmt = CODECS[codec]
     pcm = np.ascontiguousarray(mix, dtype=np.float32).tobytes()
     rate = 48000 if codec == "opus" else sr  # opus only runs at 48 kHz
-    encode = ["ffmpeg", "-loglevel", "error", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "-",
+    encode = ["ffmpeg", "-loglevel", "error", "-threads", "1", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", "-",
               "-ar", str(rate), "-c:a", enc, "-b:a", f"{kbps}k", "-f", fmt, "-"]
     coded = subprocess.run(encode, input=pcm, capture_output=True, check=True).stdout
-    decode = ["ffmpeg", "-loglevel", "error", "-i", "-", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-"]
+    decode = ["ffmpeg", "-loglevel", "error", "-threads", "1", "-i", "-", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-"]
     out = np.frombuffer(subprocess.run(decode, input=coded, capture_output=True, check=True).stdout, np.float32)
     out = out.reshape(-1, 2)
     # Encoders add a few ms of priming delay: align on the cross-correlation peak, then trim/pad.
