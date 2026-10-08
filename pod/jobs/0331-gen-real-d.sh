@@ -36,10 +36,10 @@ run() {
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
-# A failed probe tries prepared fallbacks (lower learning rate, lighter count loss) before giving up,
+# A probe that fails the gate tries prepared fallbacks (a crash stops the job: it needs a fix) (lower learning rate, lighter count loss) before giving up,
 # so the GPU keeps learning something useful when nobody is there to fix the queue.
 ALT=""
-probe() { run --stop-at 1000 "$@" && python3 priism/pod/probe_gate.py runs/gen-real-d; }
+probe() { run --stop-at 1000 "$@" || exit 1; python3 priism/pod/probe_gate.py runs/gen-real-d; }
 if ! probe; then
   ok=""
   for alt in "--lr 5e-5" "--exist-weight 1" "--lr 5e-5 --exist-weight 1"; do

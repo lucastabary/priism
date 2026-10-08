@@ -49,6 +49,8 @@ class RealCrops(IterableDataset):
                     x = f.read(self.chunk, dtype="float32", always_2d=True)
             except (RuntimeError, OSError):  # an unreadable file is skipped, not fatal
                 continue
+            if x.shape[0] < self.chunk:  # mp3 lengths are estimates: a crop near the end can come out short
+                continue
             if x.shape[1] == 1:
                 x = np.repeat(x, 2, axis=1)
             if np.sqrt(np.mean(x**2)) < self.min_rms:
