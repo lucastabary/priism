@@ -61,3 +61,26 @@ def test_dataset_merges_groups_and_drops_silence(tmp_path):
         torch.testing.assert_close(tg.sum(0), mix, atol=1e-4, rtol=0)
     m, t, n = collate([ds[0], ds[1]])
     assert m.shape[0] == 2 and t.shape[0] == 2 and int(n.max()) == t.shape[1]
+
+
+def test_msst_attractor_separator_runs_on_a_small_roformer():
+    import os
+    import sys
+
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    sys.path.insert(0, msst)
+    pytest.importorskip("rotary_embedding_torch")
+    from models.bs_roformer.bs_roformer import BSRoformer
+
+    from priism.model.msst_core import MsstAttractorSeparator
+
+    bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)  # 129 bins for n_fft 256
+    r = BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
+                   stft_n_fft=256, stft_hop_length=64, stft_win_length=256, flash_attn=False)
+    model = MsstAttractorSeparator(r, max_sources=5, decoder_depth=1, heads=2)
+    mix = torch.randn(2, 2, 4096) * 0.1
+    out = model(mix)
+    assert out["sources"].shape == (2, 5, 2, 4096) and out["exist_logits"].shape == (2, 5)
+    out["sources"].abs().mean().backward()
