@@ -6,6 +6,8 @@ set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 # nproc can show every core of the host: the container's CPU quota is the real limit.
 N=$(nproc)
-if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then N=$(( q / per < N ? q / per : N )); fi
+if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then N=$(( q / per < N ? q / per : N ))
+elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ]; then  # cgroup v1
+  per=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us); N=$(( q / per < N ? q / per : N )); fi
 [ "$N" -ge 1 ] || N=1
 priism gen --out "$W/data/gen_valid" --count 64 --seed 900000000 --duration 30 --workers "$N"

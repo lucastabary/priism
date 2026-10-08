@@ -108,7 +108,7 @@ class MsstAttractorSeparator(nn.Module):
         gamma, beta = self.film(a).chunk(2, dim=-1)
         xk = x[:, None] * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]  # (B, K, T, Nb, D)
         mask = self._ckpt(self.head, xk.flatten(0, 1))  # (B*K, T, F*C*2)
-        mask = rearrange(mask, "(b k) t (f c) -> b k f t c", b=B, c=2)
+        mask = rearrange(mask.float(), "(b k) t (f c) -> b k f t c", b=B, c=2)  # complex math in fp32 under autocast
         spec = torch.view_as_complex(stft_repr.contiguous())[:, None] * torch.view_as_complex(mask.contiguous())
         spec = rearrange(spec, "b k (f s) t -> (b k s) f t", s=C)
         if r.zero_dc:

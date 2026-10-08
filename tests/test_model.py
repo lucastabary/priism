@@ -84,6 +84,8 @@ def test_msst_attractor_separator_runs_on_a_small_roformer():
     out = model(mix)
     assert out["sources"].shape == (2, 5, 2, 4096) and out["exist_logits"].shape == (2, 5)
     out["sources"].abs().mean().backward()
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # as on GPU (bf16): complex ops must stay in fp32
+        assert model(mix)["sources"].dtype == torch.float32
 
 
 def test_train_saves_and_resumes(tmp_path):
