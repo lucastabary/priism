@@ -68,6 +68,18 @@ def _eval_sep(args: argparse.Namespace) -> None:
                     device=args.device, msst_path=args.msst_path, limit=args.limit)
 
 
+def _eval_stems(args: argparse.Namespace) -> None:
+    from .model.eval_stems import evaluate, msst_fn, separator_fn
+
+    if args.run:
+        fn = separator_fn(args.run, args.device, args.msst_path, args.threshold)
+    else:
+        if not (args.msst_config and args.msst_ckpt):
+            raise SystemExit("give --run, or --msst-config and --msst-ckpt for a fixed-stem reference")
+        fn = msst_fn(args.msst_config, args.msst_ckpt, args.msst_path, args.device)
+    evaluate(fn, args.data, args.out, segment_s=args.segment, segments=args.segments, limit=args.limit)
+
+
 def _split(args: argparse.Namespace) -> None:
     from pathlib import Path as _P
 
@@ -328,6 +340,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
     p.add_argument("--limit", type=int, help="first N songs only")
     p.set_defaults(func=_eval_sep)
+
+    p = sub.add_parser("eval-stems", help="score per instrument on real multitracks, one file per instrument (mshoxxDB)")
+    p.add_argument("--run", help="run folder of train-sep; without it, a fixed-stem MSST model (--msst-*)")
+    p.add_argument("--data", required=True, help="one folder per song holding <song>_<instrument>.flac")
+    p.add_argument("--out", required=True, help="writes summary.json and rows.json")
+    p.add_argument("--segment", type=float, default=8.0, help="seconds per scored excerpt")
+    p.add_argument("--segments", type=int, default=3, help="excerpts per song")
+    p.add_argument("--threshold", type=float, default=0.5, help="existence probability to keep an output")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--msst-config", help="reference model config (e.g. BS-Roformer-SW.yaml)")
+    p.add_argument("--msst-ckpt", help="reference model checkpoint")
+    p.add_argument("--msst-path", help="MSST checkout")
+    p.add_argument("--limit", type=int, help="first N songs only")
+    p.set_defaults(func=_eval_stems)
 
     p = sub.add_parser("listen", help="HTML page to play a mix and its tracks in sync (mute, solo, loop)")
     p.add_argument("folders", nargs="+", help="song folders (mix.* + tracks or subfolders of tracks), "
