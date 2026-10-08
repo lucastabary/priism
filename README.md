@@ -16,6 +16,29 @@ python -m venv .venv
 .venv/bin/pip install -e ".[fast]"           # numba, accélère le filtre de la 303
 ```
 
+## Générateur v2 : morceaux synthétiques, une piste par source
+
+Depuis octobre 2026, Priism vise une séparation **par identité de source**, sans
+classes imposées : deux 303 qui jouent en même temps doivent sortir sur deux
+pistes. `priism gen` fabrique les données pour ça : des extraits arrangés
+(techno, acid, dub techno, minimal, house, electro, breakbeat, dnb, dub,
+steppers, dubstep) de 2 à 16 sources, batterie séparée élément par élément,
+effets gardés dans la piste de leur instrument, et un master (compresseur,
+limiteur) appliqué de façon à ce que **la somme des pistes soit exactement le
+mix**. Environ 30 % des morceaux contiennent un « jumeau » : le même instrument
+qui joue une autre partie (303 rythmique + 303 mélodique, deux lignes de hats…).
+
+```bash
+priism gen --out data/songs --count 1000 --workers 8          # genres au hasard
+priism gen --out data/songs --count 50 --genre dnb            # un genre précis
+priism gen --genre list
+```
+
+Chaque morceau : `song_<graine>/mix.flac`, `sources/NN_<type>.flac` et
+`meta.json` (genre, tempo, harmonie, structure, et pour chaque source son type,
+son rôle, ses paramètres, ses mesures actives, ses effets, son jumeau
+éventuel). Tout se régénère depuis la graine.
+
 ## Générer des lignes acid synthétiques
 
 ```bash

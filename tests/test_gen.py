@@ -1,0 +1,61 @@
+import json
+
+import numpy as np
+import soundfile as sf
+
+from priism.gen.genres import GENRES
+from priism.gen.song import MAX_SOURCES, MIN_SOURCES, plan_song, render_song, write_song
+
+
+def test_mix_is_sum_of_tracks():
+    mix, tracks, meta = render_song(3, duration_s=8, sample_rate=22050)
+    assert mix.shape[1] == 2
+    assert len(tracks) == len(meta["sources"])
+    np.testing.assert_allclose(mix, np.sum(tracks, axis=0), atol=1e-5)
+    assert np.max(np.abs(mix)) <= 1.0
+
+
+def test_same_seed_same_song():
+    a, _, ma = render_song(11, duration_s=6, sample_rate=22050)
+    b, _, mb = render_song(11, duration_s=6, sample_rate=22050)
+    np.testing.assert_array_equal(a, b)
+    assert [s["kind"] for s in ma["sources"]] == [s["kind"] for s in mb["sources"]]
+
+
+def test_every_track_is_heard():
+    for seed in range(3):
+        _, tracks, meta = render_song(seed, duration_s=10, sample_rate=22050)
+        for s, t in zip(meta["sources"], tracks):
+            assert np.max(np.abs(t)) > 1e-4, (seed, s["kind"])
+
+
+def test_source_count_and_genres_covered():
+    counts, genres = set(), set()
+    for seed in range(200):
+        plan = plan_song(seed, duration_s=30)
+        n = len(plan["sources"])
+        assert MIN_SOURCES <= n <= MAX_SOURCES
+        counts.add(n)
+        genres.add(plan["genre"])
+    assert counts == set(range(MIN_SOURCES, MAX_SOURCES + 1))
+    assert genres == set(GENRES)
+
+
+def test_twin_acid_lines_have_two_roles():
+    for seed in range(400):
+        plan = plan_song(seed, duration_s=30, genre="acid")
+        twins = [s for s in plan["sources"] if s["twin_of"] is not None and s["kind"] == "acid"]
+        if twins:
+            orig = plan["sources"][twins[0]["twin_of"]]
+            assert {orig["role"], twins[0]["role"]} == {"rhythmic", "melodic"}
+            return
+    raise AssertionError("no acid twin in 400 acid songs")
+
+
+def test_write_song(tmp_path):
+    folder = write_song(5, tmp_path, duration_s=6, sample_rate=22050)
+    meta = json.loads((folder / "meta.json").read_text())
+    mix, sr = sf.read(folder / "mix.flac")
+    assert sr == 22050
+    total = sum(sf.read(folder / s["file"])[0] for s in meta["sources"])
+    np.testing.assert_allclose(mix, total, atol=1e-4)  # 24-bit files

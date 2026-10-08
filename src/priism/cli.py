@@ -14,6 +14,20 @@ def _acid(args: argparse.Namespace) -> None:
     print(f"{len(files)} acid lines written to {args.out}")
 
 
+def _gen(args: argparse.Namespace) -> None:
+    from .gen.genres import GENRES
+    from .gen.song import generate
+
+    if args.genre == "list":
+        print(" ".join(GENRES))
+        return
+    if not args.out:
+        sys.exit("--out is required")
+    folders = generate(args.out, args.count, start_seed=args.seed, duration_s=args.duration,
+                       sample_rate=args.sample_rate, genre=args.genre, workers=args.workers)
+    print(f"{len(folders)} songs written to {args.out}")
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -166,6 +180,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--sample-rate", type=int, default=44100)
     p.add_argument("--workers", type=int, default=1)
     p.set_defaults(func=_synth)
+
+    p = sub.add_parser("gen", help="generate synthetic songs, one track per source (generator v2)")
+    p.add_argument("--out", help="output folder")
+    p.add_argument("--count", type=int, default=10)
+    p.add_argument("--seed", type=int, default=0, help="first seed; song i uses seed + i")
+    p.add_argument("--duration", type=float, default=75.0, help="approximate seconds per song (whole bars)")
+    p.add_argument("--genre", help="force a genre ('list' shows them); random by default")
+    p.add_argument("--sample-rate", type=int, default=44100)
+    p.add_argument("--workers", type=int, default=1)
+    p.set_defaults(func=_gen)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
