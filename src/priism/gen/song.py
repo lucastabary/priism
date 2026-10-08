@@ -24,6 +24,9 @@ MIN_SOURCES, MAX_SOURCES = 2, 16
 # Share of songs with a deliberate "same instrument, different part" pair. PRIISM_TWIN_P raises it for training
 # runs that focus on twins (the threshold does not change the random stream: other songs stay identical).
 TWIN_P = float(os.environ.get("PRIISM_TWIN_P", "0.3"))
+# Share of twin songs where the instrument plays 3 or 4 parts (several melodic 303s, several hat patterns...).
+# Drawn from its own generator: with the default 0, every song stays exactly as before.
+TWIN_EXTRA_P = float(os.environ.get("PRIISM_TWIN_EXTRA_P", "0"))
 TWINNABLE = ["acid", "lead", "arp", "pluck", "stab", "bass", "hat_closed", "conga"]
 AMBIGUOUS_P = 0.06  # share of songs with an indistinguishable pair (same patch, same register, interleaved notes)
 AMBIGUOUS_KINDS = ["lead", "arp", "pluck", "bass"]
@@ -135,6 +138,15 @@ def plan_song(seed: int, duration_s: float = 75.0, genre: str | None = None, n_s
                      bars=_activity(src["kind"], block_starts, energy, n_bars, rng, backbone=False))
             if src["kind"] == "acid":
                 src["role"], v["role"] = "rhythmic", "melodic"
+            xrng = np.random.default_rng(seed + 777)
+            if xrng.random() < TWIN_EXTRA_P:
+                more = [s for s in victims if s is not v]
+                for w in xrng.permutation(len(more))[:int(xrng.integers(1, 3))]:
+                    w = more[int(w)]
+                    w.update(kind=src["kind"], family=src["family"], twin_of=src["id"],
+                             bars=_activity(src["kind"], block_starts, energy, n_bars, xrng, backbone=False))
+                    if src["kind"] == "acid":  # any mix: two melodic lines over one rhythmic loop, or the reverse
+                        w["role"] = str(xrng.choice(["rhythmic", "melodic"]))
 
     # Ambiguous case: one part split note by note between two identical instruments. No ear can tell
     # them apart, so both tracks share a merge group: the training loss accepts them in a single output.

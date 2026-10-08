@@ -87,3 +87,25 @@ def test_lossy_keeps_length_and_alignment():
     assert y.shape == x.shape
     err = np.sqrt(np.mean((y[sr:2 * sr] - x[sr:2 * sr]) ** 2)) / np.sqrt(np.mean(x**2))
     assert err < 0.2
+
+
+def test_multi_twins_give_three_or_more_parts_of_one_instrument(monkeypatch):
+    from priism.gen import song
+
+    base = [song.plan_song(seed, 30.0) for seed in range(40)]
+    monkeypatch.setattr(song, "TWIN_P", 1.0)
+    monkeypatch.setattr(song, "TWIN_EXTRA_P", 1.0)
+    groups = 0
+    for seed in range(40):
+        plan = song.plan_song(seed, 30.0)
+        by_src: dict = {}
+        for s in plan["sources"]:
+            if s["twin_of"] is not None and s["merge_group"] is None:
+                by_src.setdefault(s["twin_of"], []).append(s)
+        for orig, ts in by_src.items():
+            assert all(t["kind"] == plan["sources"][orig]["kind"] for t in ts)
+            groups += len(ts) >= 2
+    assert groups >= 10
+    monkeypatch.setattr(song, "TWIN_P", 0.3)
+    monkeypatch.setattr(song, "TWIN_EXTRA_P", 0.0)
+    assert [song.plan_song(seed, 30.0) for seed in range(40)] == base  # off by default: songs unchanged
