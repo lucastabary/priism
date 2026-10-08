@@ -25,11 +25,13 @@ TWINNABLE = ["acid", "lead", "arp", "pluck", "stab", "bass", "hat_closed", "cong
 AMBIGUOUS_P = 0.06  # share of songs with an indistinguishable pair (same patch, same register, interleaved notes)
 AMBIGUOUS_KINDS = ["lead", "arp", "pluck", "bass"]
 
-# Typical level of each kind relative to the kick, in dB (before random jitter).
-LEVEL_DB = {"kick": 0, "snare": -3, "clap": -4, "rim": -10, "hat_closed": -11, "hat_open": -12, "ride": -14,
-            "crash": -15, "tom": -9, "cowbell": -13, "clave": -14, "conga": -11, "shaker": -15,
-            "sub": -3, "bass": -4, "acid": -6, "skank": -8, "stab": -8, "pad": -11, "lead": -8, "arp": -11,
-            "pluck": -11, "siren": -13, "noise_fx": -15}
+# Typical level of each kind relative to the kick, in dB (before random jitter). Bright percussion sits lower
+# and basses higher than in the first version: real mixes have 2.4x less energy at 2-8 kHz and more at 60-250 Hz
+# (docs/ecart-synth-reel.md).
+LEVEL_DB = {"kick": 0, "snare": -4, "clap": -5, "rim": -13, "hat_closed": -15, "hat_open": -16, "ride": -18,
+            "crash": -18, "tom": -9, "cowbell": -16, "clave": -17, "conga": -12, "shaker": -19,
+            "sub": -2, "bass": -2, "acid": -6, "skank": -9, "stab": -8, "pad": -10, "lead": -9, "arp": -12,
+            "pluck": -12, "siren": -15, "noise_fx": -18}
 FAMILY = {**{k: "drums" for k in DRUM_KINDS}, "sub": "bass", "bass": "bass", "acid": "synth", "skank": "chords",
           "stab": "chords", "pad": "chords", "lead": "melody", "arp": "melody", "pluck": "melody", "siren": "fx",
           "noise_fx": "fx"}
@@ -42,10 +44,11 @@ def _sections(n_bars: int, rng: np.random.Generator) -> tuple[list[int], list[fl
     n_blocks = max(1, n_bars // 4)
     energy = []
     for b in range(n_blocks):
+        # Real tracks move twice as much in level as the first version did: quieter intros, more breaks.
         if b == 0:
-            e = rng.uniform(0.2, 0.6)
-        elif rng.random() < 0.15:
-            e = rng.uniform(0.1, 0.4)  # break
+            e = rng.uniform(0.05, 0.5)
+        elif rng.random() < 0.3:
+            e = rng.uniform(0.05, 0.3)  # break
         else:
             e = min(1.0, energy[-1] + rng.uniform(-0.2, 0.4))
         energy.append(float(e))

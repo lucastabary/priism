@@ -10,6 +10,8 @@ from ..dsp import feedback_delay, reverb_ir, saturate
 
 CENTERED = {"kick", "sub", "bass", "snare", "clap"}
 NO_SPACE = {"kick", "sub"}  # never sent to delay or reverb
+DRUMLIKE = {"snare", "clap", "rim", "hat_closed", "hat_open", "ride", "crash", "tom", "cowbell", "clave", "conga",
+            "shaker", "noise_fx"}
 
 
 def sample_fx(kind: str, genre: str, rng: np.random.Generator) -> dict:
@@ -18,21 +20,25 @@ def sample_fx(kind: str, genre: str, rng: np.random.Generator) -> dict:
     tonal_hi = kind not in ("kick", "sub", "bass", "tom", "conga")
     delay_p = 0.0 if kind in NO_SPACE else (0.55 if dubby else 0.2) * (1.0 if tonal_hi else 0.4)
     reverb_p = 0.0 if kind in NO_SPACE else (0.6 if dubby else 0.35)
-    pan = 0.0 if kind in CENTERED else float(np.clip(rng.normal(0, 0.45), -0.9, 0.9))
+    # Real mixes keep most energy in the centre (side/mid energy ~0.05 on NI stems, see docs/ecart-synth-reel.md).
+    pan = 0.0 if kind in CENTERED else float(np.clip(rng.normal(0, 0.25), -0.8, 0.8))
     return {
         "highpass_hz": float(np.exp(u(np.log(20), np.log(400)))) if kind not in ("kick", "sub", "bass", "tom") else 20.0,
-        "lowpass_hz": float(np.exp(u(np.log(4000), np.log(20000)))),
+        # Synths are often darker in real tracks than raw oscillators: a lowpass on most tonal sources.
+        "lowpass_hz": float(np.exp(u(np.log(1500), np.log(9000)))) if (tonal_hi and kind not in DRUMLIKE
+                                                                        and rng.random() < 0.6)
+        else float(np.exp(u(np.log(5000), np.log(20000)))),
         "sweep_oct": float(u(1.5, 5.0)) if (tonal_hi and rng.random() < 0.2) else 0.0,  # automated filter opening
         "sweep_bars": float(rng.choice([4, 8, 16])),
         "drive": float(rng.choice([0.0, u(0.1, 1.0)], p=[0.7, 0.3])),
         "pan": pan,
-        "width": float(u(0.0, 0.7)) if kind not in CENTERED else 0.0,
+        "width": float(u(0.0, 0.4)) if (kind not in CENTERED and rng.random() < 0.5) else 0.0,
         "delay_send": float(u(0.1, 0.6)) if rng.random() < delay_p else 0.0,
         "delay_steps_l": int(rng.choice([2, 3, 4, 6, 8])),
         "delay_steps_r": int(rng.choice([2, 3, 4, 6, 8])),
         "delay_feedback": float(u(0.2, 0.8 if dubby else 0.6)),
         "delay_lowpass_hz": float(u(1200, 7000)),
-        "reverb_send": float(u(0.05, 0.5)) if rng.random() < reverb_p else 0.0,
+        "reverb_send": float(u(0.03, 0.3)) if rng.random() < reverb_p else 0.0,
         "reverb_rt60_s": float(u(0.4, 4.0)),
         "spring": bool(dubby and rng.random() < 0.5),
         "sidechain": float(u(0.3, 0.9)) if kind in ("bass", "sub", "pad", "stab", "acid", "arp", "lead", "skank") and rng.random() < 0.35 else 0.0,

@@ -69,7 +69,7 @@ def test_ambiguous_pair_splits_one_part():
             break
     else:
         raise AssertionError("no ambiguous pair in 3000 songs")
-    a, b = pair
+    a, b = sorted(pair, key=lambda s: s["twin_of"] is not None)  # the original first, whatever the ids
     assert a["merge_group"] == b["merge_group"] == a["id"] and b["twin_of"] == a["id"]
     _, tracks, meta = render_song(seed, duration_s=20, sample_rate=22050)
     ta, tb = tracks[a["id"]], tracks[b["id"]]
