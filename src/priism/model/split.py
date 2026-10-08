@@ -130,9 +130,9 @@ def split_song(model_fn: ModelFn, mix: np.ndarray, sr: int, window_s: float = 8.
     tracks.sort(key=lambda t: -float(np.mean(t.audio ** 2)))
     audio = [t.audio for t in tracks]
     rest = mix - (np.sum(audio, axis=0) if audio else 0.0)
-    info = [{"windows": len(t.windows), "first_s": round(starts[t.windows[0]] / sr, 2),
-             "last_s": round(min(starts[t.windows[-1]] + win, S) / sr, 2),
-             "rms_db": round(10 * np.log10(np.mean(t.audio ** 2) / mix_power + 1e-12), 1)} for t in tracks]
+    info = [{"windows": len(t.windows), "first_s": round(float(starts[t.windows[0]] / sr), 2),
+             "last_s": round(float(min(starts[t.windows[-1]] + win, S) / sr), 2),
+             "rms_db": round(float(10 * np.log10(np.mean(t.audio ** 2) / mix_power + 1e-12)), 1)} for t in tracks]
     return audio, rest, info
 
 
