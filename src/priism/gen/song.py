@@ -22,6 +22,8 @@ from .genres import DRUM_KINDS, GENRES
 MIN_SOURCES, MAX_SOURCES = 2, 16
 TWIN_P = 0.3  # share of songs with a deliberate "same instrument, different part" pair
 TWINNABLE = ["acid", "lead", "arp", "pluck", "stab", "bass", "hat_closed", "conga"]
+AMBIGUOUS_P = 0.06  # share of songs with an indistinguishable pair (same patch, same register, interleaved notes)
+AMBIGUOUS_KINDS = ["lead", "arp", "pluck", "bass"]
 
 # Typical level of each kind relative to the kick, in dB (before random jitter).
 LEVEL_DB = {"kick": 0, "snare": -3, "clap": -4, "rim": -10, "hat_closed": -11, "hat_open": -12, "ride": -14,
@@ -101,7 +103,7 @@ def plan_song(seed: int, duration_s: float = 75.0, genre: str | None = None, n_s
     sources = []
     for i, kind in enumerate(kinds):
         sources.append({"id": i, "kind": kind, "family": FAMILY[kind], "seed": int(rng.integers(2**31)),
-                        "role": None, "twin_of": None, "merge_group": None,
+                        "role": None, "twin_of": None, "merge_group": None, "split_notes": None,
                         "bars": _activity(kind, block_starts, energy, n_bars, rng, backbone=kind in g.required)})
 
     # Hard case: the same instrument playing a second, different part (two 303s, two hat patterns...).
@@ -115,6 +117,20 @@ def plan_song(seed: int, duration_s: float = 75.0, genre: str | None = None, n_s
                      bars=_activity(src["kind"], block_starts, energy, n_bars, rng, backbone=False))
             if src["kind"] == "acid":
                 src["role"], v["role"] = "rhythmic", "melodic"
+
+    # Ambiguous case: one part split note by note between two identical instruments. No ear can tell
+    # them apart, so both tracks share a merge group: the training loss accepts them in a single output.
+    def free(s):
+        return s["twin_of"] is None and not any(o["twin_of"] == s["id"] for o in sources)
+    cands = [s for s in sources if s["kind"] in AMBIGUOUS_KINDS and free(s)]
+    if cands and len(sources) >= 3 and rng.random() < AMBIGUOUS_P:
+        src = cands[int(rng.integers(len(cands)))]
+        victims = [s for s in sources if s is not src and s["kind"] not in g.required and free(s)]
+        if victims:
+            v = victims[int(rng.integers(len(victims)))]
+            v.update(kind=src["kind"], family=src["family"], twin_of=src["id"], bars=list(src["bars"]))
+            src["merge_group"] = v["merge_group"] = src["id"]
+            src["split_notes"], v["split_notes"] = "even", "odd"
 
     return {"seed": seed, "genre": g.name, "bpm": bpm, "swing": float(rng.uniform(*g.swing)), "n_bars": n_bars,
             "harmony": harmony, "block_starts": block_starts, "energy": energy, "sources": sources,
@@ -169,16 +185,21 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
             patch = dict(twin_state[s["twin_of"]]["patch"])
         else:
             patch = tonal.sample_patch(kind, rng)
+        split = s["split_notes"]
+        # A split pair draws its notes from the group's own generator, then each keeps every other note.
+        nrng = np.random.default_rng(plan["sources"][s["merge_group"]]["seed"] + 99) if split else rng
         if kind == "bass":
-            notes, over = tonal.bass_notes(plan["bass_style"] if s["twin_of"] is None
-                                           else str(rng.choice(tonal.BASS_STYLES[:4])), h, bars, rng)
+            style = plan["bass_style"] if s["twin_of"] is None or split else str(rng.choice(tonal.BASS_STYLES[:4]))
+            notes, over = tonal.bass_notes(style, h, bars, nrng)
             patch.update(over)
         elif kind == "sub":
             notes = tonal.sub_notes(h, bars, rng)
         elif kind in ("stab", "pad"):
             notes = tonal.chord_notes(kind, h, bars, rng)
         else:
-            notes = tonal.melody_notes(kind, h, bars, rng)
+            notes = tonal.melody_notes(kind, h, bars, nrng)
+        if split:
+            notes = sorted(notes, key=lambda x: (x.start, x.pitch))[0 if split == "even" else 1::2]
         y = tonal.render_notes(notes, patch, n, sr, bpm, rng)
         info = {"patch": patch, "notes": len(notes)}
     return y, info

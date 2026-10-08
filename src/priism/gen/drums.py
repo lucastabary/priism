@@ -44,8 +44,25 @@ def _metal(n: int, sr: int, scale: float, rng: np.random.Generator) -> np.ndarra
     return sum(np.sign(np.sin(2 * np.pi * (f * scale * t + p))) for f, p in zip(METAL_HZ, ph)) / len(METAL_HZ)
 
 
-def sample_voice(kind: str, rng: np.random.Generator) -> dict:
-    """Random settings for one drum element (a 'kit piece')."""
+LAYERS = {"kick": "kick", "snare": "clap", "clap": "snare"}  # producers stack these into one sound
+LAYER_P = 0.25
+
+
+def sample_voice(kind: str, rng: np.random.Generator, allow_layer: bool = True) -> dict:
+    """Random settings for one drum element (a 'kit piece').
+
+    Kicks, snares and claps are sometimes two sounds always triggered together (a layer). A layer
+    is one source: it plays as one, and nothing in the signal can split it.
+    """
+    v = _sample_voice(kind, rng)
+    if allow_layer and kind in LAYERS and rng.random() < LAYER_P:
+        v["layer_kind"] = LAYERS[kind]
+        v["layer"] = _sample_voice(LAYERS[kind], rng)
+        v["layer_gain"] = float(rng.uniform(0.3, 0.9))
+    return v
+
+
+def _sample_voice(kind: str, rng: np.random.Generator) -> dict:
     u = rng.uniform
     if kind == "kick":
         long = rng.random() < 0.35  # 808-style boom vs 909-style punch
@@ -81,6 +98,15 @@ def sample_voice(kind: str, rng: np.random.Generator) -> dict:
 
 def render_voice(kind: str, v: dict, sr: int, rng: np.random.Generator) -> np.ndarray:
     """One hit at full velocity, mono."""
+    y = _render_voice(kind, v, sr, rng)
+    if "layer" in v:
+        z = v["layer_gain"] * _render_voice(v["layer_kind"], v["layer"], sr, rng)
+        n = max(len(y), len(z))
+        y = np.pad(y, (0, n - len(y))) + np.pad(z, (0, n - len(z)))
+    return y
+
+
+def _render_voice(kind: str, v: dict, sr: int, rng: np.random.Generator) -> np.ndarray:
     noise = lambda n: rng.uniform(-1, 1, n)  # noqa: E731
     if kind == "kick":
         n = int((v["decay"] * 5 + 0.02) * sr)

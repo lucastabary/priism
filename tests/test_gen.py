@@ -59,3 +59,31 @@ def test_write_song(tmp_path):
     assert sr == 22050
     total = sum(sf.read(folder / s["file"])[0] for s in meta["sources"])
     np.testing.assert_allclose(mix, total, atol=1e-4)  # 24-bit files
+
+
+def test_ambiguous_pair_splits_one_part():
+    for seed in range(3000):
+        plan = plan_song(seed, duration_s=20)
+        pair = [s for s in plan["sources"] if s["split_notes"]]
+        if pair:
+            break
+    else:
+        raise AssertionError("no ambiguous pair in 3000 songs")
+    a, b = pair
+    assert a["merge_group"] == b["merge_group"] == a["id"] and b["twin_of"] == a["id"]
+    _, tracks, meta = render_song(seed, duration_s=20, sample_rate=22050)
+    ta, tb = tracks[a["id"]], tracks[b["id"]]
+    assert np.max(np.abs(ta)) > 1e-4 and np.max(np.abs(tb)) > 1e-4
+    assert meta["sources"][a["id"]]["params"]["patch"]["osc"] == meta["sources"][b["id"]]["params"]["patch"]["osc"]
+
+
+def test_lossy_keeps_length_and_alignment():
+    from priism.gen.augment import lossy
+
+    sr = 22050
+    t = np.arange(sr * 3) / sr
+    x = np.stack([np.sin(2 * np.pi * 440 * t), np.sin(2 * np.pi * 660 * t)], axis=1).astype(np.float32) * 0.5
+    y = lossy(x, sr, "mp3", 128)
+    assert y.shape == x.shape
+    err = np.sqrt(np.mean((y[sr:2 * sr] - x[sr:2 * sr]) ** 2)) / np.sqrt(np.mean(x**2))
+    assert err < 0.2

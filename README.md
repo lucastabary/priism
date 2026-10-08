@@ -27,6 +27,12 @@ effets gardés dans la piste de leur instrument, et un master (compresseur,
 limiteur) appliqué de façon à ce que **la somme des pistes soit exactement le
 mix**. Environ 30 % des morceaux contiennent un « jumeau » : le même instrument
 qui joue une autre partie (303 rythmique + 303 mélodique, deux lignes de hats…).
+Environ 6 % contiennent une paire **ambiguë** (même patch, même registre, une
+même ligne répartie note à note entre deux pistes) : les deux pistes partagent
+un `merge_group`, la perte d'entraînement acceptera de les sortir ensemble. Un
+kick, une snare ou un clap peut être une **couche** de deux sons déclenchés
+ensemble : c'est une seule source. `priism.gen.augment` dégrade le mix seul
+(MP3, AAC, Opus) à l'entraînement, les cibles restent propres.
 
 ```bash
 priism gen --out data/songs --count 1000 --workers 8          # genres au hasard
