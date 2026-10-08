@@ -1,18 +1,18 @@
-# after: 0330 0331 0401 0402 0403
+# after: 0330 0402 0403
 # Every 2nd step also distils the pretrained BS-Roformer-SW on real FMA songs (outputs grouped per
 # teacher stem): fine-tuning on synthetic songs alone made the core forget real music (NI: SW +8.1 dB
 # per stem, our stage B +2.5 dB).
-# GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
-# pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
-# Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
+# GPU: stage D. Fine-tune of stage C on the corrected generator (centred stereo, darker,
+# more low-mids and dynamics, see docs/ecart-synth-reel.md), all songs (2 to 16 sources).
+# Twins first (Lucas): half the songs hold one instrument playing 2 to 4 parts, count loss 2x.
+# Validation still uses the old-generator set (data/gen_valid): judge D on the NI songs and the twin sets.
 set -euo pipefail
+# Rerun of 0330, which crashed on its first distillation step (teacher in bf16); starts clean.
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
-# Only from a finished stage (a failed probe leaves no DONE).
-test -f runs/gen-real-d/DONE
-# This job needs the Surge generator: update the checkout (the running jobs already imported theirs).
+# This job needs the corrected generator: update the checkout (the running jobs already imported theirs).
 git -C priism pull -q --ff-only
-python3 -c "import surgepy" || { echo "surgepy missing: job 0401 must build it first"; exit 1; }
+rm -rf runs/gen-real-d runs/gen-real-d-failed-*
 # Training songs are generated on the pod's local disk while the GPU trains
 # (rolling pool, nothing stored on the volume). Most CPU cores generate.
 # nproc can show every core of the host: the container's CPU quota is the real limit.
@@ -23,27 +23,27 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.4
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.4
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt \
+    --msst-path msst --max-sources 16 --init runs/curr-c/model.pt \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
-    --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/surge-e --exist-weight 2 \
-    --steps 10000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
+    --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/gen-real-d --exist-weight 2 \
+    --steps 6000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
 # A failed probe tries prepared fallbacks (lower learning rate, lighter count loss) before giving up,
 # so the GPU keeps learning something useful when nobody is there to fix the queue.
 ALT=""
-probe() { run --stop-at 1000 "$@" && python3 priism/pod/probe_gate.py runs/surge-e --min-gain 0; }
+probe() { run --stop-at 1000 "$@" && python3 priism/pod/probe_gate.py runs/gen-real-d; }
 if ! probe; then
   ok=""
   for alt in "--lr 5e-5" "--exist-weight 1" "--lr 5e-5 --exist-weight 1"; do
-    f=runs/surge-e-failed-$(date +%s); mv runs/surge-e "$f"; rm -f "$f/last.pt"
+    f=runs/gen-real-d-failed-$(date +%s); mv runs/gen-real-d "$f"; rm -f "$f/last.pt"
     echo "### fallback probe: $alt"
     if probe $alt; then ALT=$alt; ok=1; break; fi
   done
@@ -51,4 +51,4 @@ if ! probe; then
 fi
 # Full run; it stops by itself once 3 validations in a row gain nothing (stalled run, GPU freed).
 run $ALT --plateau 3
-touch runs/surge-e/DONE
+touch runs/gen-real-d/DONE

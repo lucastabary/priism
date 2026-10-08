@@ -77,6 +77,14 @@ def group_loss(est: torch.Tensor, refs: torch.Tensor, min_share: float = 1e-3) -
     return loss, float(-loss.detach())
 
 
+@torch.no_grad()
+def teacher_stems(teacher: torch.nn.Module, mix: torch.Tensor, chunk: int = 2) -> torch.Tensor:
+    """Teacher stems (B, J, C, S) in fp32, whatever autocast is active: the stock MSST model cannot run
+    its complex mask in bf16. Two crops at a time keep fp32 attention within memory."""
+    with torch.autocast(mix.device.type, enabled=False):
+        return torch.cat([teacher(m.float()).float() for m in mix.split(chunk)])
+
+
 def load_teacher(config: str | Path, ckpt: str | Path, msst_path: str | Path, device: str) -> torch.nn.Module:
     from .msst_core import load_msst_roformer
 

@@ -179,11 +179,10 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
         loss.backward()
         if teach and step % teach["every"] == 0:
             # Separate backward: both graphs at once would not fit in 24 GB.
-            from .distill import group_loss
+            from .distill import group_loss, teacher_stems
 
             real_mix = next(teach["it"]).to(device)
-            with torch.no_grad(), amp:
-                refs = teach["model"](real_mix).float()  # (B, stems, C, S)
+            refs = teacher_stems(teach["model"], real_mix)  # (B, stems, C, S)
             with amp:
                 ro = model(real_mix)
             rloss, stats["real_snr"] = group_loss(ro["sources"].float(), refs)

@@ -86,6 +86,12 @@ def test_msst_attractor_separator_runs_on_a_small_roformer():
     out["sources"].abs().mean().backward()
     with torch.autocast("cpu", dtype=torch.bfloat16):  # as on GPU (bf16): complex ops must stay in fp32
         assert model(mix)["sources"].dtype == torch.float32
+    from priism.model.distill import teacher_stems
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # the stock model as teacher, inside the bf16 training step
+        teacher = BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
+                             stft_n_fft=256, stft_hop_length=64, stft_win_length=256, flash_attn=False)
+        assert teacher_stems(teacher, torch.randn(3, 2, 4096) * 0.1).shape == (3, 4, 2, 4096)
 
 
 def test_train_saves_and_resumes(tmp_path):
