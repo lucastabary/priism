@@ -101,7 +101,21 @@ def test_train_saves_and_resumes(tmp_path):
     assert (tmp_path / "run" / "last.pt").exists() and "valid_sep_snr" in h[-1] and "valid_twins_sep_snr" in h[-1]
     logs = []
     h = train(tmp_path / "songs", tmp_path / "run", steps=4, **{**kw, "log": logs.append})
-    assert any("resumed at step 3" in m for m in logs) and [x["step"] for x in h] == [1, 2, 3, 4]
+    assert any("resumed at step 3" in m for m in logs) and [x["step"] for x in h] == [0, 1, 2, 3, 4]
+    assert "valid_twins_sep_snr" in h[0]  # starting point, to judge the run against
+
+
+def test_probe_stops_early_then_resumes(tmp_path):
+    from priism.gen.song import write_song
+    from priism.model.train import train
+
+    write_song(0, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
+    kw = dict(preset="tiny", batch=2, chunk_s=1.0, log_every=1, save_every=10, valid=tmp_path / "songs",
+              log=lambda m: None)
+    h = train(tmp_path / "songs", tmp_path / "run", steps=6, stop_at=2, **kw)
+    assert [x["step"] for x in h] == [0, 1, 2] and "valid_sep_snr" in h[-1]
+    h = train(tmp_path / "songs", tmp_path / "run", steps=6, **kw)
+    assert [x["step"] for x in h] == list(range(7))
 
 
 def test_streamed_songs_feed_training(tmp_path):

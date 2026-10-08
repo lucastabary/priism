@@ -23,10 +23,18 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 # host core (48) in every loader and generator, far above the 10-core quota.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.4
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
-priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-  --msst-path msst --max-sources 16 --init runs/curr-c/model.pt \
-  --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
-  --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/gen-real-d --exist-weight 2 \
-  --steps 6000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
-  --real data/fma --real-every 2 \
-  --save-every 1000 --log-every 50
+# Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
+# (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
+run() {
+  priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+    --msst-path msst --max-sources 16 --init runs/curr-c/model.pt \
+    --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
+    --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/gen-real-d --exist-weight 2 \
+    --steps 6000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
+    --real data/fma --real-every 2 \
+    --save-every 1000 --log-every 50 "$@"
+}
+run --stop-at 1000
+python3 priism/pod/probe_gate.py runs/gen-real-d
+run
+touch runs/gen-real-d/DONE

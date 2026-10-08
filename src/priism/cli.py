@@ -48,7 +48,7 @@ def _train_sep(args: argparse.Namespace) -> None:
           stream_songs=args.stream_songs, stream_duration=args.stream_duration, init=args.init,
           real=args.real, real_every=args.real_every, real_weight=args.real_weight,
           stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
-          log_every=args.log_every, core_lr_scale=args.core_lr_scale,
+          log_every=args.log_every, core_lr_scale=args.core_lr_scale, stop_at=args.stop_at,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
                 "max_sources": args.max_sources} if args.preset == "msst" else None)
 
@@ -304,6 +304,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lossy", type=float, default=0.0, help="probability of an MP3/AAC/Opus pass on the mix")
     p.add_argument("--valid", nargs="+", help="folders of fixed validation songs, scored at every save")
     p.add_argument("--exist-weight", type=float, default=1.0, help="weight of the source-count (existence) loss")
+    p.add_argument("--stop-at", type=int, default=None,
+                   help="end after this step, keeping the schedule of --steps (probe; rerun to resume)")
     p.add_argument("--save-every", type=int, default=1000, help="steps between checkpoints (resumable last.pt)")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--core-lr-scale", type=float, default=0.1, help="learning-rate factor of the pretrained core")

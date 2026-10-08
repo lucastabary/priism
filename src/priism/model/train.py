@@ -68,7 +68,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
-          real_weight: float = 1.0, log=print) -> list[dict]:
+          real_weight: float = 1.0, stop_at: int | None = None, log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
     With ``stream`` (a local folder), training songs are generated during training by
@@ -76,6 +76,9 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     ``init`` starts from the weights of an earlier run (``model.pt``), e.g. the previous curriculum stage.
     ``real`` (a folder of real songs, msst preset only) adds, every ``real_every`` steps, a distillation
     batch: the frozen pretrained model's stems guide our outputs grouped per stem (see distill.py).
+    ``stop_at`` ends after that step (saved) with the schedule of ``steps``: a short probe that a later
+    call with the same ``out`` resumes into the full run. A fresh run scores the validation sets at step 0
+    first, so a probe can be judged against its own starting point.
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
@@ -139,7 +142,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
         log(f"distillation on {len(rdl.dataset.files)} real songs, every {real_every} steps")
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-              save_every, log, exist_weight, teach)
+              save_every, log, exist_weight, teach, stop_at)
     finally:
         if pool:
             pool.stop()
@@ -147,11 +150,18 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
 
 def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-          save_every, log, exist_weight=1.0, teach=None):
+          save_every, log, exist_weight=1.0, teach=None, stop_at=None):
     t0 = time.time()
+    if start == 1 and vds:  # the starting point, to judge what the run brings
+        base = {"step": 0}
+        for name, ds in vds:
+            base.update({f"valid_{name}{k}": v for k, v in evaluate(model, ds, valid_items, device, amp).items()})
+        log(" ".join(f"{k}={v:.3g}" for k, v in base.items()))
+        history.append(base)
+    end = min(steps, stop_at) if stop_at else steps
     it = iter(dl)
     model.train()
-    for step in range(start, steps + 1):
+    for step in range(start, end + 1):
         try:
             mix, tg, n = next(it)
         except StopIteration:
@@ -181,12 +191,12 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
         stats.update(step=step, count_acc=count_accuracy(o["exist_logits"].detach(), n), sec=round(time.time() - t0, 1))
         if step % log_every == 0 or step == steps:
             log(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in stats.items()))
-        if (step % save_every == 0 or step == steps) and vds:
+        if (step % save_every == 0 or step == end) and vds:
             for name, ds in vds:
                 stats.update({f"valid_{name}{k}": v for k, v in evaluate(model, ds, valid_items, device, amp).items()})
             log(" ".join(f"{k}={v:.3g}" for k, v in stats.items() if k.startswith("valid_")))
         history.append(stats)
-        if step % save_every == 0 or step == steps:
+        if step % save_every == 0 or step == end:
             torch.save(model.state_dict(), out / "model.pt")  # weights only, for inference and copies
             torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "history": history}, out / "last.tmp")
             (out / "last.tmp").replace(last)
