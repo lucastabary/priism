@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import shutil
 import sys
 import urllib.request
 import zipfile
@@ -178,16 +179,25 @@ def member_name(track_id: int, subset: str) -> str:
 
 
 def fetch(out_dir: str | Path, genres: list[str] | None = None, subset: str = "full", limit_per_genre: int | None = 200,
-          meta_dir: str | Path | None = None, log=print) -> Path:
-    """Download the chosen tracks to ``out_dir/<id>.mp3`` and write ``manifest.csv``. Resumable."""
+          meta_dir: str | Path | None = None, max_gb: float | None = None, min_free_gb: float = 10.0,
+          log=print) -> Path:
+    """Download the chosen tracks to ``out_dir/<id>.mp3`` and write ``manifest.csv``. Resumable.
+
+    Stops early once the folder holds ``max_gb`` or the disk has less than ``min_free_gb`` free
+    (the pod volume is shared with other projects).
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     meta = ensure_metadata(meta_dir or out / "_metadata")
     chosen = select_tracks(load_tracks(meta), load_genres(meta), genres or DEFAULT_GENRES, limit_per_genre)
     log(f"{len(chosen)} tracks selected")
+    used = sum(f.stat().st_size for f in out.glob("*.mp3"))
     with open_remote_zip(f"{BASE_URL}/fma_{subset}.zip") as z:
         names = set(z.namelist())
         for i, t in enumerate(chosen):
+            if (max_gb and used > max_gb * 1e9) or shutil.disk_usage(out).free < min_free_gb * 1e9:
+                log(f"stopping at {used / 1e9:.1f} GB (size cap or low disk)")
+                break
             dst = out / f"{t['id']:06d}.mp3"
             name = member_name(t["id"], subset)
             if dst.exists() or name not in names:
@@ -196,6 +206,7 @@ def fetch(out_dir: str | Path, genres: list[str] | None = None, subset: str = "f
             tmp = dst.with_suffix(".part")
             tmp.write_bytes(z.read(name))
             tmp.rename(dst)
+            used += dst.stat().st_size
             t["file"] = dst.name
             if (i + 1) % 25 == 0:
                 log(f"{i + 1}/{len(chosen)}")

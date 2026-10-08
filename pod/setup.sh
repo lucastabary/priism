@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Pod start command. Installs Priism and MSST under /workspace, queues the jobs
-# of pod/jobs that never ran, then runs the job queue in the foreground so the
-# pod lives as long as the worker. The pod disk is not persistent: pull
-# results off it (`priism pod pull`) before stopping it.
+# Pod start command. Installs Priism and MSST under /workspace/priism, queues the
+# jobs of pod/jobs that never ran, then runs the job queue in the foreground so
+# the pod lives as long as the worker. /workspace is Lucas's RunPod network
+# volume, shared with other projects (e.g. /workspace/kAIsparov): Priism keeps
+# everything under /workspace/priism. Jobs of the first plan (4 fixed stems,
+# acid fine-tune) are archived in pod/jobs-v1 and never queued.
 #
 #   bash -c "curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh | bash"
 #
 # Needs PRIISM_WORKER_TOKEN in the pod environment (see `priism pod token`).
 set -euo pipefail
-W=${PRIISM_WORKSPACE:-/workspace}
+W=${PRIISM_WORKSPACE:-/workspace/priism}
+export PRIISM_WORKSPACE="$W"
+mkdir -p "$W"
 cd "$W"
 
 if [ -d priism ]; then git -C priism pull --ff-only; else git clone https://github.com/lucastabary/priism.git; fi

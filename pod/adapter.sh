@@ -4,7 +4,7 @@
 # steps, then the queue moves on.
 #   bash adapter.sh <run name> <stem> <train dir> <valid dir> <ready marker> [lora|head]
 set -euo pipefail
-W=${PRIISM_WORKSPACE:-/workspace}
+W=${PRIISM_WORKSPACE:-/workspace/priism}
 RUN="$W/runs/$1" STEM=$2 TRAIN=$3 VALID=$4 READY=$5 MODE=${6:-lora}
 while [ ! -f "$READY" ]; do sleep 30; done  # data comes from a CPU job
 python -c "import peft" 2>/dev/null || pip install -q peft

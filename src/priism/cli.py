@@ -32,7 +32,7 @@ def _fma(args: argparse.Namespace) -> None:
     from .data import fma
 
     out = fma.fetch(args.out, genres=args.genres or None, subset=args.subset, limit_per_genre=args.limit,
-                    meta_dir=args.metadata)
+                    meta_dir=args.metadata, max_gb=args.max_gb, min_free_gb=args.min_free_gb)
     print(f"tracks and manifest.csv in {out}")
 
 
@@ -205,6 +205,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--subset", choices=["full", "large"], default="full", help="full tracks or 30 s clips")
     p.add_argument("--limit", type=int, default=200, help="tracks per genre")
     p.add_argument("--metadata", help="folder holding tracks.csv/genres.csv (fetched if missing)")
+    p.add_argument("--max-gb", type=float, help="stop once the output folder holds this much")
+    p.add_argument("--min-free-gb", type=float, default=10.0, help="stop when the disk has less free space")
     p.set_defaults(func=_fma)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")

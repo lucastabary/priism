@@ -2,7 +2,7 @@
 # Zenodo caps each connection at a few MB/s, 12 in parallel reach ~60 MB/s.
 # Resumes: bytes already in musdb18hq.zip or parts/ are kept.
 set -euo pipefail
-W=${PRIISM_WORKSPACE:-/workspace}
+W=${PRIISM_WORKSPACE:-/workspace/priism}
 mkdir -p "$W/data/raw"; cd "$W/data/raw"
 [ -d musdb18hq/train ] && exit 0
 U="https://zenodo.org/records/3338373/files/musdb18hq.zip?download=1"

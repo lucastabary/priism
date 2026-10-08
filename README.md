@@ -117,16 +117,13 @@ passe dans la voie CPU, les autres dans la voie GPU. Une ligne
 2. Suivre et piloter depuis n'importe où :
    `priism pod status --url https://<pod>-8000.proxy.runpod.net`, puis
    `log`, `add`, `cancel`.
-3. Le disque du pod n'est pas persistant : rapatrier les résultats avant
-   de l'arrêter, avec
-   `priism pod pull runs --url ... --dest <dossier>` (reprend les
-   téléchargements interrompus).
+3. Tout vit sous `/workspace/priism` : `/workspace` est le volume réseau
+   RunPod de Lucas, partagé avec d'autres projets (ne jamais toucher aux
+   autres dossiers). Le volume survit à l'arrêt du pod ; les résultats se
+   rapatrient aussi par `priism pod pull runs --url ... --dest <dossier>`.
 
-Après `acid-v1`, 0105/0106 préparent sur CPU les données des spécialistes
-« adaptateur » (`pod/adapter.sh` : modèle gelé + LoRA + têtes propres), et
-0110 (la 303 en LoRA + têtes) et 0115 (la 303, têtes seules), pour comparer au fine-tuning complet, puis 0120
-(skank dub) les entraînent 10 époques chacun.
-
-Les jobs 0010 à 0030 (lignes acid, MUSDB18-HQ, mélanges) n'utilisent que le
-CPU ; 0100 fine-tune BS-Roformer-SW en batterie / basse / acid / reste, avec
-les têtes acid et reste initialisées depuis « other ».
+Jobs actuels : 0200 récupère les genres électroniques et dub de FMA (morceaux
+réels sans stems, plafonné à 90 Go et arrêt s'il reste moins de 15 Go sur le
+volume), 0210 rend le jeu de validation fixe du générateur v2. Les jobs du
+premier plan (4 stems fixes, fine-tune acid, spécialistes LoRA) sont archivés
+dans `pod/jobs-v1/` et ne sont plus mis en file.
