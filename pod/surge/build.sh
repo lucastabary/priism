@@ -24,7 +24,7 @@ fi
 if works; then link; echo "surgepy already built"; exit 0; fi
 
 command -v cmake >/dev/null && command -v ninja >/dev/null || pip install -q cmake ninja
-SRC="$W/surge-src"
+SRC="${SURGE_SRC:-/root/surge-src}"  # sources and build on the pod's local disk: the volume is small
 if [ ! -d "$SRC/.git" ]; then
   git init -q "$SRC"
   git -C "$SRC" remote add origin https://github.com/surge-synthesizer/surge.git
