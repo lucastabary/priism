@@ -30,4 +30,4 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-priism = ["profiles/*.toml"]
+priism = ["profiles/*.toml", "listen.html"]

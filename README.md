@@ -45,6 +45,20 @@ Chaque morceau : `song_<graine>/mix.flac`, `sources/NN_<type>.flac` et
 son rôle, ses paramètres, ses mesures actives, ses effets, son jumeau
 éventuel). Tout se régénère depuis la graine.
 
+## Écouter un mix et ses pistes (test manuel)
+
+```bash
+priism listen chemin/morceau            # écrit chemin/morceau/ecoute.html
+priism listen chemin/dossier-de-morceaux  # une page par morceau + index.html
+```
+
+Un morceau = `mix.*` plus des pistes à côté ou dans des sous-dossiers
+(`pistes/`, `sources/`, une sortie de séparation…) ; chaque sous-dossier forme un
+groupe, ce qui permet de mettre vérité et pistes séparées sur la même page.
+La page est autonome (audio intégré, WAV/FLAC réencodés en MP3, `--bitrate`
+pour l'alléger) : lecture synchronisée, mute/solo, volume, boucle en glissant
+sur une forme d'onde, bascule mix original / somme des pistes (X).
+
 ## Générer des lignes acid synthétiques
 
 ```bash
