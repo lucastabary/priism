@@ -65,6 +65,47 @@ def _eval_sep(args: argparse.Namespace) -> None:
                     device=args.device, msst_path=args.msst_path, limit=args.limit)
 
 
+def _split(args: argparse.Namespace) -> None:
+    from pathlib import Path as _P
+
+    from .model.split import split_file
+
+    for f in args.inputs:
+        out = _P(args.out) / _P(f).name.split(".")[0] if len(args.inputs) > 1 else _P(args.out)
+        split_file(args.run, f, out, window_s=args.window, overlap_s=args.overlap, threshold=args.threshold,
+                   device=args.device, msst_path=args.msst_path, start_s=args.start, duration_s=args.duration)
+
+
+def _mixit_tags(args: argparse.Namespace) -> None:
+    import csv
+    import json as _json
+    from pathlib import Path
+
+    from .data.tempo_key import describe, find_pairs
+
+    files = []
+    for x in args.inputs:
+        x = Path(x)
+        files += sorted(f for f in x.rglob("*") if f.suffix.lower() in (".mp3", ".flac", ".wav", ".mp4", ".m4a")) \
+            if x.is_dir() else [x]
+    tags = {}
+    for f in files:
+        try:
+            tags[str(f)] = describe(str(f))
+        except Exception as e:  # one unreadable file must not stop the batch
+            print(f"{f}: {e!r}")
+            continue
+        print(f"{f.name}\t{tags[str(f)]['bpm']}\t{tags[str(f)]['key']}", flush=True)
+    with open(args.out, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["file", "bpm", "key", "tonic", "mode", "key_strength"])
+        for f, t in tags.items():
+            w.writerow([f, t["bpm"], t["key"], t["tonic"], t["mode"], t["key_strength"]])
+    pairs = find_pairs(tags, args.max_shift, args.max_stretch)
+    with_partner = len({p[0] for p in pairs} | {p[1] for p in pairs})
+    print(_json.dumps({"songs": len(tags), "pairs": len(pairs), "songs_with_a_partner": with_partner}))
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -191,7 +232,7 @@ def _pod(args: argparse.Namespace) -> None:
             dest = Path(args.dest) / f["path"]
             if dest.exists() and dest.stat().st_size == f["size"]:
                 continue
-            download(args.url, token, f["path"], dest)
+            download(args.url, token, f["path"], dest, f["size"])
             print(f"pulled {f['path']} ({f['size'] / 1e6:.1f} MB)")
 
 
@@ -283,6 +324,26 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", help="page path for a single song (default <folder>/ecoute.html)")
     p.add_argument("--bitrate", help="re-encode every file to MP3 at this bitrate (e.g. 128k) for a lighter page")
     p.set_defaults(func=_listen)
+
+    p = sub.add_parser("split", help="separate whole songs with a train-sep run (tracks linked across windows)")
+    p.add_argument("inputs", nargs="+", help="audio files (anything ffmpeg reads)")
+    p.add_argument("--run", required=True, help="run folder of train-sep (config.json + model.pt)")
+    p.add_argument("--out", required=True, help="song folder (one subfolder per song if several inputs)")
+    p.add_argument("--window", type=float, default=8.0, help="seconds the model sees at once")
+    p.add_argument("--overlap", type=float, default=2.0, help="seconds shared by consecutive windows")
+    p.add_argument("--threshold", type=float, default=0.5, help="existence probability to keep a slot")
+    p.add_argument("--start", type=float, default=0.0, help="start of the excerpt, in seconds")
+    p.add_argument("--duration", type=float, help="length of the excerpt, in seconds (whole song by default)")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
+    p.set_defaults(func=_split)
+
+    p = sub.add_parser("mixit-tags", help="tempo and key of real songs, and how many MixIT pairs they give")
+    p.add_argument("inputs", nargs="+", help="audio files or folders")
+    p.add_argument("--out", required=True, help="TSV of tempo and key per file")
+    p.add_argument("--max-shift", type=int, default=2, help="largest pitch-shift to align two songs (semitones)")
+    p.add_argument("--max-stretch", type=float, default=0.06, help="largest tempo change (0.06 = 6 %%)")
+    p.set_defaults(func=_mixit_tags)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
