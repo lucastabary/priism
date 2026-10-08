@@ -36,7 +36,19 @@ run() {
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
-run --stop-at 1000
-python3 priism/pod/probe_gate.py runs/twins-f
-run
+# A failed probe tries prepared fallbacks (lower learning rate, lighter count loss) before giving up,
+# so the GPU keeps learning something useful when nobody is there to fix the queue.
+ALT=""
+probe() { run --stop-at 1000 "$@" && python3 priism/pod/probe_gate.py runs/twins-f; }
+if ! probe; then
+  ok=""
+  for alt in "--lr 5e-5" "--exist-weight 1" "--lr 5e-5 --exist-weight 1"; do
+    f=runs/twins-f-failed-$(date +%s); mv runs/twins-f "$f"; rm -f "$f/last.pt"
+    echo "### fallback probe: $alt"
+    if probe $alt; then ALT=$alt; ok=1; break; fi
+  done
+  [ -n "$ok" ] || exit 1
+fi
+# Full run; it stops by itself once 3 validations in a row gain nothing (stalled run, GPU freed).
+run $ALT --plateau 3
 touch runs/twins-f/DONE

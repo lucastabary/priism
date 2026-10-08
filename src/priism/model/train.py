@@ -68,7 +68,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
-          real_weight: float = 1.0, stop_at: int | None = None, log=print) -> list[dict]:
+          real_weight: float = 1.0, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
+          log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
     With ``stream`` (a local folder), training songs are generated during training by
@@ -79,6 +80,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     ``stop_at`` ends after that step (saved) with the schedule of ``steps``: a short probe that a later
     call with the same ``out`` resumes into the full run. A fresh run scores the validation sets at step 0
     first, so a probe can be judged against its own starting point.
+    ``plateau`` > 0 ends the run (saved) once ``plateau`` validations in a row have improved none of the
+    validation sets' separation by ``plateau_delta`` dB over its best: a stalled run frees the GPU.
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
@@ -142,7 +145,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
         log(f"distillation on {len(rdl.dataset.files)} real songs, every {real_every} steps")
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-              save_every, log, exist_weight, teach, stop_at)
+              save_every, log, exist_weight, teach, stop_at, plateau, plateau_delta)
     finally:
         if pool:
             pool.stop()
@@ -150,7 +153,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
 
 def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-          save_every, log, exist_weight=1.0, teach=None, stop_at=None):
+          save_every, log, exist_weight=1.0, teach=None, stop_at=None, plateau=0, plateau_delta=0.1):
     t0 = time.time()
     if start == 1 and vds:  # the starting point, to judge what the run brings
         base = {"step": 0}
@@ -196,11 +199,27 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
                 stats.update({f"valid_{name}{k}": v for k, v in evaluate(model, ds, valid_items, device, amp).items()})
             log(" ".join(f"{k}={v:.3g}" for k, v in stats.items() if k.startswith("valid_")))
         history.append(stats)
-        if step % save_every == 0 or step == end:
+        stalled = plateau and vds and step % save_every == 0 and _stalled(history, plateau, plateau_delta)
+        if stalled:
+            log(f"plateau: no validation set gained {plateau_delta} dB in {plateau} validations, stopping at step {step}")
+        if step % save_every == 0 or step == end or stalled:
             torch.save(model.state_dict(), out / "model.pt")  # weights only, for inference and copies
             torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "history": history}, out / "last.tmp")
             (out / "last.tmp").replace(last)
             (out / "history.json").write_text(json.dumps(history))
+        if stalled:
+            (out / "PLATEAU").write_text(str(step))
+            break
+
+
+def _stalled(history: list[dict], patience: int, delta: float) -> bool:
+    """True when the last ``patience`` validations beat none of the earlier bests by ``delta`` dB."""
+    vals = [x for x in history if any(k.startswith("valid_") and k.endswith("sep_snr") for k in x)]
+    if len(vals) <= patience:
+        return False
+    keys = [k for k in vals[-1] if k.startswith("valid_") and k.endswith("sep_snr")]
+    old, new = vals[:-patience], vals[-patience:]
+    return not any(max(x.get(k, -1e9) for x in new) >= max(x.get(k, -1e9) for x in old) + delta for k in keys)
 
 
 @torch.no_grad()

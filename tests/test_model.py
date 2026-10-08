@@ -204,3 +204,14 @@ model:
               msst={"config": cfg, "ckpt": None, "path": msst, "max_sources": 4}, real=tmp_path / "real",
               real_every=1, log=logs.append)
     assert "real_snr" in h[-1] and any("distillation on 1 real songs" in m for m in logs)
+
+
+def test_plateau_detection():
+    from priism.model.train import _stalled
+
+    h = [{"step": 0, "valid_sep_snr": 5.0}, {"step": 1, "valid_sep_snr": 8.0}, {"step": 2, "valid_sep_snr": 8.05},
+         {"step": 3, "valid_sep_snr": 7.9}]
+    assert _stalled(h, 2, 0.1) and not _stalled(h, 3, 0.1)
+    h.append({"step": 4, "valid_sep_snr": 7.0, "valid_twins_sep_snr": 1.0})  # a set still gaining keeps it going
+    h[0]["valid_twins_sep_snr"] = 0.5
+    assert not _stalled(h, 2, 0.1)
