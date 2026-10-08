@@ -221,20 +221,59 @@ def _stalled(history: list[dict], patience: int, delta: float) -> bool:
     return not any(max(x.get(k, -1e9) for x in new) >= max(x.get(k, -1e9) for x in old) + delta for k in keys)
 
 
+def kept_scores(sources: torch.Tensor, exist_logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """SNR (dB) of each target as ``split`` would deliver it: only outputs kept by the existence head
+    (p > 0.5), matched one to one; a target left without output scores as silence (0 dB)."""
+    from scipy.optimize import linear_sum_assignment
+
+    from .loss import neg_snr
+
+    est = sources[exist_logits.sigmoid() > 0.5]
+    snr = torch.zeros(len(targets))
+    if len(est) and len(targets):
+        cost = neg_snr(est[:, None], targets[None])
+        rows, cols = linear_sum_assignment(cost.cpu().numpy())
+        snr[torch.as_tensor(cols)] = -cost[rows, cols].cpu()
+    return snr
+
+
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, ds: SongChunks, items: int, device: str, amp=None) -> dict:
-    """Average PIT stats over the first ``items`` crops of a fixed set (one crop per song)."""
+    """Average PIT stats over the first ``items`` crops of a fixed set (one crop per song).
+
+    On sets holding twins (one instrument playing several parts), also scores the twins alone the way
+    ``split`` delivers them (kept outputs only): ``twin_snr`` (mean over twin parts), ``twin_all5`` (share of
+    twin families with every heard part above 5 dB) and ``other_snr`` (the other sources, same rule).
+    The mean over all sources (``sep_snr``) hides twins that stay merged.
+    """
+    from collections import Counter
+
     model.eval()
     acc: dict[str, float] = {}
+    twin, other, fam_ok, fams = [], [], 0, 0
     k = min(items, len(ds))
     for i in range(k):
-        mix, tg, n = collate([ds[i]])
+        m1, t1, families = ds.item_with_families(i)
+        mix, tg, n = collate([(m1, t1)])
         mix, tg = mix.to(device), tg.to(device)
         with amp or nullcontext():
             o = model(mix)
-        _, st = pit_loss(o["sources"].float(), o["exist_logits"].float(), tg, n, mix)
+        src, ex = o["sources"].float(), o["exist_logits"].float()
+        _, st = pit_loss(src, ex, tg, n, mix)
         st["count_acc"] = count_accuracy(o["exist_logits"], n)
         for key, v in st.items():
             acc[key] = acc.get(key, 0.0) + v / k
+        size = Counter(families)
+        if any(c > 1 for c in size.values()):
+            snr = kept_scores(src[0], ex[0], tg[0, :int(n[0])])
+            for f in {f for f in families if size[f] > 1}:
+                parts = [float(s) for s, g in zip(snr, families) if g == f]
+                twin += parts
+                fam_ok += all(s > 5 for s in parts)
+                fams += 1
+            other += [float(s) for s, g in zip(snr, families) if size[g] == 1]
+    if twin:
+        acc.update(twin_snr=sum(twin) / len(twin), twin_all5=fam_ok / fams,
+                   other_snr=sum(other) / max(len(other), 1))
     model.train()
     return acc

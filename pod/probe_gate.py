@@ -27,10 +27,12 @@ if not start or not end:
 ok = True
 gains = {}
 for s in a.gain_on:
-    k = f"valid_{s}_sep_snr"
-    if k in start and k in end:
+    # Twins alone as split delivers them when both ends have it; the all-source mean otherwise.
+    k = next((f"valid_{s}_{m}" for m in ("twin_snr", "sep_snr") if f"valid_{s}_{m}" in start and f"valid_{s}_{m}" in end),
+             None)
+    if k:
         gains[s] = end[k] - start[k]
-        print(f"{s}: {start[k]:.2f} -> {end[k]:.2f} dB (step {end['step']})")
+        print(f"{k}: {start[k]:.2f} -> {end[k]:.2f} dB (step {end['step']})")
 if not gains or max(gains.values()) < a.min_gain:
     print(f"gate: no set gained {a.min_gain} dB"); ok = False
 drop = start["valid_sep_snr"] - end["valid_sep_snr"]

@@ -234,3 +234,22 @@ def test_grouping_ignores_near_silent_stems():
     assert group_loss(est, refs)[1] > 25
     g = group_outputs(est[0], refs[0])
     torch.testing.assert_close(g[:2], refs[0, :2])
+
+
+def test_validation_scores_twins_alone(tmp_path, monkeypatch):
+    from priism.gen import song
+    from priism.model.data import SongChunks
+    from priism.model.train import build_model, evaluate
+
+    monkeypatch.setattr(song, "TWIN_P", 1.0)
+    monkeypatch.setattr(song, "TWIN_EXTRA_P", 1.0)
+    seed = next(s for s in range(200) if sum(x["twin_of"] is not None and x["merge_group"] is None
+                                             for x in song.plan_song(s, 6.0, n_sources=5)["sources"]) >= 2)
+    song.write_song(seed, tmp_path / "twins", duration_s=6, sample_rate=22050, n_sources=5)
+    ds = SongChunks(tmp_path / "twins", 4.0, 22050, items_per_song=1, seed=1)
+    mix, tg, fam = ds.item_with_families(0)
+    assert len(fam) == tg.shape[0]
+    model, _, _ = build_model("tiny")
+    st = evaluate(model, ds, 1, "cpu")
+    assert max(fam.count(f) for f in fam) > 1
+    assert {"twin_snr", "twin_all5", "other_snr"} <= set(st)

@@ -49,10 +49,20 @@ class SongChunks(Dataset):
         rng = np.random.default_rng((self.seed, i))
         return crop_example(self.songs[j], self.metas[j], self.chunk, self.sr, rng, self.lossy_p)
 
+    def item_with_families(self, i: int):
+        """Item ``i`` plus the twin family of each target (see crop_example)."""
+        j = i % len(self.songs)
+        rng = np.random.default_rng((self.seed, i))
+        return crop_example(self.songs[j], self.metas[j], self.chunk, self.sr, rng, self.lossy_p, with_families=True)
 
-def crop_example(song: Path, meta: dict, chunk: int, sr: int, rng: np.random.Generator, lossy_p: float = 0.0
-                 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """A random ``chunk``-sample crop of one song: (mix (2, S), targets (N, 2, S)), N = sources heard."""
+
+def crop_example(song: Path, meta: dict, chunk: int, sr: int, rng: np.random.Generator, lossy_p: float = 0.0,
+                 with_families: bool = False):
+    """A random ``chunk``-sample crop of one song: (mix (2, S), targets (N, 2, S)), N = sources heard.
+
+    ``with_families`` adds, per heard target, the id of its twin family (the original's id, shared by all
+    parts the same instrument plays; a lone source is its own family).
+    """
     total = int(round(meta["duration_s"] * sr))
     start = int(rng.integers(0, max(1, total - chunk)))
     stop = start + chunk
@@ -64,13 +74,17 @@ def crop_example(song: Path, meta: dict, chunk: int, sr: int, rng: np.random.Gen
     targets = [sum(read(song / s["file"]) for s in group) for group in merged_sources(meta)]
     mix = np.sum(targets, axis=0)  # exactly the sum, as in the song
     level = np.sqrt(np.mean(mix**2)) + 1e-9
-    heard = [t for t in targets if 20 * np.log10(np.sqrt(np.mean(t**2)) / level + 1e-12) > SILENT_DB]
+    loud = [20 * np.log10(np.sqrt(np.mean(t**2)) / level + 1e-12) > SILENT_DB for t in targets]
+    heard = [t for t, ok in zip(targets, loud) if ok]
+    fams = [g[0]["twin_of"] if g[0].get("twin_of") is not None and g[0].get("merge_group") is None else g[0]["id"]
+            for g, ok in zip(merged_sources(meta), loud) if ok]
     if lossy_p:
         from ..gen.augment import random_lossy
 
         mix = random_lossy(mix.T, sr, rng, lossy_p)[0].T
     tg = np.stack(heard) if heard else np.zeros((0, *mix.shape), np.float32)
-    return torch.from_numpy(np.ascontiguousarray(mix, dtype=np.float32)), torch.from_numpy(tg.astype(np.float32))
+    out = torch.from_numpy(np.ascontiguousarray(mix, dtype=np.float32)), torch.from_numpy(tg.astype(np.float32))
+    return (*out, fams) if with_families else out
 
 
 def collate(batch: list[tuple[torch.Tensor, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
