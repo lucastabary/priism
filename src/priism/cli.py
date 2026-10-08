@@ -39,9 +39,12 @@ def _fma(args: argparse.Namespace) -> None:
 def _train_sep(args: argparse.Namespace) -> None:
     from .model.train import train
 
+    if not (args.data or args.stream):
+        raise SystemExit("train-sep needs --data or --stream")
     train(args.data, args.out, preset=args.preset, steps=args.steps, batch=args.batch, chunk_s=args.chunk,
           lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy, valid=args.valid,
-          save_every=args.save_every, log_every=args.log_every, core_lr_scale=args.core_lr_scale,
+          save_every=args.save_every, stream=args.stream, stream_workers=args.stream_workers,
+          stream_songs=args.stream_songs, stream_duration=args.stream_duration, log_every=args.log_every, core_lr_scale=args.core_lr_scale,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
                 "max_sources": args.max_sources} if args.preset == "msst" else None)
 
@@ -220,7 +223,11 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=_fma)
 
     p = sub.add_parser("train-sep", help="train the class-agnostic attractor separator on songs from `priism gen`")
-    p.add_argument("--data", required=True, help="folder of generated songs")
+    p.add_argument("--data", help="folder of generated songs (or use --stream)")
+    p.add_argument("--stream", help="generate training songs during training into this local folder (rolling pool)")
+    p.add_argument("--stream-workers", type=int, default=4, help="song generator processes")
+    p.add_argument("--stream-songs", type=int, default=400, help="songs kept in the pool")
+    p.add_argument("--stream-duration", type=float, default=30.0, help="seconds per generated song")
     p.add_argument("--out", required=True, help="run folder (config.json, model.pt, history.json)")
     p.add_argument("--preset", choices=["tiny", "small", "base", "msst"], default="tiny",
                    help="msst: pretrained MSST BS-RoFormer core (--msst-config/--msst-ckpt/--msst-path)")

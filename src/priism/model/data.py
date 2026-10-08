@@ -45,26 +45,32 @@ class SongChunks(Dataset):
         return len(self.songs) * self.items_per_song
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
-        song, meta = self.songs[i % len(self.songs)], self.metas[i % len(self.songs)]
+        j = i % len(self.songs)
         rng = np.random.default_rng((self.seed, i))
-        total = int(round(meta["duration_s"] * self.sr))
-        start = int(rng.integers(0, max(1, total - self.chunk)))
-        stop = start + self.chunk
+        return crop_example(self.songs[j], self.metas[j], self.chunk, self.sr, rng, self.lossy_p)
 
-        def read(path: Path) -> np.ndarray:
-            x, _ = sf.read(path, start=start, stop=stop, dtype="float32", always_2d=True)
-            return np.pad(x, ((0, self.chunk - len(x)), (0, 0))).T  # (2, S)
 
-        targets = [sum(read(song / s["file"]) for s in group) for group in merged_sources(meta)]
-        mix = np.sum(targets, axis=0)  # exactly the sum, as in the song
-        level = np.sqrt(np.mean(mix**2)) + 1e-9
-        heard = [t for t in targets if 20 * np.log10(np.sqrt(np.mean(t**2)) / level + 1e-12) > SILENT_DB]
-        if self.lossy_p:
-            from ..gen.augment import random_lossy
+def crop_example(song: Path, meta: dict, chunk: int, sr: int, rng: np.random.Generator, lossy_p: float = 0.0
+                 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """A random ``chunk``-sample crop of one song: (mix (2, S), targets (N, 2, S)), N = sources heard."""
+    total = int(round(meta["duration_s"] * sr))
+    start = int(rng.integers(0, max(1, total - chunk)))
+    stop = start + chunk
 
-            mix = random_lossy(mix.T, self.sr, rng, self.lossy_p)[0].T
-        tg = np.stack(heard) if heard else np.zeros((0, *mix.shape), np.float32)
-        return torch.from_numpy(np.ascontiguousarray(mix, dtype=np.float32)), torch.from_numpy(tg.astype(np.float32))
+    def read(path: Path) -> np.ndarray:
+        x, _ = sf.read(path, start=start, stop=stop, dtype="float32", always_2d=True)
+        return np.pad(x, ((0, chunk - len(x)), (0, 0))).T  # (2, S)
+
+    targets = [sum(read(song / s["file"]) for s in group) for group in merged_sources(meta)]
+    mix = np.sum(targets, axis=0)  # exactly the sum, as in the song
+    level = np.sqrt(np.mean(mix**2)) + 1e-9
+    heard = [t for t in targets if 20 * np.log10(np.sqrt(np.mean(t**2)) / level + 1e-12) > SILENT_DB]
+    if lossy_p:
+        from ..gen.augment import random_lossy
+
+        mix = random_lossy(mix.T, sr, rng, lossy_p)[0].T
+    tg = np.stack(heard) if heard else np.zeros((0, *mix.shape), np.float32)
+    return torch.from_numpy(np.ascontiguousarray(mix, dtype=np.float32)), torch.from_numpy(tg.astype(np.float32))
 
 
 def collate(batch: list[tuple[torch.Tensor, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

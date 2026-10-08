@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, RandomSampler
 
 from .data import SongChunks, collate
 from .loss import count_accuracy, pit_loss
+from .stream import LiveSongs, SongStream
 from .separator import AttractorSeparator, SeparatorConfig, n_params
 
 PRESETS = {
@@ -45,11 +46,16 @@ def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module,
     return AttractorSeparator(cfg), cfg.sample_rate, {"preset": preset, **cfg.to_dict()}
 
 
-def train(data: str | Path, out: str | Path, preset: str = "tiny", steps: int = 200, batch: int = 4,
+def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps: int = 200, batch: int = 4,
           chunk_s: float = 3.0, lr: float = 3e-4, device: str = "cpu", log_every: int = 10, workers: int = 0,
           seed: int = 0, lossy_p: float = 0.0, msst: dict | None = None, core_lr_scale: float = 0.1,
-          valid: str | Path | None = None, valid_items: int = 64, save_every: int = 1000, log=print) -> list[dict]:
+          valid: str | Path | None = None, valid_items: int = 64, save_every: int = 1000,
+          stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
+          stream_duration: float = 30.0, log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
+
+    With ``stream`` (a local folder), training songs are generated during training by
+    ``stream_workers`` processes (rolling pool of ``stream_songs``) instead of read from ``data``.
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
@@ -62,11 +68,18 @@ def train(data: str | Path, out: str | Path, preset: str = "tiny", steps: int = 
     (out / "config.json").write_text(json.dumps(saved_cfg, indent=1))
     log(f"{n_params(model) / 1e6:.2f} M parameters")
 
-    ds = SongChunks(data, chunk_s, sr, items_per_song=10**6, seed=seed, lossy_p=lossy_p)
-    # Sampling with replacement: a shuffle of len(ds) indices (songs x 10**6 crops) would not fit in memory.
-    sampler = RandomSampler(ds, replacement=True, num_samples=steps * batch)
-    dl = DataLoader(ds, batch_size=batch, sampler=sampler, collate_fn=collate, num_workers=workers, drop_last=True,
-                    persistent_workers=workers > 0)
+    pool = None
+    if stream:
+        pool = SongStream(stream, stream_workers, stream_duration, sr, max_songs=stream_songs)
+        pool.wait(min_songs=max(8, 2 * batch), log=log)
+        ds = LiveSongs(stream, chunk_s, sr, seed=seed, lossy_p=lossy_p)
+        dl = DataLoader(ds, batch_size=batch, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0)
+    else:
+        ds = SongChunks(data, chunk_s, sr, items_per_song=10**6, seed=seed, lossy_p=lossy_p)
+        # Sampling with replacement: a shuffle of len(ds) indices (songs x 10**6 crops) would not fit in memory.
+        sampler = RandomSampler(ds, replacement=True, num_samples=steps * batch)
+        dl = DataLoader(ds, batch_size=batch, sampler=sampler, collate_fn=collate, num_workers=workers,
+                        drop_last=True, persistent_workers=workers > 0)
     core = [p for n, p in model.named_parameters() if n.startswith("r.")]
     new = [p for n, p in model.named_parameters() if not n.startswith("r.")]
     groups = [{"params": new, "lr": lr}] + ([{"params": core, "lr": lr * core_lr_scale}] if core else [])
@@ -87,6 +100,17 @@ def train(data: str | Path, out: str | Path, preset: str = "tiny", steps: int = 
         log(f"resumed at step {start}")
     amp = torch.autocast("cuda", dtype=torch.bfloat16) if str(device).startswith("cuda") else nullcontext()
     vds = SongChunks(valid, chunk_s, sr, items_per_song=1, seed=1) if valid else None
+    try:
+        _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
+              save_every, log)
+    finally:
+        if pool:
+            pool.stop()
+    return history
+
+
+def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
+          save_every, log):
     t0 = time.time()
     it = iter(dl)
     model.train()
@@ -117,7 +141,6 @@ def train(data: str | Path, out: str | Path, preset: str = "tiny", steps: int = 
             torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "history": history}, out / "last.tmp")
             (out / "last.tmp").replace(last)
             (out / "history.json").write_text(json.dumps(history))
-    return history
 
 
 @torch.no_grad()

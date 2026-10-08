@@ -98,3 +98,17 @@ def test_train_saves_and_resumes(tmp_path):
     logs = []
     h = train(tmp_path / "songs", tmp_path / "run", steps=4, **{**kw, "log": logs.append})
     assert any("resumed at step 3" in m for m in logs) and [x["step"] for x in h] == [1, 2, 3, 4]
+
+
+def test_streamed_songs_feed_training(tmp_path):
+    from priism.model.stream import LiveSongs, SongStream, ready_songs
+
+    pool = SongStream(tmp_path / "pool", workers=2, duration_s=3, sample_rate=22050, max_songs=3, first_seed=5)
+    try:
+        pool.wait(min_songs=2, timeout_s=300)
+    finally:
+        pool.stop()
+    assert 1 <= len(ready_songs(tmp_path / "pool")) <= 5
+    it = iter(LiveSongs(tmp_path / "pool", chunk_s=1.0, sample_rate=22050))
+    mix, tg = next(it)
+    assert mix.shape == (2, 22050) and tg.shape[1:] == (2, 22050)
