@@ -48,4 +48,6 @@ for job in priism/pod/jobs/*.sh; do
 done
 
 # Results (runs/, queue logs) can be pulled over HTTPS: the pod disk is not persistent.
+# The guard stops a stuck job (silent log or idle GPU) so the queue moves on without anyone watching.
+nohup python3 "$W/priism/pod/guard.py" --queue "$W/queue" >> "$W/queue/guard.out" 2>&1 &
 exec priism worker --queue "$W/queue" --port "${PRIISM_WORKER_PORT:-8000}" --files-root "$W"
