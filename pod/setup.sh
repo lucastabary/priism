@@ -6,7 +6,9 @@
 # everything under /workspace/priism. Jobs of the first plan (4 fixed stems,
 # acid fine-tune) are archived in pod/jobs-v1 and never queued.
 #
-#   bash -c "curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh | bash"
+#   bash -c "until curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh -o /root/setup.sh; do sleep 5; done; bash /root/setup.sh"
+#
+# The retry matters: the network can come up a few seconds after the container starts.
 #
 # Needs PRIISM_WORKER_TOKEN in the pod environment (see `priism pod token`).
 set -euo pipefail

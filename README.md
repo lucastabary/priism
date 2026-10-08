@@ -117,7 +117,7 @@ passe dans la voie CPU, les autres dans la voie GPU. Une ligne
 `# after: 0030` fait attendre un job jusqu'à la fin du job 0030.
 
 1. Créer le pod avec comme commande de démarrage
-   `bash -c "curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh | bash"`,
+   `bash -c "until curl -fsSL https://raw.githubusercontent.com/lucastabary/priism/main/pod/setup.sh -o /root/setup.sh; do sleep 5; done; bash /root/setup.sh"`,
    la variable `PRIISM_WORKER_TOKEN` (donnée par `priism pod token`) et le
    port HTTP 8000 exposé.
 2. Suivre et piloter depuis n'importe où :
