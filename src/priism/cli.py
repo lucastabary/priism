@@ -58,6 +58,17 @@ def _eval_sep(args: argparse.Namespace) -> None:
                     device=args.device, msst_path=args.msst_path, limit=args.limit)
 
 
+def _split(args: argparse.Namespace) -> None:
+    from pathlib import Path as _P
+
+    from .model.split import split_file
+
+    for f in args.inputs:
+        out = _P(args.out) / _P(f).name.split(".")[0] if len(args.inputs) > 1 else _P(args.out)
+        split_file(args.run, f, out, window_s=args.window, overlap_s=args.overlap, threshold=args.threshold,
+                   device=args.device, msst_path=args.msst_path, start_s=args.start, duration_s=args.duration)
+
+
 def _mixit_tags(args: argparse.Namespace) -> None:
     import csv
     import json as _json
@@ -299,6 +310,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
     p.add_argument("--limit", type=int, help="first N songs only")
     p.set_defaults(func=_eval_sep)
+
+    p = sub.add_parser("split", help="separate whole songs with a train-sep run (tracks linked across windows)")
+    p.add_argument("inputs", nargs="+", help="audio files (anything ffmpeg reads)")
+    p.add_argument("--run", required=True, help="run folder of train-sep (config.json + model.pt)")
+    p.add_argument("--out", required=True, help="song folder (one subfolder per song if several inputs)")
+    p.add_argument("--window", type=float, default=8.0, help="seconds the model sees at once")
+    p.add_argument("--overlap", type=float, default=2.0, help="seconds shared by consecutive windows")
+    p.add_argument("--threshold", type=float, default=0.5, help="existence probability to keep a slot")
+    p.add_argument("--start", type=float, default=0.0, help="start of the excerpt, in seconds")
+    p.add_argument("--duration", type=float, help="length of the excerpt, in seconds (whole song by default)")
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--msst-path", help="MSST checkout, if it moved since training")
+    p.set_defaults(func=_split)
 
     p = sub.add_parser("mixit-tags", help="tempo and key of real songs, and how many MixIT pairs they give")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
