@@ -36,6 +36,13 @@ def _fma(args: argparse.Namespace) -> None:
     print(f"tracks and manifest.csv in {out}")
 
 
+def _train_sep(args: argparse.Namespace) -> None:
+    from .model.train import train
+
+    train(args.data, args.out, preset=args.preset, steps=args.steps, batch=args.batch, chunk_s=args.chunk,
+          lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy)
+
+
 def _synth(args: argparse.Namespace) -> None:
     from .sources import SOURCES, generate
 
@@ -208,6 +215,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-gb", type=float, help="stop once the output folder holds this much")
     p.add_argument("--min-free-gb", type=float, default=10.0, help="stop when the disk has less free space")
     p.set_defaults(func=_fma)
+
+    p = sub.add_parser("train-sep", help="train the class-agnostic attractor separator on songs from `priism gen`")
+    p.add_argument("--data", required=True, help="folder of generated songs")
+    p.add_argument("--out", required=True, help="run folder (config.json, model.pt, history.json)")
+    p.add_argument("--preset", choices=["tiny", "small", "base"], default="tiny")
+    p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--batch", type=int, default=4)
+    p.add_argument("--chunk", type=float, default=3.0, help="seconds per training crop")
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--workers", type=int, default=0, help="data loader processes")
+    p.add_argument("--lossy", type=float, default=0.0, help="probability of an MP3/AAC/Opus pass on the mix")
+    p.set_defaults(func=_train_sep)
 
     p = sub.add_parser("separate", help="split tracks into the slots of a profile")
     p.add_argument("inputs", nargs="+", help="audio files or folders")
