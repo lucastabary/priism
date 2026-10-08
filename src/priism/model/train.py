@@ -230,6 +230,17 @@ def _stalled(history: list[dict], patience: int, delta: float) -> bool:
     return not any(max(x.get(k, -1e9) for x in new) >= max(x.get(k, -1e9) for x in old) + delta for k in keys)
 
 
+class _WithFamilies(torch.utils.data.Dataset):
+    def __init__(self, ds: SongChunks):
+        self.ds = ds
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, i: int):
+        return self.ds.item_with_families(i)
+
+
 def kept_scores(sources: torch.Tensor, exist_logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     """SNR (dB) of each target as ``split`` would deliver it: only outputs kept by the existence head
     (p > 0.5), matched one to one; a target left without output scores as silence (0 dB)."""
@@ -261,8 +272,11 @@ def evaluate(model: torch.nn.Module, ds: SongChunks, items: int, device: str, am
     acc: dict[str, float] = {}
     twin, other, fam_ok, fams = [], [], 0, 0
     k = min(items, len(ds))
-    for i in range(k):
-        m1, t1, families = ds.item_with_families(i)
+    # Crops are read by worker processes ahead of the model: reading every stem from the network volume
+    # one item at a time left the GPU idle for minutes per validation.
+    loader = DataLoader(_WithFamilies(ds), batch_size=None, sampler=range(k), num_workers=min(4, k),
+                        collate_fn=lambda x: x)
+    for m1, t1, families in loader:
         mix, tg, n = collate([(m1, t1)])
         mix, tg = mix.to(device), tg.to(device)
         with amp or nullcontext():
