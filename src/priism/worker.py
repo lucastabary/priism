@@ -290,8 +290,12 @@ def derive_token(secret: str, pod_name: str) -> str:
 USER_AGENT = "priism-worker-client/1"
 
 
-def download(base_url: str, token: str, rel: str, dest: str | Path) -> Path:
-    """Fetch one file from the worker, resuming a partial ``dest.part`` if present."""
+def download(base_url: str, token: str, rel: str, dest: str | Path, size: int | None = None) -> Path:
+    """Fetch one file from the worker, resuming a partial ``dest.part`` if present.
+
+    The RunPod proxy can end a transfer early without any error, so the file only gets
+    its final name once it has ``size`` bytes (from the listing, else from the response headers).
+    """
     import urllib.request
     from urllib.parse import quote
 
@@ -304,7 +308,13 @@ def download(base_url: str, token: str, rel: str, dest: str | Path) -> Path:
         headers["Range"] = f"bytes={have}-"
     req = urllib.request.Request(base_url.rstrip("/") + "/files/" + quote(rel), headers=headers)
     with urllib.request.urlopen(req, timeout=120) as r, part.open("ab" if r.status == 206 else "wb") as f:
+        total = r.headers.get("Content-Range", "").rpartition("/")[2] or r.headers.get("Content-Length")
         shutil.copyfileobj(r, f, 1 << 20)
+    if size is None and total and total.isdigit():
+        size = int(total)
+    got = part.stat().st_size
+    if size is not None and got != size:
+        raise IOError(f"{rel}: got {got} of {size} bytes; the partial file is kept, pull again to resume")
     part.rename(dest)
     return dest
 
