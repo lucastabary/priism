@@ -61,18 +61,20 @@ class RealCrops(IterableDataset):
 def group_loss(est: torch.Tensor, refs: torch.Tensor, min_share: float = 1e-3) -> tuple[torch.Tensor, float]:
     """est (B, K, C, S) our outputs, refs (B, J, C, S) teacher stems -> (-SNR of grouped outputs, mean SNR).
 
-    Each output joins the stem with the largest projection (decided without gradient); stems that hold
-    less than ``min_share`` of the crop's energy are left out (the teacher's silent stems).
+    Each output joins the stem it overlaps most (largest inner product: the choice that lowers the grouped
+    error most; decided without gradient). Stems that hold less than ``min_share`` of the crop's energy
+    (the teacher's silent stems) take no output and are left out of the loss. Dividing by each stem's
+    energy instead sent most outputs to near-silent stems, which held distillation at ~0 dB.
     """
     B, K = est.shape[:2]
     e = est.flatten(2)
     r = refs.flatten(2)
     with torch.no_grad():
-        proj = torch.einsum("bks,bjs->bkj", e, r) / (r.pow(2).sum(-1)[:, None] + 1e-8)
-        best = proj.argmax(-1)  # (B, K)
-        onehot = torch.nn.functional.one_hot(best, refs.shape[1]).to(est.dtype)  # (B, K, J)
         energy = r.pow(2).sum(-1)
-        keep = energy > min_share * energy.sum(-1, keepdim=True)
+        keep = energy > min_share * energy.sum(-1, keepdim=True)  # (B, J)
+        overlap = torch.einsum("bks,bjs->bkj", e.float(), r.float()).masked_fill(~keep[:, None], float("-inf"))
+        best = overlap.argmax(-1)  # (B, K)
+        onehot = torch.nn.functional.one_hot(best, refs.shape[1]).to(est.dtype)  # (B, K, J)
     grouped = torch.einsum("bkj,bkcs->bjcs", onehot, est)
     snr = neg_snr(grouped, refs)[keep]
     loss = snr.mean() if snr.numel() else est.sum() * 0

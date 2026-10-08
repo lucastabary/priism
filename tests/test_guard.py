@@ -39,11 +39,14 @@ def test_guard_stops_silent_and_gpu_idle_jobs(tmp_path):
     assert run(28, 0) == ["0004-train.sh"] and stopped[-1][1] == "GPU idle for 15 min"
 
 def test_guard_kills_the_job_process_group(tmp_path, monkeypatch):
-    monkeypatch.setattr(guard.time, "sleep", lambda s: None)
     _queue(tmp_path, "0005-hang.sh", "sleep 300 & wait\n", 0)
     script = tmp_path / "running" / "0005-hang.sh"
     proc = subprocess.Popen(["bash", str(script)], start_new_session=True)
-    time.sleep(0.5)
+    for _ in range(100):  # until the job's bash shows up in /proc with its script argument
+        if guard.job_pgids(script):
+            break
+        time.sleep(0.05)
+    monkeypatch.setattr(guard.time, "sleep", lambda s: None)
     guard.stop(tmp_path, script, "test", log=lambda m: None)
     assert proc.wait(timeout=10) != 0
     assert "guard" in (tmp_path / "logs" / "0005-hang.log").read_text()

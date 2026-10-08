@@ -221,3 +221,16 @@ def test_plateau_detection():
     h.append({"step": 4, "valid_sep_snr": 7.0, "valid_twins_sep_snr": 1.0})  # a set still gaining keeps it going
     h[0]["valid_twins_sep_snr"] = 0.5
     assert not _stalled(h, 2, 0.1)
+
+
+def test_grouping_ignores_near_silent_stems():
+    from priism.model.distill import group_loss
+    from priism.model.evaluate import group_outputs
+
+    torch.manual_seed(0)
+    refs = torch.randn(1, 4, 2, 2000)
+    refs[0, 2:] *= 1e-4  # stems the teacher found (almost) nothing for
+    est = torch.cat([refs[:, :2] * 0.5, refs[:, :2] * 0.5, torch.zeros(1, 4, 2, 2000)], 1)
+    assert group_loss(est, refs)[1] > 25
+    g = group_outputs(est[0], refs[0])
+    torch.testing.assert_close(g[:2], refs[0, :2])

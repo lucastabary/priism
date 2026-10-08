@@ -41,8 +41,9 @@ def group_outputs(est: torch.Tensor, refs: torch.Tensor) -> torch.Tensor:
     """est (K, C, S) outputs, refs (J, C, S) -> (J, C, S): each output added to its best-explained stem."""
     e = est.flatten(1)
     r = refs.flatten(1)
-    proj = (e @ r.T) / (r.pow(2).sum(1) + 1e-8)  # (K, J): share of each stem in each output
-    best = proj.argmax(1)
+    # Largest inner product: the stem whose error this output lowers most. (Dividing by stem energy
+    # favoured near-silent stems.)
+    best = (e @ r.T).argmax(1)
     out = torch.zeros_like(refs)
     out.index_add_(0, best, est)
     return out
