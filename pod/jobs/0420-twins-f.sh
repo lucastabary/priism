@@ -1,7 +1,7 @@
-# after: 0330 0401 0402
-# GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
-# pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
-# Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
+# after: 0410
+# GPU: stage F, twins. Continues stage E with 70 % of songs holding a twin pair (same instrument,
+# two parts) and a 3x heavier count loss: B left twins merged and output too few tracks.
+# Judge F on valid_gen_valid_twins_* and the NI songs (data/gen_valid is the old generator).
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -18,11 +18,11 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.7
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-  --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt \
+  --msst-path msst --max-sources 16 --init runs/surge-e/model.pt \
   --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
-  --valid data/gen_valid data/gen_valid_twins --out runs/surge-e \
+  --valid data/gen_valid data/gen_valid_twins --out runs/twins-f --exist-weight 3 \
   --steps 10000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
   --save-every 1000 --log-every 50

@@ -63,7 +63,8 @@ def load_run(run: str | Path, device: str = "cpu", msst_path: str | Path | None 
 def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps: int = 200, batch: int = 4,
           chunk_s: float = 3.0, lr: float = 3e-4, device: str = "cpu", log_every: int = 10, workers: int = 0,
           seed: int = 0, lossy_p: float = 0.0, msst: dict | None = None, core_lr_scale: float = 0.1,
-          valid: str | Path | None = None, valid_items: int = 64, save_every: int = 1000,
+          valid: str | Path | list | None = None, valid_items: int = 64, save_every: int = 1000,
+          exist_weight: float = 1.0,
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, log=print) -> list[dict]:
@@ -118,10 +119,13 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
                 sched.step()
         log(f"resumed at step {start}")
     amp = torch.autocast("cuda", dtype=torch.bfloat16) if str(device).startswith("cuda") else nullcontext()
-    vds = SongChunks(valid, chunk_s, sr, items_per_song=1, seed=1) if valid else None
+    # Several validation sets: the first logs as valid_*, the others as valid_<folder name>_*.
+    valid = [valid] if isinstance(valid, (str, Path)) else list(valid or [])
+    vds = [(("" if i == 0 else Path(v).name + "_"), SongChunks(v, chunk_s, sr, items_per_song=1, seed=1))
+           for i, v in enumerate(valid)]
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-              save_every, log)
+              save_every, log, exist_weight)
     finally:
         if pool:
             pool.stop()
@@ -129,7 +133,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
 
 def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-          save_every, log):
+          save_every, log, exist_weight=1.0):
     t0 = time.time()
     it = iter(dl)
     model.train()
@@ -142,7 +146,8 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
         mix, tg = mix.to(device), tg.to(device)
         with amp:
             o = model(mix)
-        loss, stats = pit_loss(o["sources"].float(), o["exist_logits"].float(), tg, n, mix)
+        loss, stats = pit_loss(o["sources"].float(), o["exist_logits"].float(), tg, n, mix,
+                               exist_weight=exist_weight)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -151,8 +156,9 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
         stats.update(step=step, count_acc=count_accuracy(o["exist_logits"].detach(), n), sec=round(time.time() - t0, 1))
         if step % log_every == 0 or step == steps:
             log(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}" for k, v in stats.items()))
-        if (step % save_every == 0 or step == steps) and vds is not None:
-            stats.update({f"valid_{k}": v for k, v in evaluate(model, vds, valid_items, device, amp).items()})
+        if (step % save_every == 0 or step == steps) and vds:
+            for name, ds in vds:
+                stats.update({f"valid_{name}{k}": v for k, v in evaluate(model, ds, valid_items, device, amp).items()})
             log(" ".join(f"{k}={v:.3g}" for k, v in stats.items() if k.startswith("valid_")))
         history.append(stats)
         if step % save_every == 0 or step == steps:

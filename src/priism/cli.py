@@ -43,6 +43,7 @@ def _train_sep(args: argparse.Namespace) -> None:
         raise SystemExit("train-sep needs --data or --stream")
     train(args.data, args.out, preset=args.preset, steps=args.steps, batch=args.batch, chunk_s=args.chunk,
           lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy, valid=args.valid,
+          exist_weight=args.exist_weight,
           save_every=args.save_every, stream=args.stream, stream_workers=args.stream_workers,
           stream_songs=args.stream_songs, stream_duration=args.stream_duration, init=args.init,
           stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
@@ -297,7 +298,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument("--workers", type=int, default=0, help="data loader processes")
     p.add_argument("--lossy", type=float, default=0.0, help="probability of an MP3/AAC/Opus pass on the mix")
-    p.add_argument("--valid", help="folder of fixed validation songs, scored at every save")
+    p.add_argument("--valid", nargs="+", help="folders of fixed validation songs, scored at every save")
+    p.add_argument("--exist-weight", type=float, default=1.0, help="weight of the source-count (existence) loss")
     p.add_argument("--save-every", type=int, default=1000, help="steps between checkpoints (resumable last.pt)")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--core-lr-scale", type=float, default=0.1, help="learning-rate factor of the pretrained core")

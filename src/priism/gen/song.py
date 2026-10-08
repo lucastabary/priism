@@ -21,7 +21,9 @@ from .fx import apply_fx, sample_fx
 from .genres import DRUM_KINDS, GENRES
 
 MIN_SOURCES, MAX_SOURCES = 2, 16
-TWIN_P = 0.3  # share of songs with a deliberate "same instrument, different part" pair
+# Share of songs with a deliberate "same instrument, different part" pair. PRIISM_TWIN_P raises it for training
+# runs that focus on twins (the threshold does not change the random stream: other songs stay identical).
+TWIN_P = float(os.environ.get("PRIISM_TWIN_P", "0.3"))
 TWINNABLE = ["acid", "lead", "arp", "pluck", "stab", "bass", "hat_closed", "conga"]
 AMBIGUOUS_P = 0.06  # share of songs with an indistinguishable pair (same patch, same register, interleaved notes)
 AMBIGUOUS_KINDS = ["lead", "arp", "pluck", "bass"]

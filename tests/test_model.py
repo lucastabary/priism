@@ -94,9 +94,11 @@ def test_train_saves_and_resumes(tmp_path):
 
     for s in range(2):
         write_song(s, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
-    kw = dict(preset="tiny", batch=2, chunk_s=1.0, log_every=1, save_every=2, valid=tmp_path / "songs", log=lambda m: None)
+    (tmp_path / "twins").symlink_to(tmp_path / "songs")
+    kw = dict(preset="tiny", batch=2, chunk_s=1.0, log_every=1, save_every=2, valid=[tmp_path / "songs", tmp_path / "twins"],
+              log=lambda m: None)
     h = train(tmp_path / "songs", tmp_path / "run", steps=2, **kw)
-    assert (tmp_path / "run" / "last.pt").exists() and "valid_sep_snr" in h[-1]
+    assert (tmp_path / "run" / "last.pt").exists() and "valid_sep_snr" in h[-1] and "valid_twins_sep_snr" in h[-1]
     logs = []
     h = train(tmp_path / "songs", tmp_path / "run", steps=4, **{**kw, "log": logs.append})
     assert any("resumed at step 3" in m for m in logs) and [x["step"] for x in h] == [1, 2, 3, 4]
