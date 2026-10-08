@@ -253,3 +253,33 @@ def test_validation_scores_twins_alone(tmp_path, monkeypatch):
     st = evaluate(model, ds, 1, "cpu")
     assert max(fam.count(f) for f in fam) > 1
     assert {"twin_snr", "twin_all5", "other_snr"} <= set(st)
+
+
+def test_msst_v2_starts_from_v1_weights_and_runs(tmp_path):
+    import os
+    import sys
+
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    sys.path.insert(0, msst)
+    pytest.importorskip("rotary_embedding_torch")
+    from models.bs_roformer.bs_roformer import BSRoformer
+
+    from priism.model.msst_core import MsstAttractorSeparator
+
+    bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
+    mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
+                            stft_n_fft=256, stft_hop_length=64, stft_win_length=256, flash_attn=False)
+    torch.manual_seed(0)
+    v1 = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2)
+    v2 = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2, v2=True)
+    missing, unexpected = v2.load_state_dict(v1.state_dict(), strict=False)
+    assert not unexpected and missing and all(k.startswith(("grid.", "refiner.")) for k in missing)
+    mix = torch.randn(2, 2, 4096) * 0.1
+    xk = torch.randn(3, 9, len(bands), 16)
+    torch.testing.assert_close(v2.refiner(xk), xk)  # identity at step 0
+    out = v2(mix)
+    assert out["sources"].shape == (2, 5, 2, 4096)
+    out["sources"].abs().mean().backward()
+    assert v2.refiner.out.weight.grad is not None and v2.grid.band.grad is not None

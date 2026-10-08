@@ -40,7 +40,8 @@ def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module,
         m = dict(msst or {})
         ckpt = m.get("ckpt")
         roformer = load_msst_roformer(m["config"], ckpt if ckpt not in (None, "None") else None, m["path"])
-        model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True)
+        model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True,
+                                       v2=bool(m.get("v2")))
         sr = yaml.load(Path(m["config"]).read_text(), Loader=yaml.FullLoader)["audio"]["sample_rate"]
         return model, sr, {"preset": preset, **{k: str(v) if isinstance(v, Path) else v for k, v in m.items()}}
     cfg = PRESETS[preset]
@@ -89,7 +90,15 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     torch.manual_seed(seed)
     model, sr, saved_cfg = build_model(preset, msst)
     if init:
-        model.load_state_dict(torch.load(init, map_location="cpu"))
+        state = torch.load(init, map_location="cpu")
+        if preset == "msst" and (msst or {}).get("v2"):  # a v1 run's weights: the v2 parts start at identity
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            if unexpected or any(not k.startswith(("grid.", "refiner.")) for k in missing):
+                raise ValueError(f"{init} does not fit: missing {missing}, unexpected {unexpected}")
+            if missing:
+                log(f"new v2 parts start fresh: {len(missing)} tensors")
+        else:
+            model.load_state_dict(state)
         log(f"weights from {init}")
     model = model.to(device)
     out = Path(out)

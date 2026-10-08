@@ -51,7 +51,7 @@ def _train_sep(args: argparse.Namespace) -> None:
           log_every=args.log_every, core_lr_scale=args.core_lr_scale, stop_at=args.stop_at,
           plateau=args.plateau,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
-                "max_sources": args.max_sources} if args.preset == "msst" else None)
+                "max_sources": args.max_sources, "v2": args.msst_v2} if args.preset == "msst" else None)
 
 
 def _listen(args: argparse.Namespace) -> None:
@@ -328,6 +328,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-ckpt", help="its checkpoint")
     p.add_argument("--msst-path", help="MSST checkout")
     p.add_argument("--max-sources", type=int, default=16, help="attractor slots of the msst preset")
+    p.add_argument("--msst-v2", action="store_true",
+                   help="twin mechanism: attractors read a time-frequency grid, per-slot context before the mask head")
     p.set_defaults(func=_train_sep)
 
     p = sub.add_parser("eval-sep", help="score a train-sep run on real songs with grouped stems (NI .stem.mp4)")

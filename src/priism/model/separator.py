@@ -105,10 +105,12 @@ class AttractorDecoder(nn.Module):
         self.decoder = nn.TransformerDecoder(layer, depth)
         self.exist = nn.Linear(dim, 1)
 
-    def forward(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, h: torch.Tensor, extra: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         B, T, Nb, D = h.shape
         # Memory: one token per (frame, band) would be T*Nb long; per-frame and per-band summaries keep it short.
         memory = torch.cat([h.mean(2), h.mean(1)], dim=1)  # (B, T + Nb, D)
+        if extra is not None:  # finer tokens (e.g. a time-frequency grid) next to the summaries
+            memory = torch.cat([memory, extra], dim=1)
         a = self.decoder(self.queries.expand(B, -1, -1), memory)  # (B, K, D)
         return a, self.exist(a).squeeze(-1)
 
