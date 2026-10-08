@@ -81,6 +81,11 @@ def test_files_can_be_listed_downloaded_and_resumed(tmp_path):
         (tmp_path / "local" / "model.ckpt.part").write_bytes(payload[:1000])  # interrupted earlier
         download(base, TOKEN, "runs/model.ckpt", dest)
         assert dest.read_bytes() == payload
+        # A transfer cut short keeps its .part instead of passing for the whole file.
+        short = tmp_path / "local" / "short.ckpt"
+        with pytest.raises(IOError):
+            download(base, TOKEN, "runs/model.ckpt", short, size=len(payload) + 1)
+        assert not short.exists() and (tmp_path / "local" / "short.ckpt.part").exists()
         with pytest.raises(urllib.error.HTTPError) as e:
             _call(base + "/files/..%2F..%2Fetc%2Fpasswd")
         assert e.value.code == 403

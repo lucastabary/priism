@@ -184,7 +184,7 @@ def _pod(args: argparse.Namespace) -> None:
             dest = Path(args.dest) / f["path"]
             if dest.exists() and dest.stat().st_size == f["size"]:
                 continue
-            download(args.url, token, f["path"], dest)
+            download(args.url, token, f["path"], dest, f["size"])
             print(f"pulled {f['path']} ({f['size'] / 1e6:.1f} MB)")
 
 
