@@ -26,6 +26,8 @@ if [ -d priism ]; then git -C priism pull --ff-only; else git clone https://gith
 grep -v -E '^(torch|torchaudio)([<>=~ ]|$)|wxpython|pyaudio|keyboard|sageattention' msst/requirements.txt > /tmp/msst-req.txt
 pip install -q -e priism
 pip install -q -r /tmp/msst-req.txt
+# Surge XT for the generator: built once on the volume by job 0400, linked here on every start.
+bash priism/pod/surge/build.sh --link-only
 
 mkdir -p models
 BASE=https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs
