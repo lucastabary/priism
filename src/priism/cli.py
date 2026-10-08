@@ -44,7 +44,9 @@ def _train_sep(args: argparse.Namespace) -> None:
     train(args.data, args.out, preset=args.preset, steps=args.steps, batch=args.batch, chunk_s=args.chunk,
           lr=args.lr, device=args.device, workers=args.workers, lossy_p=args.lossy, valid=args.valid,
           save_every=args.save_every, stream=args.stream, stream_workers=args.stream_workers,
-          stream_songs=args.stream_songs, stream_duration=args.stream_duration, log_every=args.log_every, core_lr_scale=args.core_lr_scale,
+          stream_songs=args.stream_songs, stream_duration=args.stream_duration, init=args.init,
+          stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
+          log_every=args.log_every, core_lr_scale=args.core_lr_scale,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
                 "max_sources": args.max_sources} if args.preset == "msst" else None)
 
@@ -235,6 +237,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stream-workers", type=int, default=4, help="song generator processes")
     p.add_argument("--stream-songs", type=int, default=400, help="songs kept in the pool")
     p.add_argument("--stream-duration", type=float, default=30.0, help="seconds per generated song")
+    p.add_argument("--stream-sources", help="sources per generated song, LO:HI (default: the generator's 2:16)")
+    p.add_argument("--init", help="start from these weights (model.pt of an earlier run)")
     p.add_argument("--out", required=True, help="run folder (config.json, model.pt, history.json)")
     p.add_argument("--preset", choices=["tiny", "small", "base", "msst"], default="tiny",
                    help="msst: pretrained MSST BS-RoFormer core (--msst-config/--msst-ckpt/--msst-path)")

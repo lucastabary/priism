@@ -123,3 +123,18 @@ def test_group_outputs_sums_outputs_into_their_stem():
     refs = torch.randn(3, 2, 500)
     est = torch.stack([0.6 * refs[0], 0.4 * refs[0], refs[2], refs[1]])
     torch.testing.assert_close(group_outputs(est, refs), refs)
+
+
+def test_stream_curriculum_limits_sources(tmp_path):
+    import json
+
+    from priism.model.stream import SongStream, ready_songs
+
+    pool = SongStream(tmp_path / "pool", workers=2, duration_s=2, sample_rate=22050, max_songs=10, first_seed=7,
+                      sources=(2, 3))
+    try:
+        pool.wait(min_songs=3, timeout_s=300)
+    finally:
+        pool.stop()
+    for song in ready_songs(tmp_path / "pool"):
+        assert 2 <= len(json.loads((song / "meta.json").read_text())["sources"]) <= 3

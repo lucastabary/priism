@@ -65,17 +65,22 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           seed: int = 0, lossy_p: float = 0.0, msst: dict | None = None, core_lr_scale: float = 0.1,
           valid: str | Path | None = None, valid_items: int = 64, save_every: int = 1000,
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
-          stream_duration: float = 30.0, log=print) -> list[dict]:
+          stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
+          init: str | Path | None = None, log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
     With ``stream`` (a local folder), training songs are generated during training by
     ``stream_workers`` processes (rolling pool of ``stream_songs``) instead of read from ``data``.
+    ``init`` starts from the weights of an earlier run (``model.pt``), e.g. the previous curriculum stage.
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
     """
     torch.manual_seed(seed)
     model, sr, saved_cfg = build_model(preset, msst)
+    if init:
+        model.load_state_dict(torch.load(init, map_location="cpu"))
+        log(f"weights from {init}")
     model = model.to(device)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -84,7 +89,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
     pool = None
     if stream:
-        pool = SongStream(stream, stream_workers, stream_duration, sr, max_songs=stream_songs)
+        pool = SongStream(stream, stream_workers, stream_duration, sr, max_songs=stream_songs, sources=stream_sources)
         pool.wait(min_songs=max(8, 2 * batch), log=log)
         ds = LiveSongs(stream, chunk_s, sr, seed=seed, lossy_p=lossy_p)
         dl = DataLoader(ds, batch_size=batch, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0)
