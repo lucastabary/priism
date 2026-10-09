@@ -11,8 +11,11 @@ Usage: python3 fetch_musdb_flac.py OUT_DIR
 
 from __future__ import annotations
 
+import http.client
 import io
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.request
 import zipfile
@@ -61,7 +64,7 @@ class HttpFile(io.RawIOBase):
                 if len(data) == n:
                     self.pos += n
                     return data
-            except OSError:
+            except (OSError, http.client.HTTPException):  # dropped or short responses: retry
                 pass
             time.sleep(2 ** attempt)
         raise OSError(f"range {self.pos}+{n} failed")
@@ -72,23 +75,35 @@ class HttpFile(io.RawIOBase):
         return len(data)
 
 
-def main(out: str) -> None:
+def main(out: str, threads: int = 8) -> None:
     out = Path(out)
-    z = zipfile.ZipFile(io.BufferedReader(HttpFile(URL), buffer_size=8 << 20))
-    members = [m for m in z.infolist() if m.filename.endswith(".wav") and not m.filename.endswith("mixture.wav")]
+    local = threading.local()  # one HTTP view and zip reader per thread: Zenodo caps each connection
+
+    def zip_reader() -> zipfile.ZipFile:
+        if not hasattr(local, "z"):
+            local.z = zipfile.ZipFile(io.BufferedReader(HttpFile(URL), buffer_size=8 << 20))
+        return local.z
+
+    members = [m.filename for m in zip_reader().infolist()
+               if m.filename.endswith(".wav") and not m.filename.endswith("mixture.wav")]
     print(f"{len(members)} stem files", flush=True)
-    for i, m in enumerate(members):
-        rel = Path(*Path(m.filename).parts[-3:])  # train|test / song / stem.wav
+    done = [0]
+
+    def one(name: str) -> None:
+        rel = Path(*Path(name).parts[-3:])  # train|test / song / stem.wav
         dest = (out / rel).with_suffix(".flac")
-        if dest.exists():
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        x, sr = sf.read(io.BytesIO(z.read(m)), dtype="int16", always_2d=True)
-        tmp = dest.with_suffix(".tmp")  # not an audio suffix: a crash leaves nothing training would read
-        sf.write(tmp, x, sr, format="FLAC", subtype="PCM_16")
-        tmp.rename(dest)
-        if i % 20 == 0:
-            print(f"{i + 1}/{len(members)} {rel}", flush=True)
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            x, sr = sf.read(io.BytesIO(zip_reader().read(name)), dtype="int16", always_2d=True)
+            tmp = dest.with_suffix(".tmp")  # not an audio suffix: a crash leaves nothing training would read
+            sf.write(tmp, x, sr, format="FLAC", subtype="PCM_16")
+            tmp.rename(dest)
+        done[0] += 1
+        if done[0] % 20 == 0:
+            print(f"{done[0]}/{len(members)} {rel}", flush=True)
+
+    with ThreadPoolExecutor(threads) as ex:
+        list(ex.map(one, members))  # re-raises the first error after its retries
     print("done", flush=True)
 
 
