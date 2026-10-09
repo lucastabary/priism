@@ -27,7 +27,8 @@ PRESETS = {
 }
 
 
-def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module, int, dict]:
+def build_model(preset: str, msst: dict | None = None, factors: bool = False,
+                factor_feedback: bool = False) -> tuple[torch.nn.Module, int, dict]:
     """Model, sample rate and the config saved next to its weights.
 
     ``preset="msst"`` wraps a pretrained MSST BS-RoFormer (``msst``: config, ckpt, path, max_sources).
@@ -40,12 +41,17 @@ def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module,
         m = dict(msst or {})
         ckpt = m.get("ckpt")
         roformer = load_msst_roformer(m["config"], ckpt if ckpt not in (None, "None") else None, m["path"])
+        sr = yaml.load(Path(m["config"]).read_text(), Loader=yaml.FullLoader)["audio"]["sample_rate"]
+        m["factors"] = bool(m.get("factors") or factors)
+        m["factor_feedback"] = bool(m.get("factor_feedback") or factor_feedback)
         model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True,
                                        v2=bool(m.get("v2")), slot_attention=bool(m.get("slot_attention")),
-                                       slot_warm=bool(m.get("slot_warm")))
-        sr = yaml.load(Path(m["config"]).read_text(), Loader=yaml.FullLoader)["audio"]["sample_rate"]
+                                       slot_warm=bool(m.get("slot_warm")), factors=m["factors"],
+                                       factor_feedback=m["factor_feedback"], sample_rate=sr)
         return model, sr, {"preset": preset, **{k: str(v) if isinstance(v, Path) else v for k, v in m.items()}}
-    cfg = PRESETS[preset]
+    from dataclasses import replace
+
+    cfg = replace(PRESETS[preset], factors=factors, factor_feedback=factor_feedback)
     return AttractorSeparator(cfg), cfg.sample_rate, {"preset": preset, **cfg.to_dict()}
 
 
@@ -57,7 +63,8 @@ def load_run(run: str | Path, device: str = "cpu", msst_path: str | Path | None 
         cfg = {**cfg, "ckpt": None, **({"path": msst_path} if msst_path else {})}
         model, sr, _ = build_model(preset, cfg)
     else:
-        model, sr, _ = build_model(preset)
+        model, sr, _ = build_model(preset, factors=bool(cfg.get("factors")),
+                                   factor_feedback=bool(cfg.get("factor_feedback")))
     model.load_state_dict(torch.load(Path(run) / "model.pt", map_location="cpu"))
     return model.to(device).eval(), sr
 
@@ -71,7 +78,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
           real_weight: float = 1.0, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
-          valid_chunk_s: float | None = None,
+          valid_chunk_s: float | None = None, factors: bool = False, factor_feedback: bool = False,
+          factor_weight: float = 1.0,
           log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
@@ -88,15 +96,19 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
     With a pretrained core (``preset="msst"``), the core learns at ``lr * core_lr_scale`` so the new
     attractor parts move fast without wrecking what the core knows.
+
+    ``factors`` adds the Z / P / V heads (factors.py), trained with weight ``factor_weight`` on the
+    generator's timelines; ``factor_feedback`` also draws the predicted notes back into each slot.
     """
     torch.manual_seed(seed)
-    model, sr, saved_cfg = build_model(preset, msst)
+    model, sr, saved_cfg = build_model(preset, msst, factors, factor_feedback)
     if init:
         state = torch.load(init, map_location="cpu")
-        if preset == "msst" and any((msst or {}).get(k) for k in ("v2", "slot_attention", "slot_warm")):
+        if factors or factor_feedback or (
+                preset == "msst" and any((msst or {}).get(k) for k in ("v2", "slot_attention", "slot_warm"))):
             # Weights of a run without these parts: the new parts start fresh (v2's at identity).
             missing, unexpected = model.load_state_dict(state, strict=False)
-            if unexpected or any(not k.startswith(("grid.", "refiner.", "slots.")) for k in missing):
+            if unexpected or any(not k.startswith(("grid.", "refiner.", "slots.", "factors.")) for k in missing):
                 raise ValueError(f"{init} does not fit: missing {missing}, unexpected {unexpected}")
             if missing:
                 log(f"new v2 parts start fresh: {len(missing)} tensors")
@@ -116,10 +128,11 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     if stream:
         pool = SongStream(stream, stream_workers, stream_duration, sr, max_songs=stream_songs, sources=stream_sources)
         pool.wait(min_songs=max(8, 2 * batch), log=log)
-        ds = LiveSongs(stream, chunk_s, sr, seed=seed, lossy_p=lossy_p)
+        ds = LiveSongs(stream, chunk_s, sr, seed=seed, lossy_p=lossy_p, labels=bool(factors or factor_feedback))
         dl = DataLoader(ds, batch_size=batch, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0)
     else:
-        ds = SongChunks(data, chunk_s, sr, items_per_song=10**6, seed=seed, lossy_p=lossy_p)
+        ds = SongChunks(data, chunk_s, sr, items_per_song=10**6, seed=seed, lossy_p=lossy_p,
+                        labels=bool(factors or factor_feedback))
         # Sampling with replacement: a shuffle of len(ds) indices (songs x 10**6 crops) would not fit in memory.
         sampler = RandomSampler(ds, replacement=True, num_samples=steps * batch)
         dl = DataLoader(ds, batch_size=batch, sampler=sampler, collate_fn=collate, num_workers=workers,
@@ -161,7 +174,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
         log(f"distillation on {len(rdl.dataset.files)} real songs, every {real_every} steps")
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-              save_every, log, exist_weight, teach, stop_at, plateau, plateau_delta)
+              save_every, log, exist_weight, teach, stop_at, plateau, plateau_delta, factor_weight)
     finally:
         if pool:
             pool.stop()
@@ -169,7 +182,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
 
 def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
-          save_every, log, exist_weight=1.0, teach=None, stop_at=None, plateau=0, plateau_delta=0.1):
+          save_every, log, exist_weight=1.0, teach=None, stop_at=None, plateau=0, plateau_delta=0.1,
+          factor_weight=1.0):
     t0 = time.time()
     if start == 1 and vds:  # the starting point, to judge what the run brings
         base = {"step": 0}
@@ -182,15 +196,23 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
     model.train()
     for step in range(start, end + 1):
         try:
-            mix, tg, n = next(it)
+            batch = next(it)
         except StopIteration:
             it = iter(dl)
-            mix, tg, n = next(it)
+            batch = next(it)
+        mix, tg, n = batch[:3]
         mix, tg = mix.to(device), tg.to(device)
         with amp:
             o = model(mix)
+        match = []
         loss, stats = pit_loss(o["sources"].float(), o["exist_logits"].float(), tg, n, mix,
-                               exist_weight=exist_weight)
+                               exist_weight=exist_weight, match=match)
+        if "factors" in o and len(batch) > 3:
+            from .factors import factor_loss
+
+            floss, fstats = factor_loss(o["factors"], batch[3], match, o["exist_logits"].shape[1], o["frame_s"])
+            loss = loss + factor_weight * floss
+            stats.update(fstats)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         if teach and step % teach["every"] == 0:

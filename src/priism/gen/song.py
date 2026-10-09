@@ -216,7 +216,10 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
         ghost = 0.04 if kind in ("snare", "hat_closed") and plan["drum_style"] in ("dnb", "breakbeat") else 0.0
         hits = drums.hits_for_bars(kind, base, bars, rng, ghost_p=ghost)
         y = drums.render_track(kind, voice, hits, n, sr, bpm, plan["swing"], rng)
-        info = {"voice": voice, "pattern": base, "pattern_style": style}
+        step_s = 60.0 / bpm / 4.0
+        info = {"voice": voice, "pattern": base, "pattern_style": style,
+                "timeline": [[(st + plan["swing"] * (st % 2)) * step_s, (st + 1 + plan["swing"] * (st % 2)) * step_s,
+                              -1.0, v, 1] for st, v in hits]}
     elif kind == "acid":
         synth = None
         shift = 0
@@ -226,6 +229,8 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
         y, info = tonal.render_acid(h, s["role"] or str(rng.choice(["rhythmic", "melodic"])), n, sr, bpm, rng,
                                     s["seed"], synth=synth, octave_shift=shift)
         y = y * _bar_mask(bars, n, sr, bpm)
+        bar_s = 4 * 60.0 / bpm
+        info["timeline"] = [e for e in info["timeline"] if int(e[0] // bar_s) in set(bars)]
     elif kind == "skank":
         y, info = tonal.render_skank(h, bars, n, sr, bpm, rng)
     elif kind == "siren":
@@ -262,7 +267,10 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
             y, surge_patch = None, None
         if y is None:
             y = tonal.render_notes(notes, patch, n, sr, bpm, rng)
-        info = {"patch": patch, "notes": len(notes)}
+        step_s = 60.0 / bpm / 4.0
+        info = {"patch": patch, "notes": len(notes),
+                "timeline": [[x.start * step_s, (x.start + x.length) * step_s, float(x.pitch), float(x.vel), 1]
+                             for x in notes]}
         if surge_patch:
             info["surge_patch"] = surge_patch
     return y, info
@@ -309,6 +317,10 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
     dry, kick_dry = {}, None
     for s in sorted(plan["sources"], key=lambda s: s["twin_of"] is not None):  # originals before their twins
         y, info = _render_source(s, plan, twin_state, n, sr)
+        # What the source plays, for the factor heads (model/factors.py): one [start s, end s, MIDI pitch
+        # (-1 = unpitched), velocity, onset (0 = slid into, no new attack)] per note or hit, dry timing.
+        s["timeline"] = [[round(float(a), 4), round(float(b), 4), round(float(p), 2), round(float(v), 3), int(o)]
+                         for a, b, p, v, o in info.pop("timeline", [])]
         twin_state[s["id"]] = info
         s["params"] = info
         dry[s["id"]] = y

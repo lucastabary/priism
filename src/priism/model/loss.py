@@ -25,20 +25,27 @@ def neg_snr(est: torch.Tensor, ref: torch.Tensor, soft_db: float = 30.0, eps: fl
 
 
 def pit_loss(sources: torch.Tensor, exist_logits: torch.Tensor, targets: torch.Tensor, n_targets: torch.Tensor,
-             mix: torch.Tensor, silence_weight: float = 0.1, exist_weight: float = 1.0, recon_weight: float = 0.5
-             ) -> tuple[torch.Tensor, dict]:
-    """sources (B, K, C, S), exist_logits (B, K), targets (B, Nmax, C, S) zero-padded, n_targets (B,), mix (B, C, S)."""
+             mix: torch.Tensor, silence_weight: float = 0.1, exist_weight: float = 1.0, recon_weight: float = 0.5,
+             match: list | None = None) -> tuple[torch.Tensor, dict]:
+    """sources (B, K, C, S), exist_logits (B, K), targets (B, Nmax, C, S) zero-padded, n_targets (B,), mix (B, C, S).
+
+    ``match``, a list, receives per example the (output rows, target cols) of the assignment.
+    """
     B, K = exist_logits.shape
     total_sep, total_sil, exist_target = 0.0, 0.0, torch.zeros_like(exist_logits)
     matched = 0
     for b in range(B):
         n = int(n_targets[b])
         if n == 0:
+            if match is not None:
+                match.append(((), ()))
             total_sil = total_sil + sources[b].abs().mean()
             continue
         tgt = targets[b, :n]
         cost = neg_snr(sources[b][:, None], tgt[None])  # (K, n)
         rows, cols = linear_sum_assignment(cost.detach().cpu().numpy())
+        if match is not None:
+            match.append((rows, cols))
         rows_t = torch.as_tensor(rows, device=sources.device)
         total_sep = total_sep + cost[rows, cols].sum()
         matched += n

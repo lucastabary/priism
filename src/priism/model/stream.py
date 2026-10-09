@@ -96,13 +96,14 @@ class LiveSongs(IterableDataset):
     """Endless random crops of the songs currently in ``folder`` (re-listed every ``refresh`` crops)."""
 
     def __init__(self, folder: str | Path, chunk_s: float, sample_rate: int, seed: int = 0, lossy_p: float = 0.0,
-                 refresh: int = 32):
+                 refresh: int = 32, labels: bool = False):
         self.folder = Path(folder)
         self.chunk = int(chunk_s * sample_rate)
         self.sr = sample_rate
         self.seed = seed
         self.lossy_p = lossy_p
         self.refresh = refresh
+        self.labels = labels
 
     def __iter__(self):
         info = get_worker_info()
@@ -119,6 +120,6 @@ class LiveSongs(IterableDataset):
             song = songs[int(rng.integers(len(songs)))]
             try:  # the pool may delete a song between listing and reading
                 meta = json.loads((song / "meta.json").read_text())
-                yield crop_example(song, meta, self.chunk, self.sr, rng, self.lossy_p)
+                yield crop_example(song, meta, self.chunk, self.sr, rng, self.lossy_p, with_labels=self.labels)
             except (FileNotFoundError, RuntimeError, OSError):
                 songs = []

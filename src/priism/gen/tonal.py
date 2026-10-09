@@ -348,7 +348,26 @@ def render_acid(h: Harmony, role: str, n: int, sr: int, bpm: float, rng: np.rand
                    synth=AcidSynth(**synth), fx=AcidFx(0, 0, 2, 2, 0, 5000, 0, 1, 0), duration_s=n / sr,
                    peak_dbfs=-1.0)
     y = acid_render_dry(p).astype(np.float64)[:n]
-    return np.pad(y, (0, n - len(y))), {"synth": synth, "root": root, "steps": len(steps)}
+    info = {"synth": synth, "root": root, "steps": len(steps),
+            "timeline": acid_timeline(steps, synth["gate_fraction"], n, sr, bpm)}
+    return np.pad(y, (0, n - len(y))), info
+
+
+def acid_timeline(steps, gate_fraction: float, n: int, sr: int, bpm: float) -> list[list]:
+    """Notes the 303 sequencer plays (same stepping as ``acid.synth.control_signals``): a slide into a gated
+    step changes pitch without a new attack (onset 0)."""
+    step_s = 60.0 / bpm / 4.0
+    out: list[list] = []
+    for i in range(int(np.ceil(n / sr / step_s))):
+        st, nxt = steps[i % len(steps)], steps[(i + 1) % len(steps)]
+        prev = steps[(i - 1) % len(steps)] if i > 0 else None
+        if not st.gate:
+            continue
+        tied_in = prev is not None and prev.gate and prev.slide
+        a = i * step_s
+        b = a + step_s * (1.0 if st.slide and nxt.gate else gate_fraction)
+        out.append([a, b, float(st.note), 1.0 if st.accent else 0.7, 0 if tied_in else 1])
+    return out
 
 
 def render_skank(h: Harmony, bars: list[int], n: int, sr: int, bpm: float, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
@@ -365,6 +384,7 @@ def render_skank(h: Harmony, bars: list[int], n: int, sr: int, bpm: float, rng: 
     strum = float(rng.uniform(0.002, 0.012)) if instrument == "guitar" else 0.0
     positions = SKANK_STYLES[style]
     y = np.zeros(n)
+    timeline = []  # [start s, end s, MIDI pitch, velocity, onset] per played note (see song.timeline)
     for bar in bars:
         notes = h.chord(bar, 4, int(rng.choice([3, 4])))
         for i, pos in enumerate(positions):
@@ -375,12 +395,13 @@ def render_skank(h: Harmony, bars: list[int], n: int, sr: int, bpm: float, rng: 
             hit = Hit(time_s=t, notes=list(notes), velocity=float(np.clip(rng.normal(0.8, 0.1), 0.3, 1.0)),
                       length_s=max(0.03, gate * (nxt - pos) * step_s), strum_s=strum, throw=False)
             x = skank_hit(hit, tone, sr, rng)
+            timeline += [[max(t, 0.0), max(t, 0.0) + hit.length_s, float(p), hit.velocity, 1] for p in notes]
             a = int(round(max(t, 0) * sr))
             m = min(len(x), n - a)
             if m > 0:
                 y[a:a + m] += x[:m]
     sos = butter(2, [tone.highpass_hz, min(tone.lowpass_hz, 0.45 * sr)], btype="band", fs=sr, output="sos")
-    return sosfilt(sos, y), {"instrument": instrument, "style": style}
+    return sosfilt(sos, y), {"instrument": instrument, "style": style, "timeline": timeline}
 
 
 def render_siren(bars: list[int], n: int, sr: int, bpm: float, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
@@ -392,6 +413,7 @@ def render_siren(bars: list[int], n: int, sr: int, bpm: float, rng: np.random.Ge
     rate = float(rng.uniform(1.5, 9.0))
     wave = str(rng.choice(["sine", "square", "tri"]))
     fires = [b for b in bars if rng.random() < 0.3] or bars[:1]
+    timeline = []  # the swept pitch has no note: unpitched segments (pitch -1)
     for b in fires:
         length = int(rng.choice([1, 2]))
         a = int(b * 16 * step_s * sr)
@@ -405,7 +427,8 @@ def render_siren(bars: list[int], n: int, sr: int, bpm: float, rng: np.random.Ge
                                                            else 4 * np.abs(ph % 1 - 0.5) - 1)
         env = np.minimum(1, t / 0.02) * np.minimum(1, (t[-1] - t) / 0.05)
         y[a:a + m] += x * env
-    return y, {"base_hz": base, "depth_oct": depth, "rate_hz": rate, "wave": wave}
+        timeline.append([a / sr, (a + m) / sr, -1.0, 1.0, 1])
+    return y, {"base_hz": base, "depth_oct": depth, "rate_hz": rate, "wave": wave, "timeline": timeline}
 
 
 def render_noise_fx(bars: list[int], section_starts: list[int], n: int, sr: int, bpm: float,
@@ -415,6 +438,7 @@ def render_noise_fx(bars: list[int], section_starts: list[int], n: int, sr: int,
     y = np.zeros(n)
     bar_set = set(bars)
     events = 0
+    timeline = []
     for s in section_starts:
         length = int(rng.choice([2, 4, 8]))
         if s - length < 0 or (s - 1) not in bar_set:
@@ -433,8 +457,10 @@ def render_noise_fx(bars: list[int], section_starts: list[int], n: int, sr: int,
             out[lo:hi] = sosfilt(butter(2, [fc * 0.7, min(fc * 1.4, 0.45 * sr)], btype="band", fs=sr, output="sos"), x[lo:hi])
         y[a:a + m] += out * np.linspace(0.05, 1, m) ** 2
         events += 1
+        timeline.append([a / sr, (a + m) / sr, -1.0, 1.0, 1])
     if events == 0 and bars:  # a downlifter so the track is not empty
         a = int(bars[0] * 16 * step_s * sr)
         m = min(int(2 * 16 * step_s * sr), n - a)
         y[a:a + m] += rng.uniform(-1, 1, m) * np.exp(-np.arange(m) / sr / 0.8)
-    return y, {"events": events}
+        timeline.append([a / sr, (a + m) / sr, -1.0, 1.0, 1])
+    return y, {"events": events, "timeline": timeline}
