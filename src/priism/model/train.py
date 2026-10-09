@@ -70,6 +70,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
           real_weight: float = 1.0, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
+          valid_chunk_s: float | None = None,
           log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
@@ -139,7 +140,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     amp = torch.autocast("cuda", dtype=torch.bfloat16) if str(device).startswith("cuda") else nullcontext()
     # Several validation sets: the first logs as valid_*, the others as valid_<folder name>_*.
     valid = [valid] if isinstance(valid, (str, Path)) else list(valid or [])
-    vds = [(("" if i == 0 else Path(v).name + "_"), SongChunks(v, chunk_s, sr, items_per_song=1, seed=1))
+    # Validation crops can keep their own length (valid_chunk_s), so runs with other chunks stay comparable.
+    vds = [(("" if i == 0 else Path(v).name + "_"), SongChunks(v, valid_chunk_s or chunk_s, sr, items_per_song=1, seed=1))
            for i, v in enumerate(valid)]
     teach = None
     if real:

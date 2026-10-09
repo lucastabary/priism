@@ -49,7 +49,7 @@ def _train_sep(args: argparse.Namespace) -> None:
           real=args.real, real_every=args.real_every, real_weight=args.real_weight,
           stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
           log_every=args.log_every, core_lr_scale=args.core_lr_scale, stop_at=args.stop_at,
-          plateau=args.plateau,
+          plateau=args.plateau, valid_chunk_s=args.valid_chunk,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
                 "max_sources": args.max_sources, "v2": args.msst_v2} if args.preset == "msst" else None)
 
@@ -321,6 +321,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="end after this step, keeping the schedule of --steps (probe; rerun to resume)")
     p.add_argument("--plateau", type=int, default=0,
                    help="stop once this many validations in a row gained nothing (0: never)")
+    p.add_argument("--valid-chunk", type=float, default=None,
+                   help="validation crop length in s (default: --chunk); keeps runs with other chunks comparable")
     p.add_argument("--save-every", type=int, default=1000, help="steps between checkpoints (resumable last.pt)")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--core-lr-scale", type=float, default=0.1, help="learning-rate factor of the pretrained core")

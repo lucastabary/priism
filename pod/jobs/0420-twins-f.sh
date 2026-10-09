@@ -1,4 +1,4 @@
-# after: 0410 0417 0418
+# after: 0410 0417 0417b 0418
 # Every 2nd step also distils the pretrained BS-Roformer-SW on real FMA songs (outputs grouped per
 # teacher stem): fine-tuning on synthetic songs alone made the core forget real music (NI: SW +8.1 dB
 # per stem, our stage B +2.5 dB).
@@ -28,6 +28,8 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFER
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Twin mechanism v2 when job 0417 (or 0352) found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
+# 8 s chunks when job 0417b found them better for twins (runs/USE_CHUNK8): same audio per step.
+CH="--chunk 4 --batch 6"; if [ -f runs/USE_CHUNK8 ]; then CH="--chunk 8 --batch 3 --valid-chunk 4"; fi
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
 run() {
@@ -35,7 +37,7 @@ run() {
     --msst-path msst --max-sources 16 --init runs/surge-e/model.pt $V2 \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
     --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/twins-f --exist-weight 3 \
-    --steps 10000 --batch 6 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
+    --steps 10000 $CH --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
