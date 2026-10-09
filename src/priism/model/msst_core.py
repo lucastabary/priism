@@ -66,6 +66,44 @@ class GridMemory(nn.Module):
         return g.flatten(1, 2)
 
 
+class SlotQueries(nn.Module):
+    """Slot attention (Locatello et al. 2020) over the time-frequency grid: the attractor queries come from
+    the mix instead of being fixed (v3). Fixed learned queries specialised one per instrument type (D: kick
+    in slot 9 for 93 % of songs, ~7 of 16 slots unused), so a second part of the same instrument had no slot
+    to go to. Here slots start as random draws of one shared distribution (exchangeable) and compete for
+    the grid's tokens (softmax over slots), so two 303 lines can take two slots. Draws are fixed in eval."""
+
+    def __init__(self, dim: int, iters: int = 3):
+        super().__init__()
+        self.iters = iters
+        self.mu = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.log_sigma = nn.Parameter(torch.full((1, 1, dim), -1.0))
+        self.norm_in, self.norm_slots, self.norm_mlp = nn.LayerNorm(dim), nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.to_q, self.to_k, self.to_v = (nn.Linear(dim, dim, bias=False) for _ in range(3))
+        self.gru = nn.GRUCell(dim, dim)
+        self.mlp = nn.Sequential(nn.Linear(dim, 2 * dim), nn.GELU(), nn.Linear(2 * dim, dim))
+
+    def forward(self, tokens: torch.Tensor, k: int) -> torch.Tensor:  # (B, N, D) -> (B, k, D)
+        B, N, D = tokens.shape
+        x = self.norm_in(tokens.float())
+        keys, vals = self.to_k(x), self.to_v(x)
+        if self.training:
+            noise = torch.randn(B, k, D, device=x.device)
+        else:
+            g = torch.Generator(device=x.device).manual_seed(0)
+            noise = torch.randn(1, k, D, device=x.device, generator=g).expand(B, -1, -1)
+        slots = self.mu + self.log_sigma.exp() * noise
+        for _ in range(self.iters):
+            prev = slots
+            q = self.to_q(self.norm_slots(slots))
+            attn = torch.softmax(torch.einsum("bnd,bkd->bnk", keys, q) * D ** -0.5, dim=-1) + 1e-8
+            attn = attn / attn.sum(1, keepdim=True)  # weighted mean of the tokens each slot won
+            upd = torch.einsum("bnk,bnd->bkd", attn, vals)
+            slots = self.gru(upd.reshape(-1, D), prev.reshape(-1, D)).reshape(B, k, D)
+            slots = slots + self.mlp(self.norm_mlp(slots))
+        return slots
+
+
 class SlotRefiner(nn.Module):
     """Per-slot context after FiLM (v2): dilated convolutions along time and attention across bands, in a
     small width, added back through a zero-initialised projection (identity at step 0). The pretrained mask
@@ -105,7 +143,8 @@ class SlotRefiner(nn.Module):
 
 class MsstAttractorSeparator(nn.Module):
     def __init__(self, roformer: nn.Module, max_sources: int = 16, decoder_depth: int = 2, heads: int = 8,
-                 init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False):
+                 init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False,
+                 slot_attention: bool = False):
         super().__init__()
         self.r = roformer
         self.grad_checkpoint = grad_checkpoint  # recompute activations in backward: long chunks fit in 24 GB
@@ -116,8 +155,11 @@ class MsstAttractorSeparator(nn.Module):
         nn.init.zeros_(self.film.bias)
         self.head = copy.deepcopy(roformer.mask_estimators[init_head])
         del self.r.mask_estimators  # the fixed stems are gone; only the shared conditioned head remains
-        self.v2 = v2
-        if v2:  # twins: attractors read a time-frequency grid, slots get their own context (see the classes)
+        self.v2 = v2 or slot_attention
+        self.slot_attention = slot_attention
+        if slot_attention:
+            self.slots = SlotQueries(dim)
+        if self.v2:  # twins: attractors read a time-frequency grid, slots get their own context (see the classes)
             self.grid = GridMemory(dim, len(roformer.band_split.to_features))
             self.refiner = SlotRefiner(dim)
 
@@ -171,7 +213,9 @@ class MsstAttractorSeparator(nn.Module):
         r = self.r
         B, C, S = mix.shape
         x, stft_repr, window = self._features(mix)
-        a, exist = self.attractors(x, self.grid(x) if self.v2 else None)
+        grid = self.grid(x) if self.v2 else None
+        queries = self.slots(grid, self.attractors.queries.shape[0]).to(x.dtype) if self.slot_attention else None
+        a, exist = self.attractors(x, grid, queries)
         K = a.shape[1]
         gamma, beta = self.film(a).chunk(2, dim=-1)
         xk = x[:, None] * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]  # (B, K, T, Nb, D)

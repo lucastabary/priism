@@ -283,3 +283,33 @@ def test_msst_v2_starts_from_v1_weights_and_runs(tmp_path):
     assert out["sources"].shape == (2, 5, 2, 4096)
     out["sources"].abs().mean().backward()
     assert v2.refiner.out.weight.grad is not None and v2.grid.band.grad is not None
+
+
+def test_slot_attention_queries_are_exchangeable_and_deterministic_in_eval(tmp_path):
+    import os
+    import sys
+
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    sys.path.insert(0, msst)
+    pytest.importorskip("rotary_embedding_torch")
+    from models.bs_roformer.bs_roformer import BSRoformer
+
+    from priism.model.msst_core import MsstAttractorSeparator
+
+    bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
+    mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
+                            stft_n_fft=256, stft_hop_length=64, stft_win_length=256, flash_attn=False)
+    v1 = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2)
+    m = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2, slot_attention=True)
+    missing, unexpected = m.load_state_dict(v1.state_dict(), strict=False)
+    assert not unexpected and any(k.startswith("slots.") for k in missing)
+    mix = torch.randn(2, 2, 4096) * 0.1
+    out = m(mix)
+    assert out["sources"].shape == (2, 5, 2, 4096)
+    out["sources"].abs().mean().backward()
+    assert m.slots.to_q.weight.grad is not None
+    m.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(m(mix)["sources"], m(mix)["sources"])  # fixed draws at inference
