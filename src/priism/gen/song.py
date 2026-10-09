@@ -21,6 +21,14 @@ from . import fx as fxmod
 from .fx import apply_fx, sample_fx, sample_pb_fx
 from .genres import DRUM_KINDS, GENRES
 
+# Effects shared by several tracks, as in a real mixing desk: one or two reverb rooms and a tape echo that many
+# parts are sent to, a sidechain compressor keyed by the kick, glue compressors on the drum and music groups.
+# Every source's share stays in its own track (shared reverbs and echoes are linear; group compressors apply the
+# group's gain to each member), so the mix is still the sum of the tracks. Off by default: songs stay exactly as
+# before; when on, the settings come from the song's own generator, so parts and levels stay the same.
+# Follows PRIISM_PB_FX unless set: one switch turns on the whole studio treatment.
+BUS_FX = os.environ.get("PRIISM_BUS_FX", os.environ.get("PRIISM_PB_FX", "0")) == "1"
+
 MIN_SOURCES, MAX_SOURCES = 2, 16
 # Share of songs with a deliberate "same instrument, different part" pair. PRIISM_TWIN_P raises it for training
 # runs that focus on twins (the threshold does not change the random stream: other songs stay identical).
@@ -308,6 +316,49 @@ def _master_gains(mix: np.ndarray, sr: int, m: dict) -> np.ndarray:
     return g * lim
 
 
+def sample_bus_fx(seed: int, genre: str) -> dict:
+    """Shared effects of one song, from the song's own generator."""
+    rng = np.random.default_rng([seed, 0xB5])
+    u = rng.uniform
+    dubby = genre in ("dub", "steppers", "dub_techno", "dubstep")
+    rooms = [{"rt60_s": float(u(0.3, 1.2) if i == 0 else u(1.5, 5.0)), "algo": bool(rng.random() < 0.5),
+              "damping": float(u(0.2, 0.8)), "seed": int(rng.integers(2**31)), "spring": bool(dubby and rng.random() < 0.4)}
+             for i in range(int(rng.integers(1, 3)))]  # a short room and, often, a long hall
+    echo = None
+    if rng.random() < (0.7 if dubby else 0.35):
+        echo = {"steps_l": int(rng.choice([3, 4, 6])), "steps_r": int(rng.choice([3, 4, 6, 8])),
+                "feedback": float(u(0.3, 0.8 if dubby else 0.6)), "lowpass_hz": float(u(1500, 5000))}
+    four = genre in ("techno", "house", "minimal", "dub_techno", "acid", "electro")
+    side = {"threshold": float(u(0.05, 0.4)), "ratio": float(u(3, 20)), "attack_s": float(u(0.0005, 0.01)),
+            "release_s": float(u(0.06, 0.35)), "extra_p": 0.6 if four else 0.25}
+    glue = {g: ({"threshold": float(u(0.2, 0.6)), "ratio": float(u(1.5, 4)), "attack_s": float(u(0.003, 0.03)),
+                 "release_s": float(u(0.05, 0.3))} if rng.random() < p else None)
+            for g, p in (("drums", 0.6), ("music", 0.4))}
+    return {"rooms": rooms, "echo": echo, "sidechain": side, "glue": glue}
+
+
+def _comp_gain(key: np.ndarray, sr: int, c: dict) -> np.ndarray:
+    """Gain curve (n,) of a compressor whose detector hears ``key`` (n, 2); threshold relative to its peak."""
+    env = _env_follow(np.max(np.abs(key), axis=1) if key.ndim == 2 else np.abs(key), sr, c["attack_s"], c["release_s"])
+    over = np.maximum(env / (c["threshold"] * np.max(env) + 1e-12), 1.0)
+    return over ** (1.0 / c["ratio"] - 1.0)
+
+
+def _bus_source(fx: dict, s: dict, bus: dict) -> None:
+    """Route one source to the song's shared effects (edits ``fx`` in place)."""
+    r = np.random.default_rng([s["seed"], 0xB6])
+    if fx["reverb_send"]:
+        room = bus["rooms"][int(r.integers(len(bus["rooms"])))]
+        fx["room"] = room
+        fx["reverb_rt60_s"], fx["spring"] = room["rt60_s"], room["spring"]
+    if fx["delay_send"] and bus["echo"]:
+        e = bus["echo"]
+        fx.update(delay_steps_l=e["steps_l"], delay_steps_r=e["steps_r"], delay_feedback=e["feedback"],
+                  delay_lowpass_hz=e["lowpass_hz"])
+    if s["kind"] in ("bass", "sub") and not fx["sidechain"] and r.random() < bus["sidechain"]["extra_p"]:
+        fx["sidechain"] = float(r.uniform(0.5, 1.0))
+
+
 def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, genre: str | None = None,
                 n_sources: int | None = None) -> tuple[np.ndarray, list[np.ndarray], dict]:
     """(mix (n, 2), tracks [(n, 2)], metadata). ``sum(tracks) == mix`` up to float rounding."""
@@ -330,16 +381,22 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
         if s["kind"] == "kick" and kick_dry is None:
             kick_dry = y
 
+    bus = sample_bus_fx(seed, plan["genre"]) if BUS_FX else None
     duck = None
     if kick_dry is not None and np.any(kick_dry):
-        e = _env_follow(kick_dry, sr, 0.002, 0.15)
-        duck = e / (np.max(e) + 1e-12)
+        if bus:  # a real sidechain compressor keyed by the kick: gain reduction 1 - g, scaled per source
+            duck = 1.0 - _comp_gain(kick_dry, sr, bus["sidechain"])
+        else:
+            e = _env_follow(kick_dry, sr, 0.002, 0.15)
+            duck = e / (np.max(e) + 1e-12)
 
     tracks = []
     for s in plan["sources"]:
         fx = sample_fx(s["kind"], plan["genre"], rng)
         if fxmod.PB_FX:
             fx["pb"] = sample_pb_fx(s["kind"], plan["genre"], s["seed"])
+        if bus:
+            _bus_source(fx, s, bus)
         y = apply_fx(dry[s["id"]], fx, sr, plan["bpm"], s["seed"] + 1)
         if fx["sidechain"] and duck is not None:
             y = y * (1.0 - fx["sidechain"] * duck)[:, None]
@@ -348,6 +405,14 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
         y = y * (10 ** (gain_db / 20) * 0.1 / rms) if rms > 0 else y
         s["fx"], s["gain_db"] = fx, gain_db
         tracks.append(y)
+
+    if bus:  # glue compressors: each group's gain curve, computed on the group's sum, applied to its members
+        for name, c in bus["glue"].items():
+            idx = [i for i, s in enumerate(plan["sources"]) if (s["kind"] in DRUM_KINDS) == (name == "drums")]
+            if c and len(idx) >= 2:
+                g = _comp_gain(np.sum([tracks[i] for i in idx], axis=0), sr, c)
+                for i in idx:
+                    tracks[i] = tracks[i] * g[:, None]
 
     mix = np.sum(tracks, axis=0)
     master = {"comp_threshold": float(rng.uniform(0.2, 0.6)), "comp_ratio": float(rng.uniform(1.5, 4.0)),
@@ -364,6 +429,8 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
 
     meta = {k: v for k, v in plan.items()}
     meta.update(sample_rate=sr, duration_s=n / sr, master=master, generator="priism.gen v2 step 1")
+    if bus:
+        meta["bus_fx"] = bus
     for s, t in zip(meta["sources"], tracks):
         s["rms_db"] = float(20 * np.log10(np.sqrt(np.mean(t**2)) + 1e-12))
     return mix, tracks, meta

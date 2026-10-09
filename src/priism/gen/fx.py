@@ -143,14 +143,19 @@ def apply_fx(dry: np.ndarray, fx: dict, sr: int, bpm: float, seed: int) -> np.nd
                         feedback_delay(x, int(fx["delay_steps_r"] * step), fx["delay_feedback"], fx["delay_lowpass_hz"], sr)],
                        axis=1)
         out = out + fx["delay_send"] * wet
-    if fx["reverb_send"] and pb and pb["algo_reverb"]:
+    # A shared room (song.py, PRIISM_BUS_FX) sets the reverb for every source sent to it: same algorithm, same
+    # IR. Reverbs are linear, so each source's share of the shared reverb stays in its own track.
+    room = fx.get("room")
+    algo = room["algo"] if room else bool(pb and pb["algo_reverb"])
+    if fx["reverb_send"] and algo:
         from pedalboard import Reverb
 
-        room = float(np.clip(fx["reverb_rt60_s"] / 4.0, 0.05, 0.98))
-        wet = _pb(out, [Reverb(room, pb["algo_reverb_damping"], wet_level=1.0, dry_level=0.0, width=0.5)], sr)
+        size = float(np.clip(fx["reverb_rt60_s"] / 4.0, 0.05, 0.98))
+        damping = room["damping"] if room else pb["algo_reverb_damping"]
+        wet = _pb(out, [Reverb(size, damping, wet_level=1.0, dry_level=0.0, width=0.5)], sr)
         out = out + fx["reverb_send"] * wet
     elif fx["reverb_send"]:
-        ir = reverb_ir(fx["reverb_rt60_s"], sr, np.random.default_rng(seed))
+        ir = reverb_ir(fx["reverb_rt60_s"], sr, np.random.default_rng(room["seed"] if room else seed))
         if fx["spring"]:
             ir = sosfilt(butter(2, [300, 4500], btype="band", fs=sr, output="sos"), ir, axis=0)
             ir /= np.sqrt(np.sum(ir**2, axis=0, keepdims=True))

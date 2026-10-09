@@ -149,3 +149,20 @@ def test_pedalboard_fx_change_only_the_sound(monkeypatch):
     assert np.all(np.isfinite(a)) and np.max(np.abs(a)) <= 1.0
     for t in tracks:
         assert np.max(np.abs(t)) > 1e-4
+
+
+def test_bus_fx_share_rooms_and_keep_the_mix_a_sum(monkeypatch):
+    from priism.gen import song as songmod
+
+    _, _, off = render_song(9, duration_s=8, sample_rate=22050, genre="dub")
+    monkeypatch.setattr(songmod, "BUS_FX", True)
+    mix, tracks, on = render_song(9, duration_s=8, sample_rate=22050, genre="dub")
+    again, _, _ = render_song(9, duration_s=8, sample_rate=22050, genre="dub")
+    np.testing.assert_array_equal(mix, again)
+    np.testing.assert_allclose(mix, np.sum(tracks, axis=0), atol=1e-5)
+    assert [s["gain_db"] for s in on["sources"]] == [s["gain_db"] for s in off["sources"]]
+    rooms = on["bus_fx"]["rooms"]
+    for s in on["sources"]:
+        if s["fx"]["reverb_send"]:
+            assert s["fx"]["room"] in rooms and s["fx"]["reverb_rt60_s"] == s["fx"]["room"]["rt60_s"]
+    assert np.all(np.isfinite(mix)) and np.max(np.abs(mix)) <= 1.0
