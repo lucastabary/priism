@@ -271,6 +271,8 @@ def _render_source(s: dict, plan: dict, twin_state: dict, n: int, sr: int) -> tu
         info = {"patch": patch, "notes": len(notes),
                 "timeline": [[x.start * step_s, (x.start + x.length) * step_s, float(x.pitch), float(x.vel), 1]
                              for x in notes]}
+        if not surge_patch and patch.get("sub", 0.0) >= 0.15:  # the built-in synth's sub oscillator: an octave below
+            info["timeline"] += [[e[0], e[1], e[2] - 12, e[3], 1] for e in info["timeline"]]
         if surge_patch:
             info["surge_patch"] = surge_patch
     return y, info
