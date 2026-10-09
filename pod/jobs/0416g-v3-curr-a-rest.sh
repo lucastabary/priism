@@ -1,5 +1,5 @@
-# after: 0416c 0416f
-# GPU: rest of v3 curriculum stage A (see 0416c), only when its 1000-step probe passed; resumes its last.pt.
+# after: 0416d 0416f
+# GPU: rest of v3 curriculum stage A (see 0416d), only when its 1000-step probe passed; resumes its last.pt.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -23,6 +23,6 @@ run() {
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
-if [ ! -f runs/v3-curr-a/PROBE_OK ]; then echo "probe of 0416c did not pass: nothing to do"; exit 0; fi
+if [ ! -f runs/v3-curr-a/PROBE_OK ]; then echo "probe of 0416d did not pass: nothing to do"; exit 0; fi
 run --batch 6 --plateau 3
 touch runs/v3-curr-a/DONE

@@ -1,4 +1,5 @@
 # after: 0416
+# (0416c died at step ~900 on a stream race, fixed in a3e9a40; renamed because the queue keeps failed names.)
 # GPU: curriculum for v3 (slot queries drawn from the mix, no slot tied to an instrument: Lucas's rule).
 # Cold v3 on twin-only songs of 3 to 8 sources was at 0.5 dB at step 1000 (D 8.9) and warm draws were worse:
 # with exchangeable slots the decoder has to learn the routing again. As in the first curriculum (A: 2-4
