@@ -28,7 +28,8 @@ PRESETS = {
 
 
 def build_model(preset: str, msst: dict | None = None, factors: bool = False,
-                factor_feedback: bool = False, factor_jepa: bool = False) -> tuple[torch.nn.Module, int, dict]:
+                factor_feedback: bool = False, factor_jepa: bool = False,
+                factor_mix_pitch: bool = False) -> tuple[torch.nn.Module, int, dict]:
     """Model, sample rate and the config saved next to its weights.
 
     ``preset="msst"`` wraps a pretrained MSST BS-RoFormer (``msst``: config, ckpt, path, max_sources).
@@ -45,17 +46,19 @@ def build_model(preset: str, msst: dict | None = None, factors: bool = False,
         m["factors"] = bool(m.get("factors") or factors)
         m["factor_feedback"] = bool(m.get("factor_feedback") or factor_feedback)
         m["factor_jepa"] = bool(m.get("factor_jepa") or factor_jepa)
-        m["factors"] = m["factors"] or m["factor_jepa"]
+        m["factor_mix_pitch"] = bool(m.get("factor_mix_pitch") or factor_mix_pitch)
+        m["factors"] = m["factors"] or m["factor_jepa"] or m["factor_mix_pitch"]
         model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True,
                                        v2=bool(m.get("v2")), slot_attention=bool(m.get("slot_attention")),
                                        slot_warm=bool(m.get("slot_warm")), factors=m["factors"],
                                        factor_feedback=m["factor_feedback"], sample_rate=sr,
-                                       factor_jepa=m["factor_jepa"], jepa_target=m["factor_jepa"])
+                                       factor_jepa=m["factor_jepa"], jepa_target=m["factor_jepa"],
+                                       factor_mix_pitch=m["factor_mix_pitch"])
         return model, sr, {"preset": preset, **{k: str(v) if isinstance(v, Path) else v for k, v in m.items()}}
     from dataclasses import replace
 
-    if factor_jepa:
-        raise ValueError("--factor-jepa needs the msst preset (its pretrained core gives the targets)")
+    if factor_jepa or factor_mix_pitch:
+        raise ValueError("--factor-jepa and --factor-mix-pitch need the msst preset")
     cfg = replace(PRESETS[preset], factors=factors, factor_feedback=factor_feedback)
     return AttractorSeparator(cfg), cfg.sample_rate, {"preset": preset, **cfg.to_dict()}
 
@@ -84,7 +87,7 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
           real_weight: float = 1.0, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
           valid_chunk_s: float | None = None, factors: bool = False, factor_feedback: bool = False,
-          factor_weight: float = 1.0, factor_jepa: bool = False,
+          factor_weight: float = 1.0, factor_jepa: bool = False, factor_mix_pitch: bool = False,
           log=print) -> list[dict]:
     """Train; resumes from ``out/last.pt`` when it exists (pods get stopped).
 
@@ -104,11 +107,12 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
 
     ``factors`` adds the Z / P / V heads (factors.py), trained with weight ``factor_weight`` on the
     generator's timelines; ``factor_feedback`` also draws the predicted notes back into each slot;
-    ``factor_jepa`` also asks (Z, P, V) to predict each source's latent from a frozen copy of the core.
+    ``factor_jepa`` also asks (Z, P, V) to predict each source's latent from a frozen copy of the core;
+    ``factor_mix_pitch`` lets P read the mix spectrum per semitone (factors.MixPitch).
     """
     torch.manual_seed(seed)
-    model, sr, saved_cfg = build_model(preset, msst, factors, factor_feedback, factor_jepa)
-    factors = factors or factor_jepa
+    model, sr, saved_cfg = build_model(preset, msst, factors, factor_feedback, factor_jepa, factor_mix_pitch)
+    factors = factors or factor_jepa or factor_mix_pitch
     if init:
         state = torch.load(init, map_location="cpu")
         if factors or factor_feedback or (

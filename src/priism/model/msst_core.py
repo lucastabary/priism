@@ -161,7 +161,7 @@ class MsstAttractorSeparator(nn.Module):
                  init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False,
                  slot_attention: bool = False, slot_warm: bool = False, factors: bool = False,
                  factor_feedback: bool = False, sample_rate: int = 44100, factor_jepa: bool = False,
-                 jepa_target: bool = False):
+                 jepa_target: bool = False, factor_mix_pitch: bool = False):
         super().__init__()
         if factor_jepa and jepa_target:  # frozen copy of the core as it comes in (pretrained SW): the JEPA target encoder
             from .factors import JepaTarget
@@ -187,11 +187,13 @@ class MsstAttractorSeparator(nn.Module):
             self.grid = GridMemory(dim, len(roformer.band_split.to_features))
             self.refiner = SlotRefiner(dim)
         self.frame_s = roformer.stft_kwargs["hop_length"] / sample_rate
-        if factors or factor_feedback or factor_jepa:  # each slot says what it plays: Z / P / V (see factors.py)
+        if factors or factor_feedback or factor_jepa or factor_mix_pitch:  # each slot says what it plays: Z / P / V (see factors.py)
             from .factors import FactorHeads
 
             self.factors = FactorHeads(dim, self._band_hz(sample_rate), feedback=factor_feedback,
-                                       jepa_k=8 if factor_jepa else 0)
+                                       jepa_k=8 if factor_jepa else 0,
+                                       mix_pitch=(sample_rate, roformer.stft_kwargs["n_fft"]) if factor_mix_pitch
+                                       else None)
 
     def _band_hz(self, sr: int) -> torch.Tensor:
         """[lo, hi) Hz of each band of the core's band split (bins counted from its input sizes)."""
@@ -267,7 +269,10 @@ class MsstAttractorSeparator(nn.Module):
             xk = self.refiner(xk)
         f = None
         if hasattr(self, "factors"):
-            f = self.factors(xk)
+            mag = None
+            if hasattr(self.factors, "mix_pitch"):  # (B, F*C, T, 2), bins major and channels minor
+                mag = stft_repr.float().pow(2).sum(-1).sqrt().unflatten(1, (-1, C)).mean(2).transpose(1, 2)
+            f = self.factors(xk, mag)
             if self.factors.feedback:
                 xk = xk + self.factors.back_features(f, xk.dtype)
         mask = self._ckpt(self.head, xk)  # (B*K, T, F*C*2)

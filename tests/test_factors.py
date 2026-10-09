@@ -164,3 +164,27 @@ def test_msst_training_with_jepa_logs_it_and_reloads(tmp_path):
     assert "jepa_cos" in h[-1] and "pitch_f1" in h[-1]
     model, _ = load_run(tmp_path / "run")
     assert hasattr(model.factors, "jepa")
+
+
+def test_semitone_filterbank_finds_a_tone_and_its_harmonics_reach_mix_pitch():
+    from priism.model.factors import MixPitch, semitone_filterbank
+
+    sr, n_fft = 44100, 2048
+    fb = semitone_filterbank(n_fft // 2 + 1, sr, n_fft)
+    assert fb.shape == (1025, 128) and (fb.sum(0) <= 1 + 1e-5).all() and (fb[:, :127].sum(0) > 0).all()
+    t = torch.arange(n_fft) / sr
+    for hz, midi in [(220.0, 57), (440.0, 69), (1760.0, 93)]:
+        spec = torch.fft.rfft(torch.sin(2 * torch.pi * hz * t) * torch.hann_window(n_fft)).abs()
+        assert int((spec @ fb).argmax()) == midi, hz
+    mp = MixPitch(32, sr, n_fft)
+    out = mp(spec[None, None].expand(2, 7, -1), torch.randn(2 * 3, 6, 32))
+    assert out.shape == (6, 6, 128)
+
+
+def test_msst_mix_pitch_trains_and_reloads(tmp_path):
+    m = _small_msst(v2=True, factor_feedback=True, factor_mix_pitch=True, sample_rate=44100).train()
+    o = m(torch.randn(2, 2, 4096) * 0.1)
+    assert o["factors"]["pitch"].shape == (10, 4096 // 64 + 1, 128)
+    o["factors"]["pitch"].mean().backward()
+    assert m.factors.mix_pitch.query.weight.grad is not None
+    assert not any(k.endswith("mix_pitch.fb") for k in m.state_dict())
