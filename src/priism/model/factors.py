@@ -82,13 +82,53 @@ def harmonic_comb(band_hz: torch.Tensor, n_harm: int = 16) -> torch.Tensor:
     return out / out.sum(1, keepdim=True).clamp_min(1e-6)
 
 
+class JepaTarget(nn.Module):
+    """What the factors must explain (JEPA-style, Lucas 2026-10-09): the features a frozen copy of the
+    pretrained core gives for the clean, isolated source, per frame and band, layer-normalised and reduced
+    by a fixed random projection to ``k`` numbers per band. Nothing here learns, so the target cannot
+    collapse; the factors rebuild the source in this latent space instead of as audio (no heavy decoder)."""
+
+    def __init__(self, encoder: nn.Module, dim: int, k: int = 8):
+        super().__init__()
+        self.encoder = [encoder.eval().requires_grad_(False)]  # a list: kept out of state_dict and .to()
+        g = torch.Generator().manual_seed(0)
+        self.register_buffer("proj", torch.linalg.qr(torch.randn(dim, dim, generator=g))[0][:, :k].contiguous(),
+                             persistent=False)
+
+    @torch.no_grad()
+    def forward(self, features_fn, wav: torch.Tensor) -> torch.Tensor:  # (N, C, S) -> (N, T, Nb * k)
+        enc = self.encoder[0]
+        if next(enc.parameters()).device != wav.device:
+            enc.to(wav.device)
+        h = features_fn(wav, enc)
+        h = F.layer_norm(h.float(), h.shape[-1:])
+        return torch.einsum("ntbd,dk->ntbk", h, self.proj).flatten(2)
+
+
+def jepa_loss(f: dict[str, torch.Tensor], predictor: nn.Module, slots: torch.Tensor, target: torch.Tensor
+              ) -> tuple[torch.Tensor, float]:
+    """The source's latent per frame predicted from its slot's Z (constant), notes P(t) and variation V(t) only."""
+    T = min(f["pitch"].shape[1], target.shape[1])
+    x = torch.cat([f["z"][slots, None].expand(-1, T, -1), torch.sigmoid(f["pitch"][slots, :T]),
+                   torch.sigmoid(f["onset"][slots, :T, None]), torch.sigmoid(f["active"][slots, :T, None]),
+                   f["v"][slots, :T]], -1)
+    pred = predictor(x)
+    tgt = F.layer_norm(target[:, :T], target.shape[-1:])
+    loss = F.smooth_l1_loss(F.layer_norm(pred, pred.shape[-1:]), tgt)
+    cos = float(F.cosine_similarity(pred.detach(), tgt, dim=-1).mean())
+    return loss, cos
+
+
 class FactorHeads(nn.Module):
     """Z / P / V of every slot from the slot's own features (N = slots, T frames, Nb bands, D)."""
 
     def __init__(self, dim: int, band_hz: torch.Tensor, width: int = 16, hidden: int = 256, z_dim: int = 64,
-                 v_dim: int = 16, feedback: bool = False):
+                 v_dim: int = 16, feedback: bool = False, jepa_k: int = 0):
         super().__init__()
         nb = len(band_hz)
+        if jepa_k:  # predicts the source's frozen-core latent from (Z, P, V): see JepaTarget
+            self.jepa = nn.Sequential(nn.Linear(z_dim + N_PITCH + 2 + v_dim, 2 * hidden), nn.GELU(),
+                                      nn.Linear(2 * hidden, 2 * hidden), nn.GELU(), nn.Linear(2 * hidden, nb * jepa_k))
         self.squeeze = nn.Linear(dim, width)  # per (frame, band) token, then all bands of a frame together
         self.frame = nn.Sequential(nn.LayerNorm(nb * width), nn.Linear(nb * width, hidden), nn.GELU())
         self.time = nn.Conv1d(hidden, hidden, 5, padding=2, groups=hidden // 16)  # a little context in time
@@ -158,10 +198,10 @@ def factor_loss(f: dict[str, torch.Tensor], labels: list[dict | None], match: li
     roll = torch.stack([t["roll"] for t in tg]).to(dev)
     onset, active, vel = (torch.stack([t[k] for t in tg]).to(dev) for k in ("onset", "active", "vel"))
     pitched = (roll.sum((1, 2)) > 0).float()  # unpitched sources: the roll must stay empty, lighter weight
-    lp = F.binary_cross_entropy_with_logits(f["pitch"][i], roll, pos_weight=torch.tensor(5.0, device=dev),
+    lp = F.binary_cross_entropy_with_logits(f["pitch"][i], roll, pos_weight=torch.tensor(30.0, device=dev),
                                             reduction="none").mean((1, 2))
     lp = (lp * (0.25 + 0.75 * pitched)).mean()
-    lo = F.binary_cross_entropy_with_logits(f["onset"][i], onset, pos_weight=torch.tensor(5.0, device=dev))
+    lo = F.binary_cross_entropy_with_logits(f["onset"][i], onset, pos_weight=torch.tensor(30.0, device=dev))
     la = F.binary_cross_entropy_with_logits(f["active"][i], active)
     lv = ((f["vel"][i] - vel).pow(2) * active).sum() / active.sum().clamp_min(1)
     fx = torch.as_tensor(np.stack(fxs), device=dev)
@@ -186,7 +226,11 @@ def factor_loss(f: dict[str, torch.Tensor], labels: list[dict | None], match: li
         sel = pitched > 0
         tp = (pred * roll)[sel].sum()
         f1 = float(2 * tp / (pred[sel].sum() + roll[sel].sum()).clamp_min(1)) if sel.any() else float("nan")
+        # Top-1: on frames where notes play, is the slot's most likely note one of them (no threshold involved).
+        on = roll.sum(-1) > 0
+        top = f["pitch"][i].argmax(-1, keepdim=True)
+        top1 = float(roll.gather(-1, top).squeeze(-1)[on].mean()) if on.any() else float("nan")
         on_pred = (f["onset"][i] > 0).float()
         on_f1 = float(2 * (on_pred * onset).sum() / (on_pred.sum() + onset.sum()).clamp_min(1))
-    return loss, {"f_loss": float(loss.detach()), "pitch_f1": f1, "onset_f1": on_f1, "z_acc": z_acc,
+    return loss, {"f_loss": float(loss.detach()), "pitch_f1": f1, "pitch_top1": top1, "onset_f1": on_f1, "z_acc": z_acc,
                   "fx_mse": float(lfx.detach())}
