@@ -165,3 +165,19 @@ def msst_fn(config, ckpt, msst_path, device: str = "cpu") -> ModelFn:
         return model(torch.from_numpy(np.ascontiguousarray(mix))[None].to(device))[0].float().cpu().numpy()
 
     return fn
+
+
+def cascade_fn(first: ModelFn, second: ModelFn, quiet_db: float = -40.0) -> ModelFn:
+    """``first`` (e.g. BS-Roformer-SW, fixed stems) on the mix, then ``second`` (a class-free run) on each of
+    its stems; stems more than ``quiet_db`` under the mix are kept whole. Outputs still sum to the mix."""
+
+    def fn(mix: np.ndarray) -> np.ndarray:
+        level = float(np.mean(mix**2)) + 1e-12
+        out = []
+        for stem in first(mix):
+            loud = 10 * np.log10(float(np.mean(stem**2)) / level + 1e-12) > quiet_db
+            out.extend(second(np.ascontiguousarray(stem, dtype=np.float32)) if loud else [stem])
+        return np.stack(out)
+
+    return fn
+

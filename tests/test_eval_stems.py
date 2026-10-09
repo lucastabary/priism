@@ -35,3 +35,13 @@ def test_evaluate_on_mshoxx_layout(tmp_path):
     oracle = lambda mix: np.stack([np.repeat(x[None, : mix.shape[1]], 2, 0) for x in stems.values()])
     summ = evaluate(oracle, tmp_path, tmp_path / "out", segment_s=2.0, segments=1, log=lambda *_: None)
     assert summ["strict_above_5db"] == 1.0 and summ["drums_mean"] > 30
+
+
+def test_cascade_splits_loud_stems_only():
+    from priism.model.eval_stems import cascade_fn
+
+    mix = np.ones((2, 100), np.float32)
+    first = lambda m: np.stack([m * 0.999, m * 0.001])  # second stem is 60 dB down: kept whole
+    second = lambda s: np.stack([s * 0.5, s * 0.5])
+    out = cascade_fn(first, second)(mix)
+    assert out.shape == (3, 2, 100) and np.allclose(out.sum(0), mix)
