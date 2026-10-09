@@ -1,15 +1,17 @@
 # after: 0416 0416f
 # GPU: 1000-step probe of the factor heads with the JEPA-style target (Lucas, 2026-10-09): on top of 0416f,
 # each slot's (Z, P, V) must also predict its clean source's latent in a frozen copy of the pretrained core
-# (--factor-jepa), a reconstruction without an audio decoder. Same run, same control: duel-v3 at step 1000.
-# Pass = twins +0.3 dB over duel-v3 without losing 0.5 dB on the broad set: writes runs/USE_JEPA.
+# (--factor-jepa), a reconstruction without an audio decoder. Same run, same control: duel-v2 at step 1000.
+# Pass = twins +0.3 dB over duel-v2 without losing 0.5 dB on the broad set: writes runs/USE_JEPA.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
 git -C priism pull -q --ff-only  # this probe needs the factor heads (main 37c92f1 or later)
 test -f runs/gen-real-d/DONE
-# The control is the warm v3 duel (0416-duel-v3w writes runs/duel-v3 with a WARM mark): same flags as here.
-test -f runs/duel-v3/WARM
+# Control: the v2 duel (0415, runs/duel-v2, same init, songs and schedule) at step 1000. The slot-attention
+# runs (v3 cold and warm) start near -1 to -2 dB instead of D's 8.9, so they cannot judge the heads; the
+# heads do not depend on how the slots are drawn and go on whichever slot scheme wins.
+test -f runs/duel-v2/history.json
 # nproc can show every core of the host: the container's CPU quota is the real limit.
 N=$(nproc)
 if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then N=$(( q / per < N ? q / per : N ))
@@ -21,7 +23,7 @@ GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM eac
 rm -f runs/USE_JEPA
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --msst-slots-warm --factor-feedback --factor-jepa \
+    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --factor-feedback --factor-jepa \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 3:8 \
     --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/probe-jepa --exist-weight 2 \
     --steps 4000 --stop-at 1000 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
@@ -39,12 +41,12 @@ def at(run, step):
     return next((x for x in h if x["step"] == step and "valid_sep_snr" in x), None)
 
 twin = ["valid_gen_valid_twins_twin_snr", "valid_gen_valid_twins3_twin_snr"]
-ctl, fac = at("duel-v3", 1000), at("probe-jepa", 1000)
+ctl, fac = at("duel-v2", 1000), at("probe-jepa", 1000)
 if not ctl or not fac:
-    raise SystemExit(f"missing validation at step 1000: duel-v3 {bool(ctl)}, probe-jepa {bool(fac)}")
+    raise SystemExit(f"missing validation at step 1000: duel-v2 {bool(ctl)}, probe-jepa {bool(fac)}")
 for k in twin + ["valid_gen_valid_twins_twin_all5", "valid_gen_valid_twins3_twin_all5", "valid_sep_snr"]:
     if k in ctl and k in fac:
-        print(f"{k}: duel-v3 {ctl[k]:.3f}  factors {fac[k]:.3f}  ({fac[k] - ctl[k]:+.3f})")
+        print(f"{k}: duel-v2 {ctl[k]:.3f}  factors {fac[k]:.3f}  ({fac[k] - ctl[k]:+.3f})")
 ks = [k for k in twin if k in ctl and k in fac]
 gain = sum(fac[k] - ctl[k] for k in ks) / len(ks)
 drop = ctl["valid_sep_snr"] - fac["valid_sep_snr"]
