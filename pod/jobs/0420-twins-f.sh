@@ -1,4 +1,4 @@
-# after: 0410
+# after: 0410 0417
 # Every 2nd step also distils the pretrained BS-Roformer-SW on real FMA songs (outputs grouped per
 # teacher stem): fine-tuning on synthetic songs alone made the core forget real music (NI: SW +8.1 dB
 # per stem, our stage B +2.5 dB).
@@ -26,7 +26,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 # host core (48) in every loader and generator, far above the 10-core quota.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5 PRIISM_TWIN_SPREAD=0.6
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
-# Twin mechanism v2 when job 0352 found it better than the control (runs/USE_V2).
+# Twin mechanism v2 when job 0417 (or 0352) found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
