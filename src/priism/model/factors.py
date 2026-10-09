@@ -119,13 +119,61 @@ def jepa_loss(f: dict[str, torch.Tensor], predictor: nn.Module, slots: torch.Ten
     return loss, cos
 
 
+def semitone_filterbank(n_bins: int, sr: int, n_fft: int) -> torch.Tensor:
+    """(n_bins, 128): triangular weights of each STFT bin for each MIDI pitch, one semitone either side, or
+    wider down low where bins are sparser than semitones (then the closest pitch to a bin still weighs most).
+    Up high a pitch averages its bins; pitches above Nyquist stay empty."""
+    f = torch.arange(n_bins, dtype=torch.float64) * sr / n_fft
+    fb = torch.zeros(n_bins, N_PITCH, dtype=torch.float64)
+    for m in range(N_PITCH):
+        fc = 440.0 * 2 ** ((m - 69) / 12)
+        if fc >= sr / 2:
+            break
+        d = (12 * torch.log2(f.clamp_min(1e-3) / fc)).abs()
+        d[0] = float("inf")
+        w = (1 - d / max(1.0, float(d.min()) + 0.5)).clamp_min(0)
+        fb[:, m] = w / max(float(w.sum()), 1.0)
+    return fb.float()
+
+
+class MixPitch(nn.Module):
+    """Notes heard in the mix, at semitone resolution (v2 of P). The slot features are coarse in frequency
+    (BS-RoFormer bands); here the mix spectrum is read per semitone and a conv over the pitch axis spanning
+    3 octaves above each note gathers its harmonics. Each slot then picks which of these notes are its own
+    (a per-frame query against per-pitch keys): two identical 303s see the same notes and split them."""
+
+    def __init__(self, hidden: int, sr: int, n_fft: int, c: int = 16, span: int = 49):
+        super().__init__()
+        self.register_buffer("fb", semitone_filterbank(n_fft // 2 + 1, sr, n_fft), persistent=False)
+        self.span = span
+        self.keys = nn.Sequential(nn.Conv1d(1, c, span), nn.GELU(), nn.Conv1d(c, c, 5, padding=2))
+        self.query = nn.Linear(hidden, c)
+
+    def forward(self, mag: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        """mag (B, T, F) mix magnitude, h (B*K, T', hidden) slot frames -> pitch logits (B*K, T', 128)."""
+        B, T, _ = mag.shape
+        K = h.shape[0] // B
+        roll = torch.log1p(mag.float() @ self.fb * 100)
+        roll = (roll - roll.mean(-1, keepdim=True)) / (roll.std(-1, keepdim=True) + 1e-4)
+        e = self.keys(F.pad(roll.reshape(B * T, 1, N_PITCH), (0, self.span - 1)))  # note p sees p .. p+48
+        e = e.reshape(B, T, -1, N_PITCH)
+        Th = h.shape[1]
+        if Th != T:  # frame counts can differ by one between front-ends
+            e = F.interpolate(e.permute(0, 2, 3, 1).flatten(1, 2), size=Th, mode="nearest") \
+                .unflatten(1, (-1, N_PITCH)).permute(0, 3, 1, 2)
+        q = self.query(h).float().reshape(B, K, Th, -1)
+        return (torch.einsum("bktc,btcp->bktp", q, e) / q.shape[-1] ** 0.5).flatten(0, 1)
+
+
 class FactorHeads(nn.Module):
     """Z / P / V of every slot from the slot's own features (N = slots, T frames, Nb bands, D)."""
 
     def __init__(self, dim: int, band_hz: torch.Tensor, width: int = 16, hidden: int = 256, z_dim: int = 64,
-                 v_dim: int = 16, feedback: bool = False, jepa_k: int = 0):
+                 v_dim: int = 16, feedback: bool = False, jepa_k: int = 0, mix_pitch: tuple[int, int] | None = None):
         super().__init__()
         nb = len(band_hz)
+        if mix_pitch:  # (sample rate, n_fft): P also reads the mix spectrum per semitone, see MixPitch
+            self.mix_pitch = MixPitch(hidden, *mix_pitch)
         if jepa_k:  # predicts the source's frozen-core latent from (Z, P, V): see JepaTarget
             self.jepa = nn.Sequential(nn.Linear(z_dim + N_PITCH + 2 + v_dim, 2 * hidden), nn.GELU(),
                                       nn.Linear(2 * hidden, 2 * hidden), nn.GELU(), nn.Linear(2 * hidden, nb * jepa_k))
@@ -150,7 +198,8 @@ class FactorHeads(nn.Module):
         w = torch.softmax(s.flatten(1).float(), dim=1).to(x.dtype)
         return F.normalize(self.z(torch.einsum("nt,ntd->nd", w, x.flatten(1, 2))).float(), dim=-1)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, mix_mag: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """x (N, T, Nb, D) slot features; mix_mag (B, T, F) mix magnitude, used by MixPitch when present."""
         N, T, Nb, D = x.shape
         h = self.frame(self.squeeze(x).flatten(2))  # (N, T, hidden)
         h = h + self.time(h.transpose(1, 2)).transpose(1, 2)
@@ -159,7 +208,10 @@ class FactorHeads(nn.Module):
         s = self.score(x).squeeze(-1)
         half = T // 2
         z_halves = torch.stack([self._pool(x[:, :half], s[:, :half]), self._pool(x[:, half:], s[:, half:])], 1)
-        return {"pitch": self.pitch(h).float(), "onset": ev[..., 0].float(), "active": ev[..., 1].float(),
+        pitch = self.pitch(h).float()
+        if hasattr(self, "mix_pitch") and mix_mag is not None:
+            pitch = pitch + self.mix_pitch(mix_mag, h)
+        return {"pitch": pitch, "onset": ev[..., 0].float(), "active": ev[..., 1].float(),
                 "v": v.float(), "vel": self.vel(v).squeeze(-1).float(), "fx": self.fx(v.mean(1)).float(),
                 "z": self._pool(x, s), "z_halves": z_halves}
 
