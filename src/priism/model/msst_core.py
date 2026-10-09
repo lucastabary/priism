@@ -160,8 +160,15 @@ class MsstAttractorSeparator(nn.Module):
     def __init__(self, roformer: nn.Module, max_sources: int = 16, decoder_depth: int = 2, heads: int = 8,
                  init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False,
                  slot_attention: bool = False, slot_warm: bool = False, factors: bool = False,
-                 factor_feedback: bool = False, sample_rate: int = 44100):
+                 factor_feedback: bool = False, sample_rate: int = 44100, factor_jepa: bool = False,
+                 jepa_target: bool = False):
         super().__init__()
+        if factor_jepa and jepa_target:  # frozen copy of the core as it comes in (pretrained SW): the JEPA target encoder
+            from .factors import JepaTarget
+
+            frozen = copy.deepcopy(roformer)
+            del frozen.mask_estimators
+            self.jepa_target = JepaTarget(frozen, roformer.final_norm.gamma.shape[-1])
         self.r = roformer
         self.grad_checkpoint = grad_checkpoint  # recompute activations in backward: long chunks fit in 24 GB
         dim = roformer.final_norm.gamma.shape[-1]
@@ -180,10 +187,11 @@ class MsstAttractorSeparator(nn.Module):
             self.grid = GridMemory(dim, len(roformer.band_split.to_features))
             self.refiner = SlotRefiner(dim)
         self.frame_s = roformer.stft_kwargs["hop_length"] / sample_rate
-        if factors or factor_feedback:  # each slot says what it plays: Z / P / V (see factors.py)
+        if factors or factor_feedback or factor_jepa:  # each slot says what it plays: Z / P / V (see factors.py)
             from .factors import FactorHeads
 
-            self.factors = FactorHeads(dim, self._band_hz(sample_rate), feedback=factor_feedback)
+            self.factors = FactorHeads(dim, self._band_hz(sample_rate), feedback=factor_feedback,
+                                       jepa_k=8 if factor_jepa else 0)
 
     def _band_hz(self, sr: int) -> torch.Tensor:
         """[lo, hi) Hz of each band of the core's band split (bins counted from its input sizes)."""
@@ -193,11 +201,12 @@ class MsstAttractorSeparator(nn.Module):
         edges = torch.tensor([0] + sizes).cumsum(0).float() * sr / n_fft
         return torch.stack([edges[:-1], edges[1:]], 1)
 
-    def _features(self, raw: torch.Tensor):
-        """Same steps as BSRoformer.forward up to final_norm. raw (B, C, S) -> x (B, T, Nb, D), stft (B, F*C, T, 2)."""
+    def _features(self, raw: torch.Tensor, r: nn.Module | None = None):
+        """Same steps as BSRoformer.forward up to final_norm. raw (B, C, S) -> x (B, T, Nb, D), stft (B, F*C, T, 2).
+        ``r``: another core with the same layout (the frozen JEPA target encoder)."""
         from einops import pack, rearrange, unpack
 
-        r = self.r
+        r = r if r is not None else self.r
         B, C, S = raw.shape
         window = r.stft_window_fn(device=raw.device)
         spec = torch.stft(raw.reshape(B * C, S), **r.stft_kwargs, window=window, return_complex=True)
@@ -219,6 +228,10 @@ class MsstAttractorSeparator(nn.Module):
             if r.skip_connection:
                 store[i] = x
         return r.final_norm(x), stft_repr, window
+
+    def target_latents(self, wav: torch.Tensor) -> torch.Tensor:
+        """JEPA targets of clean sources (N, C, S) -> (N, T, Nb * 8)."""
+        return self.jepa_target(lambda w, enc: self._features(w, enc)[0], wav)
 
     def _ckpt(self, fn, *args):
         if self.grad_checkpoint and self.training and torch.is_grad_enabled():

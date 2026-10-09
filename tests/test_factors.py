@@ -125,3 +125,42 @@ def test_msst_factors_start_where_a_run_without_them_was():
     (o["sources"].abs().mean() + o["factors"]["pitch"].mean()).backward()
     assert fb.factors.back.weight.grad is not None and fb.factors.pitch.weight.grad is not None
     assert fb._band_hz(44100)[-1, 1] == pytest.approx(44100 / 2 + 44100 / 256)
+
+
+def test_jepa_target_is_frozen_kept_out_of_the_weights_and_trainable_through_the_factors():
+    from priism.model.factors import jepa_loss
+
+    m = _small_msst(v2=True, factors=True, factor_jepa=True, jepa_target=True).train()
+    assert not any(k.startswith("jepa_target") for k in m.state_dict())
+    before = [p.clone() for p in m.jepa_target.encoder[0].parameters()]
+    mix = torch.randn(2, 2, 4096) * 0.1
+    o = m(mix)
+    tgt = m.target_latents(torch.randn(3, 2, 4096) * 0.1)
+    assert tgt.shape[0] == 3 and tgt.shape[2] == 37 * 8 and not tgt.requires_grad
+    loss, cos = jepa_loss(o["factors"], m.factors.jepa, torch.tensor([0, 4, 7]), tgt)
+    loss.backward()
+    assert m.factors.jepa[0].weight.grad is not None and m.factors.z[1].weight.grad is not None
+    assert all(torch.equal(a, b) for a, b in zip(before, m.jepa_target.encoder[0].parameters()))
+    assert all(p.grad is None for p in m.jepa_target.encoder[0].parameters())
+
+
+def test_msst_training_with_jepa_logs_it_and_reloads(tmp_path):
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    import yaml
+
+    from priism.model.train import load_run, train
+
+    write_song(4, tmp_path / "songs", duration_s=4.0, sample_rate=44100)
+    cfg = tmp_path / "cfg.yaml"
+    bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
+    cfg.write_text(yaml.dump({"audio": {"sample_rate": 44100}, "model": dict(
+        dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2, stft_n_fft=256,
+        stft_hop_length=64, stft_win_length=256, flash_attn=False)}))
+    h = train(tmp_path / "songs", tmp_path / "run", preset="msst", steps=2, batch=1, chunk_s=0.5, log_every=1,
+              msst={"config": cfg, "ckpt": None, "path": msst, "max_sources": 4, "v2": True},
+              factor_jepa=True, log=lambda *_: None)
+    assert "jepa_cos" in h[-1] and "pitch_f1" in h[-1]
+    model, _ = load_run(tmp_path / "run")
+    assert hasattr(model.factors, "jepa")

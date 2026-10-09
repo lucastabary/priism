@@ -50,7 +50,7 @@ def _train_sep(args: argparse.Namespace) -> None:
           stream_sources=tuple(int(x) for x in args.stream_sources.split(":")) if args.stream_sources else None,
           log_every=args.log_every, core_lr_scale=args.core_lr_scale, stop_at=args.stop_at,
           plateau=args.plateau, valid_chunk_s=args.valid_chunk, factors=args.factors,
-          factor_feedback=args.factor_feedback, factor_weight=args.factor_weight,
+          factor_feedback=args.factor_feedback, factor_weight=args.factor_weight, factor_jepa=args.factor_jepa,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
                 "max_sources": args.max_sources, "v2": args.msst_v2, "slot_attention": args.msst_slots,
                 "slot_warm": args.msst_slots_warm} if args.preset == "msst" else None)
@@ -343,6 +343,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--factor-feedback", action="store_true",
                    help="--factors whose predicted notes feed back into the slot before its mask")
     p.add_argument("--factor-weight", type=float, default=1.0, help="weight of the factor losses")
+    p.add_argument("--factor-jepa", action="store_true",
+                   help="--factors whose Z/P/V must also predict each clean source's latent in a frozen copy of "
+                        "the pretrained core (JEPA-style reconstruction, no audio decoder; msst preset)")
     p.set_defaults(func=_train_sep)
 
     p = sub.add_parser("eval-sep", help="score a train-sep run on real songs with grouped stems (NI .stem.mp4)")
