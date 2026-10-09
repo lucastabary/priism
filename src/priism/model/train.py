@@ -8,6 +8,7 @@ import warnings
 from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 
@@ -85,7 +86,8 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
           stream: str | Path | None = None, stream_workers: int = 4, stream_songs: int = 400,
           stream_duration: float = 30.0, stream_sources: tuple[int, int] | None = None,
           init: str | Path | None = None, real: str | Path | None = None, real_every: int = 2,
-          real_weight: float = 1.0, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
+          real_weight: float = 1.0, stems: str | Path | None = None, stems_every: int = 2,
+          valid_stems: str | Path | None = None, stop_at: int | None = None, plateau: int = 0, plateau_delta: float = 0.1,
           valid_chunk_s: float | None = None, factors: bool = False, factor_feedback: bool = False,
           factor_weight: float = 1.0, factor_jepa: bool = False, factor_mix_pitch: bool = False,
           log=print) -> list[dict]:
@@ -183,6 +185,15 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
         teach = {"it": iter(rdl), "model": load_teacher(msst["config"], msst["ckpt"], msst["path"], device),
                  "every": real_every, "weight": real_weight}
         log(f"distillation on {len(rdl.dataset.files)} real songs, every {real_every} steps")
+    if stems:
+        from .distill import StemCrops
+
+        sdl = DataLoader(StemCrops(stems, chunk_s, sr, seed=seed), batch_size=batch, num_workers=3,
+                         persistent_workers=True)
+        teach = dict(teach or {}, stems=iter(sdl), stems_every=stems_every)
+        log(f"real multitracks: {len(sdl.dataset.songs)} songs, every {stems_every} steps")
+    if valid_stems:
+        vds.append(("stems_", _fixed_stem_crops(valid_stems, valid_chunk_s or chunk_s, sr)))
     try:
         _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, history, out, last, log_every,
               save_every, log, exist_weight, teach, stop_at, plateau, plateau_delta, factor_weight)
@@ -240,7 +251,16 @@ def _loop(model, dl, opt, sched, vds, valid_items, amp, device, start, steps, hi
                     loss = loss + factor_weight * jl
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        if teach and step % teach["every"] == 0:
+        if teach and "stems" in teach and step % teach["stems_every"] == 1 % teach["stems_every"]:
+            # Real multitracks (ground truth per stem): odd steps when stems_every is 2, teacher on even ones.
+            from .distill import group_loss
+
+            smix, sref = (x.to(device) for x in next(teach["stems"]))
+            with amp:
+                so = model(smix)
+            sloss, stats["stems_snr"] = group_loss(so["sources"].float(), sref)
+            (teach.get("weight", 1.0) * sloss).backward()
+        if teach and "it" in teach and step % teach["every"] == 0:
             # Separate backward: both graphs at once would not fit in 24 GB.
             from .distill import group_loss, teacher_stems
 
@@ -311,6 +331,43 @@ def kept_scores(sources: torch.Tensor, exist_logits: torch.Tensor, targets: torc
     return snr
 
 
+def _fixed_stem_crops(folder, chunk_s: float, sr: int, n: int = 48) -> list:
+    """A fixed validation set of real multitrack crops (mix, stems): the middle of each song, first ``n`` songs."""
+    import soundfile as sf
+
+    from .distill import stem_songs
+
+    out = []
+    for files in stem_songs(folder)[:n]:
+        infos = [sf.info(f) for f in files]
+        frames, c = min(i.frames for i in infos), int(chunk_s * sr)
+        if frames < c or any(i.samplerate != sr for i in infos):
+            continue
+        a = frames // 2 - c // 2
+        st = []
+        for f in files:
+            x = sf.read(f, start=a, frames=c, dtype="float32", always_2d=True)[0]
+            st.append((np.repeat(x, 2, axis=1) if x.shape[1] == 1 else x[:, :2]).T)
+        y = np.stack(st)
+        out.append((torch.from_numpy(y.sum(0)), torch.from_numpy(np.ascontiguousarray(y))))
+    return out
+
+
+@torch.no_grad()
+def _evaluate_stems(model, crops, device, amp) -> dict:
+    """Grouped SNR of our outputs against true stems (each output joins the stem it overlaps most)."""
+    from .distill import group_loss
+
+    model.eval()
+    snrs = []
+    for mix, refs in crops:
+        with amp:
+            o = model(mix[None].to(device))
+        snrs.append(group_loss(o["sources"].float(), refs[None].to(device))[1])
+    model.train()
+    return {"sep_snr": float(np.mean(snrs)) if snrs else float("nan")}
+
+
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, ds: SongChunks, items: int, device: str, amp=None) -> dict:
     """Average PIT stats over the first ``items`` crops of a fixed set (one crop per song).
@@ -322,6 +379,8 @@ def evaluate(model: torch.nn.Module, ds: SongChunks, items: int, device: str, am
     """
     from collections import Counter
 
+    if isinstance(ds, list):  # real multitrack crops (mix, stems): grouped score
+        return _evaluate_stems(model, ds, device, amp or nullcontext())
     model.eval()
     acc: dict[str, float] = {}
     twin, other, fam_ok, fams = [], [], 0, 0

@@ -345,3 +345,29 @@ def test_warm_slots_start_as_draws_of_the_fixed_queries_spread(tmp_path):
         g = torch.Generator().manual_seed(0)
         start = m.slots.mu + m.slots.log_sigma.exp() * torch.randn(1, 5, 16, generator=g)
         torch.testing.assert_close(m.slots(grid, 5), start.expand(2, -1, -1))
+
+
+def test_training_on_real_multitracks_with_grouped_stems(tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from priism.gen.song import write_song
+    from priism.model.distill import StemCrops
+    from priism.model.train import train
+
+    write_song(0, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
+    rng = np.random.default_rng(0)
+    for k in range(2):  # MUSDB layout: one folder per song, a mixture file and one file per stem
+        d = tmp_path / "musdb" / "train" / f"song{k}"
+        d.mkdir(parents=True)
+        stems = [rng.normal(0, 0.1, (22050 * 3, 2)).astype("float32") for _ in range(3)]
+        for name, x in zip(("drums", "bass", "vocals"), stems):
+            sf.write(d / f"{name}.wav", x, 22050)
+        sf.write(d / "mixture.wav", sum(stems), 22050)
+    sf.write(tmp_path / "musdb" / "train" / "song1" / "other.wav", np.zeros((22050 * 3, 1), "float32"), 22050)
+    mix, ref = next(iter(StemCrops(tmp_path / "musdb", 1.0, 22050, max_stems=6)))
+    assert ref.shape == (6, 2, 22050) and torch.allclose(mix, ref.sum(0))
+    h = train(tmp_path / "songs", tmp_path / "run", preset="tiny", steps=2, batch=2, chunk_s=1.0, log_every=1,
+              save_every=2, valid=tmp_path / "songs", stems=tmp_path / "musdb", stems_every=1,
+              valid_stems=tmp_path / "musdb", log=lambda m: None)
+    assert "stems_snr" in h[-1] and np.isfinite(h[-1]["valid_stems_sep_snr"])
