@@ -29,7 +29,7 @@ GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM eac
 # Twin mechanism v2 when job 0417 found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
 # Slot queries drawn from the mix (v3) when job 0417 picked them (runs/USE_SA).
-if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots"; fi
+if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots-warm"; fi
 # 8 s chunks when job 0417b found them better for twins (runs/USE_CHUNK8): same audio per step.
 CH="--chunk 4 --batch 6"; if [ -f runs/USE_CHUNK8 ]; then CH="--chunk 8 --batch 3 --valid-chunk 4"; fi
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
