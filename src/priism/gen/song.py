@@ -42,7 +42,7 @@ TWIN_EXTRA_P = float(os.environ.get("PRIISM_TWIN_EXTRA_P", "0"))
 TWIN_SPREAD = float(os.environ.get("PRIISM_TWIN_SPREAD", "0"))
 # How far apart twins sit in the mix (Lucas, 2026-10-09: same instrument, different effects and depth):
 # 0 (default) keeps every song as before; at 1 the parts of one instrument get spread pans, one dry and
-# close, the others deeper in reverb, and contrasting tone (one darker, one thinner). Their own generator.
+# close, the others deeper in reverb, contrasting tone (one darker, one thinner), slightly apart in pan. Their own generator.
 # Meant as an easy first step of a curriculum, lowered towards 0 later: training only on far-apart twins
 # would teach a placement shortcut, as the sound drift did (identical twins got worse).
 TWIN_PLACE = float(os.environ.get("PRIISM_TWIN_PLACE", "0"))
@@ -67,7 +67,9 @@ def _twin_places(sources: list[dict]) -> dict:
         k = len(ids)
         for rank, i in zip(order, ids):
             pos = -1.0 + 2.0 * rank / (k - 1)  # -1 .. 1: from one side to the other
-            out[i] = {"pan": 0.8 * pos * TWIN_PLACE, "depth": rank / (k - 1), "tone": 1 if rank % 2 else -1,
+            # Pans stay narrow (at most +-0.3): the model hears stereo, and a hard left/right split would be a
+            # shortcut that real tracks rarely offer; depth and tone carry most of the difference.
+            out[i] = {"pan": 0.3 * pos * TWIN_PLACE, "depth": rank / (k - 1), "tone": 1 if rank % 2 else -1,
                       "amount": TWIN_PLACE, "u": float(rng.uniform(0.6, 1.0))}
     return out
 

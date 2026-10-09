@@ -185,7 +185,7 @@ def test_twin_place_spreads_the_parts_of_one_instrument(monkeypatch):
     root = fam[0]["twin_of"]
     ids = [root] + [s["id"] for s in on["sources"] if s["twin_of"] == root]
     pans = sorted(on["sources"][i]["fx"]["pan"] for i in ids)
-    assert pans[-1] - pans[0] >= 1.5  # from one side to the other
+    assert 0.5 <= pans[-1] - pans[0] <= 0.9  # apart, but not hard left/right (the model hears stereo)
     rev = sorted(on["sources"][i]["fx"]["reverb_send"] for i in ids)
     assert rev[0] == 0.0 and rev[-1] > 0.1  # one dry, one deep
     outside = [s["id"] for s in on["sources"] if s["id"] not in ids and s["twin_of"] is None
