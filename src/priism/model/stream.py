@@ -26,9 +26,14 @@ TRAIN_SEED_BASE = 10**10  # far from the fixed validation seeds (9e8...)
 
 def ready_songs(folder: str | Path) -> list[Path]:
     """Songs whose meta.json exists (write_song writes it last), oldest first."""
-    metas = [p for p in Path(folder).glob("song_*/meta.json")]
-    metas.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
-    return [p.parent for p in metas]
+    timed = []
+    for p in Path(folder).glob("song_*/meta.json"):
+        try:  # the generator deletes old songs at any time: one can vanish between glob and stat
+            timed.append((p.stat().st_mtime, p.parent))
+        except FileNotFoundError:
+            pass
+    timed.sort(key=lambda x: x[0])
+    return [d for _, d in timed]
 
 
 def _generate_forever(folder: str, worker: int, workers: int, first: int, duration_s: float, sample_rate: int,
