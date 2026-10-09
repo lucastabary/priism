@@ -5,13 +5,13 @@
 # GPU: stage E. Fine-tune of stage D with Surge XT patches playing 60 % of the bass, lead,
 # pad, pluck, arp and stab parts (real synth timbres), all songs (2 to 16 sources).
 # Validation still uses the old-generator set (data/gen_valid): judge E on the NI songs, not on it.
-# Rerun of 0410 without twin sound drift: 0410's probe with drift 1.0 lowered the identical-twin scores
-# (2.77 -> 2.16 dB) and failed its gate. Skipped if 0410 got through after all.
+# Resumes stage E without twin sound drift, after the twin duel (Lucas chose twins first, 2026-10-09).
+# 0410's first probe (drift 1.0, lr 1e-4) lowered identical-twin scores; its lr 5e-5 fallback passed and
+# 0410 was stopped during the full run: continue from its checkpoint at lr 5e-5.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
 if [ -f runs/surge-e/DONE ]; then echo "stage E already done by 0410"; exit 0; fi
-rm -rf runs/surge-e runs/surge-e-failed-*
 # Only from a finished stage (a failed probe leaves no DONE).
 test -f runs/gen-real-d/DONE
 # This job needs the Surge generator: update the checkout (the running jobs already imported theirs).
@@ -42,6 +42,11 @@ run() {
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
+if [ -f runs/surge-e/last.pt ]; then
+  run --lr 5e-5 --plateau 3
+  touch runs/surge-e/DONE
+  exit 0
+fi
 # A probe that fails the gate tries prepared fallbacks (a crash stops the job: it needs a fix) (lower learning rate, lighter count loss) before giving up,
 # so the GPU keeps learning something useful when nobody is there to fix the queue.
 ALT=""
