@@ -1,4 +1,4 @@
-# after: 0407 0416d
+# after: 0408 0416d
 # GPU: stage G, the general model (Lucas 2026-10-09: production-quality separation of real music first, twins
 # later). Three kinds of steps: synthetic songs (2 to 8 sources, Surge timbres, 30 % twins), real multitracks
 # with their true stems (MUSDB18-HQ train, grouped loss: our finer tracks stay free inside each stem) on odd
