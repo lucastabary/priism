@@ -7,7 +7,7 @@ name = "priism"
 version = "0.1.0"
 description = "ML stem separation for DJ mixing, starting with dub and acid"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12"]
+dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12", "pedalboard>=0.9"]
 
 [project.optional-dependencies]
 # Pretrained separation models (RoFormer, MDX, Demucs) through the UVR engine.

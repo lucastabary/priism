@@ -17,7 +17,8 @@ from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
 from . import drums, surge, tonal
-from .fx import apply_fx, sample_fx
+from . import fx as fxmod
+from .fx import apply_fx, sample_fx, sample_pb_fx
 from .genres import DRUM_KINDS, GENRES
 
 MIN_SOURCES, MAX_SOURCES = 2, 16
@@ -337,6 +338,8 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
     tracks = []
     for s in plan["sources"]:
         fx = sample_fx(s["kind"], plan["genre"], rng)
+        if fxmod.PB_FX:
+            fx["pb"] = sample_pb_fx(s["kind"], plan["genre"], s["seed"])
         y = apply_fx(dry[s["id"]], fx, sr, plan["bpm"], s["seed"] + 1)
         if fx["sidechain"] and duck is not None:
             y = y * (1.0 - fx["sidechain"] * duck)[:, None]
