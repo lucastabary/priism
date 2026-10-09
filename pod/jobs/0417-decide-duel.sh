@@ -48,8 +48,14 @@ for n, r in runs.items():
     print(f"{n} (step {r['step']}): twin gain {gain:+.2f} dB vs D, broad drop {drop:+.2f} dB")
     if gain >= 0.3 and drop <= 0.5:
         ok[n] = score(r)
+# v3 over v2 at the same step (v2 may have been stopped early): v3's validation at v2's last step.
+if "v3" in ok and "v2" in ok:
+    same = next((x for x in hist("duel-v3") if x["step"] == runs["v2"]["step"] and "valid_sep_snr" in x), None)
+    if same and score(same) is not None:
+        print(f"v3 at step {same['step']}: twins {score(same):.2f} vs v2 {ok['v2']:.2f}")
+        ok["v3_same"] = score(same)
 pick = "v1"
-if "v3" in ok and ("v2" not in ok or ok["v3"] >= ok["v2"] + 0.3):
+if "v3" in ok and ("v2" not in ok or ok.get("v3_same", ok["v3"]) >= ok["v2"] + 0.3):
     pick = "v3"
 elif "v2" in ok:
     pick = "v2"
