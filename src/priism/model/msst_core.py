@@ -159,7 +159,8 @@ class SlotRefiner(nn.Module):
 class MsstAttractorSeparator(nn.Module):
     def __init__(self, roformer: nn.Module, max_sources: int = 16, decoder_depth: int = 2, heads: int = 8,
                  init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False,
-                 slot_attention: bool = False, slot_warm: bool = False):
+                 slot_attention: bool = False, slot_warm: bool = False, factors: bool = False,
+                 factor_feedback: bool = False, sample_rate: int = 44100):
         super().__init__()
         self.r = roformer
         self.grad_checkpoint = grad_checkpoint  # recompute activations in backward: long chunks fit in 24 GB
@@ -178,6 +179,19 @@ class MsstAttractorSeparator(nn.Module):
         if self.v2:  # twins: attractors read a time-frequency grid, slots get their own context (see the classes)
             self.grid = GridMemory(dim, len(roformer.band_split.to_features))
             self.refiner = SlotRefiner(dim)
+        self.frame_s = roformer.stft_kwargs["hop_length"] / sample_rate
+        if factors or factor_feedback:  # each slot says what it plays: Z / P / V (see factors.py)
+            from .factors import FactorHeads
+
+            self.factors = FactorHeads(dim, self._band_hz(sample_rate), feedback=factor_feedback)
+
+    def _band_hz(self, sr: int) -> torch.Tensor:
+        """[lo, hi) Hz of each band of the core's band split (bins counted from its input sizes)."""
+        n_fft, ch = self.r.stft_kwargs["n_fft"], self.r.audio_channels
+        sizes = [next(m for m in f.modules() if isinstance(m, nn.Linear)).in_features // (2 * ch)
+                 for f in self.r.band_split.to_features]
+        edges = torch.tensor([0] + sizes).cumsum(0).float() * sr / n_fft
+        return torch.stack([edges[:-1], edges[1:]], 1)
 
     def _features(self, raw: torch.Tensor):
         """Same steps as BSRoformer.forward up to final_norm. raw (B, C, S) -> x (B, T, Nb, D), stft (B, F*C, T, 2)."""
@@ -238,6 +252,11 @@ class MsstAttractorSeparator(nn.Module):
         xk = xk.flatten(0, 1)
         if self.v2:
             xk = self.refiner(xk)
+        f = None
+        if hasattr(self, "factors"):
+            f = self.factors(xk)
+            if self.factors.feedback:
+                xk = xk + self.factors.back_features(f, xk.dtype)
         mask = self._ckpt(self.head, xk)  # (B*K, T, F*C*2)
         mask = rearrange(mask.float(), "(b k) t (f c) -> b k f t c", b=B, c=2)  # complex math in fp32 under autocast
         spec = torch.view_as_complex(stft_repr.contiguous())[:, None] * torch.view_as_complex(mask.contiguous())
@@ -246,4 +265,7 @@ class MsstAttractorSeparator(nn.Module):
             spec = spec.clone()
             spec[:, 0] = 0.0
         wav = torch.istft(spec, **r.stft_kwargs, window=window, return_complex=False, length=S)
-        return {"sources": wav.reshape(B, K, C, S), "exist_logits": exist, "attractors": a}
+        out = {"sources": wav.reshape(B, K, C, S), "exist_logits": exist, "attractors": a}
+        if f is not None:
+            out.update(factors=f, frame_s=self.frame_s)
+        return out

@@ -19,6 +19,8 @@ class SeparatorConfig:
     max_sources: int = 16  # K: number of attractor slots
     decoder_depth: int = 2
     head_hidden: int = 256
+    factors: bool = False  # Z / P / V heads on every slot (factors.py)
+    factor_feedback: bool = False  # the predicted notes feed back into the slot before its mask
     # Bins per band, low to high; must sum to n_fft // 2 + 1. Empty = a default split.
     bands: list[int] = field(default_factory=list)
 
@@ -130,8 +132,14 @@ class MaskHead(nn.Module):
 
     def forward(self, h: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         # h: (B, T, Nb, D), a: (B, K, D) -> mask (B, K, T, F, 2 ch, 2 re/im)
+        return self.masks(self.condition(h, a))
+
+    def condition(self, h: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """Per-slot features (B, K, T, Nb, D)."""
         gamma, beta = self.film(a).chunk(2, dim=-1)
-        x = self.norm(h)[:, None] * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]  # (B, K, T, Nb, D)
+        return self.norm(h)[:, None] * (1 + gamma[:, :, None, None]) + beta[:, :, None, None]
+
+    def masks(self, x: torch.Tensor) -> torch.Tensor:
         out = []
         for i, (b, mlp) in enumerate(zip(self.bands, self.mlps)):
             y = mlp(x[:, :, :, i])  # (B, K, T, 8b)
@@ -149,6 +157,13 @@ class AttractorSeparator(nn.Module):
         self.core = Core(len(bands), cfg.dim, cfg.depth, cfg.heads)
         self.attractors = AttractorDecoder(cfg.dim, cfg.heads, cfg.decoder_depth, cfg.max_sources)
         self.head = MaskHead(bands, cfg.dim, cfg.head_hidden)
+        self.frame_s = cfg.hop / cfg.sample_rate
+        if cfg.factors or cfg.factor_feedback:
+            from .factors import FactorHeads
+
+            edges = torch.tensor([0] + bands).cumsum(0).float() * cfg.sample_rate / cfg.n_fft
+            self.factors = FactorHeads(cfg.dim, torch.stack([edges[:-1], edges[1:]], 1), hidden=64,
+                                       feedback=cfg.factor_feedback)
         self.register_buffer("window", torch.hann_window(cfg.n_fft), persistent=False)
 
     def stft(self, wav: torch.Tensor) -> torch.Tensor:
@@ -170,10 +185,21 @@ class AttractorSeparator(nn.Module):
         x = torch.view_as_real(spec).permute(0, 3, 2, 1, 4).flatten(3)  # (B, T, F, 4)
         h = self.core(self.split(x))
         a, exist = self.attractors(h)
-        m = self.head(h, a)  # (B, K, T, F, 2, 2)
+        if not hasattr(self, "factors"):
+            m = self.head(h, a)  # (B, K, T, F, 2, 2)
+        else:
+            x = self.head.condition(h, a)
+            B, K = x.shape[:2]
+            f = self.factors(x.flatten(0, 1))
+            if self.factors.feedback:
+                x = x + self.factors.back_features(f, x.dtype).unflatten(0, (B, K))
+            m = self.head.masks(x)
         mask = torch.view_as_complex(m.contiguous()).permute(0, 1, 4, 3, 2)  # (B, K, 2, F, T)
         est = self.istft(mask * spec[:, None], S)
-        return {"sources": est, "exist_logits": exist, "attractors": a}
+        out = {"sources": est, "exist_logits": exist, "attractors": a}
+        if hasattr(self, "factors"):
+            out.update(factors=f, frame_s=self.frame_s)
+        return out
 
     @torch.no_grad()
     def separate(self, mix: torch.Tensor, threshold: float = 0.5) -> tuple[torch.Tensor, torch.Tensor]:
