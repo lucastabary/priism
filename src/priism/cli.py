@@ -75,7 +75,14 @@ def _eval_sep(args: argparse.Namespace) -> None:
 def _eval_stems(args: argparse.Namespace) -> None:
     from .model.eval_stems import evaluate, msst_fn, separator_fn
 
-    if args.run:
+    if args.cascade:
+        if not (args.run and args.msst_config and args.msst_ckpt):
+            raise SystemExit("--cascade needs --run and --msst-config/--msst-ckpt (the first model)")
+        from .model.eval_stems import cascade_fn
+
+        fn = cascade_fn(msst_fn(args.msst_config, args.msst_ckpt, args.msst_path, args.device),
+                        separator_fn(args.run, args.device, args.msst_path, args.threshold))
+    elif args.run:
         fn = separator_fn(args.run, args.device, args.msst_path, args.threshold)
     else:
         if not (args.msst_config and args.msst_ckpt):
@@ -378,6 +385,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-ckpt", help="reference model checkpoint")
     p.add_argument("--msst-path", help="MSST checkout")
     p.add_argument("--limit", type=int, help="first N songs only")
+    p.add_argument("--cascade", action="store_true",
+                   help="run the --msst-* model on the mix, then the --run model on each of its stems")
     p.set_defaults(func=_eval_stems)
 
     p = sub.add_parser("listen", help="HTML page to play a mix and its tracks in sync (mute, solo, loop)")
