@@ -321,16 +321,25 @@ groupe en sont tirées (prototype pondéré par la dominance de chaque stem de l
 le stem de l'enseignant. L'extracteur ne peut donc pas descendre sous l'enseignant, ce qui règle l'oubli de
 5,6 dB. Le code de `distill.py` sert presque tel quel.
 
-**Mega 53 est un enseignant hiérarchique tout fait.** Ses stems se recouvrent : « drums » contient
-« kick », « vocal » contient « lead-vocal ». Ils forment donc un pseudo-arbre, exactement ce que la perte
-4.1 sait lire :
-- les nœuds fiables (kick, snare, hh, bass, lead-vocal…) servent de feuilles ;
-- « synth » sert de feuille **grossière**, dont l'intérieur est ignoré ;
+**Mega 53 est un enseignant hiérarchique tout fait.** Ses stems se recouvrent : « vocal » contient
+« lead-vocal » (dit par la release), et « drums » contient très probablement « kick ». Ils forment donc un
+pseudo-arbre, exactement ce que la perte 4.1 sait lire. Le SDR par stem publié par MVSep
+(mvsep.com/algorithms/135, jeu de test non précisé) dit lesquels croire :
+- feuilles fiables : kick 11,6 dB, bass 11,2, vocal 11,7, organ 10,4 ; groupes fiables : drums 9,3, keys 9,3 ;
+- moyens, à filtrer par confiance : snare 6,1, lead-vocal 5,5, back-vocal 6,4, piano 6,8 ;
+- **faibles : synth 2,05, hh 2,5, percussion 2,5, guitar 2,6, toms −2,1**. Jamais en ancre : au mieux une
+  feuille grossière dont on ignore l'intérieur. C'est un gros bémol pour la musique électronique, où synthés
+  et hats comptent le plus ;
 - les stems presque vides sont écartés.
 
+Les 53 têtes sont indépendantes : rien n'oblige un parent à valoir la somme de ses enfants. Cet écart mesure
+l'incohérence de l'enseignant et doit être filtré. MSST entraîne déjà avec des labels partiels
+(`dataset_type` 7 : seules les têtes dont le stem existe reçoivent une perte, via `active_stem_ids`).
+Détail couche par couche : document « MVSep Mega 53 : le modèle couche par couche ».
+
 Il remplace la cascade SW → DrumSep, dont les liens de téléchargement MSST sont morts ; un miroir existe dans
-`audio-separator`, à garder en secours. Sa qualité stem par stem n'est pas publiée : on la mesure en phase 0
-sur MoisesDB avant de lui faire confiance, et seuls les stems où il bat SW servent d'ancre. Les pseudo-stems
+`audio-separator`, à garder en secours. On remesure sa qualité stem par stem en phase 0 (mshoxxDB, MoisesDB)
+avant de lui faire confiance, et seuls les stems où il bat SW servent d'ancre. Les pseudo-stems
 sont filtrés par confiance, et la perte est tronquée (section 6, Distillation).
 
 ### 4.4 Le cas MixIT, en une ligne
@@ -671,7 +680,8 @@ ce qu'on n'a pas pu recouper.
 - BS-Roformer-SW : miroirs `huggingface.co/enerjazzer/BS-ROFO-SW-Fixed` et `lumabeat/bs-roformer-sw`.
   Auteur et licence inconnus. Scores publiés sur le Multisong de MVSep : bass 14,6, drums 14,1, other 8,7.
 - MVSep Mega 53 stems : MSST release v1.0.21 (avril 2026),
-  `mvsep_mega_model_bs_roformer_53_stems_v1.ckpt`. Pas de scores publiés ; au moins 16 Go de VRAM.
+  `mvsep_mega_model_bs_roformer_53_stems_v1.ckpt` (681,7 M paramètres dont 26,3 M de tronc, float16).
+  SDR par stem sur mvsep.com/algorithms/135 ; au moins 16 Go de VRAM recommandés.
 - X-LANCE MSR Challenge 2025 : `huggingface.co/chenxie95/xlance-msr-ckpt` (MIT), têtes *syn*, *perc*,
   *orch*.
 - DrumSep MDX23C 6 stems (aufr33, jarredou), miroir dans la liste de modèles d'`audio-separator`.
