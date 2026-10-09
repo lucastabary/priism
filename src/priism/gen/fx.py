@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from scipy.signal import butter, fftconvolve, sosfilt
 
@@ -10,6 +12,12 @@ from ..dsp import feedback_delay, reverb_ir, saturate
 
 CENTERED = {"kick", "sub", "bass", "snare", "clap"}
 NO_SPACE = {"kick", "sub"}  # never sent to delay or reverb
+# Studio effects from Spotify's pedalboard (compressor, chorus, phaser, bitcrush, Freeverb) on top of the
+# effects below. Off by default: songs stay exactly as before. When on, the extra settings come from each source's
+# own generator, so every other choice of a song (parts, levels, sends) stays the same; only the sound changes.
+PB_FX = os.environ.get("PRIISM_PB_FX", "0") == "1"
+CHORUS_KINDS = {"pad", "lead", "stab", "skank", "pluck", "arp", "acid", "bass"}
+PHASER_KINDS = {"pad", "lead", "stab", "skank", "arp", "acid", "hat_closed", "hat_open", "ride", "noise_fx"}
 DRUMLIKE = {"snare", "clap", "rim", "hat_closed", "hat_open", "ride", "crash", "tom", "cowbell", "clave", "conga",
             "shaker", "noise_fx"}
 
@@ -45,8 +53,43 @@ def sample_fx(kind: str, genre: str, rng: np.random.Generator) -> dict:
     }
 
 
+def sample_pb_fx(kind: str, genre: str, seed: int) -> dict:
+    """Settings of the pedalboard effects for one source, from the source's own generator."""
+    rng = np.random.default_rng([seed, 0x9B])
+    u = rng.uniform
+    dubby = genre in ("dub", "steppers", "dub_techno", "dubstep")
+    d: dict = {}
+    if kind != "noise_fx" and rng.random() < 0.5:  # most real parts are compressed
+        d["comp"] = {"threshold_db": float(u(-30, -8)), "ratio": float(np.exp(u(np.log(1.5), np.log(10)))),
+                     "attack_ms": float(np.exp(u(np.log(0.5), np.log(40)))),
+                     "release_ms": float(np.exp(u(np.log(30), np.log(400))))}
+    if kind in CHORUS_KINDS and rng.random() < (0.12 if kind == "bass" else 0.3):
+        d["chorus"] = {"rate_hz": float(np.exp(u(np.log(0.1), np.log(3)))), "depth": float(u(0.1, 0.6)),
+                       "centre_delay_ms": float(u(3, 15)), "feedback": float(u(0, 0.4)), "mix": float(u(0.2, 0.6))}
+    if kind in PHASER_KINDS and rng.random() < (0.25 if dubby else 0.12):
+        d["phaser"] = {"rate_hz": float(np.exp(u(np.log(0.05), np.log(2)))), "depth": float(u(0.4, 1.0)),
+                       "centre_hz": float(np.exp(u(np.log(300), np.log(3000)))), "feedback": float(u(0, 0.7)),
+                       "mix": float(u(0.3, 0.8))}
+    if rng.random() < 0.05:  # lo-fi samplers and bitcrushers
+        d["bitcrush_bits"] = float(u(5, 12))
+    d["algo_reverb"] = bool(rng.random() < 0.5)  # when the reverb send is on: Freeverb instead of the noise IR
+    d["algo_reverb_damping"] = float(u(0.2, 0.8))
+    return d
+
+
+def _pb(x: np.ndarray, plugins: list, sr: int) -> np.ndarray:
+    """Run (n,) or (n, 2) float64 audio through pedalboard plugins; same shape and length out."""
+    from pedalboard import Pedalboard
+
+    mono = x.ndim == 1
+    y = Pedalboard(plugins)(np.ascontiguousarray((x[None] if mono else x.T), np.float32), sr, reset=True)
+    y = y.astype(np.float64)
+    return y[0] if mono else y.T
+
+
 def apply_fx(dry: np.ndarray, fx: dict, sr: int, bpm: float, seed: int) -> np.ndarray:
-    """Mono dry track in, stereo (n, 2) track out."""
+    """Mono dry track in, stereo (n, 2) track out. ``fx["pb"]`` (from ``sample_pb_fx``) adds pedalboard effects."""
+    pb = fx.get("pb")
     x = dry.astype(np.float64)
     lo = min(fx["lowpass_hz"], 0.45 * sr)
     if fx["highpass_hz"] > 25:
@@ -62,6 +105,18 @@ def apply_fx(dry: np.ndarray, fx: dict, sr: int, bpm: float, seed: int) -> np.nd
     if fx["drive"]:
         peak = np.max(np.abs(x)) + 1e-9
         x = saturate(x / peak, fx["drive"]) * peak
+    if pb:
+        from pedalboard import Bitcrush, Compressor
+
+        mono = []
+        if "comp" in pb:
+            c = pb["comp"]
+            mono.append(Compressor(c["threshold_db"], c["ratio"], c["attack_ms"], c["release_ms"]))
+        if "bitcrush_bits" in pb:
+            mono.append(Bitcrush(pb["bitcrush_bits"]))
+        if mono:
+            peak = np.max(np.abs(x)) + 1e-9  # the compressor threshold is relative to a full-scale part
+            x = _pb(x / peak, mono, sr) * peak
 
     # Constant-power pan plus a small Haas offset for width.
     ang = (fx["pan"] + 1) * np.pi / 4
@@ -70,6 +125,17 @@ def apply_fx(dry: np.ndarray, fx: dict, sr: int, bpm: float, seed: int) -> np.nd
     if off:
         right = np.concatenate([np.zeros(off), right[:-off]])
     out = np.stack([left, right], axis=1) * np.sqrt(2)
+    if pb and ("chorus" in pb or "phaser" in pb):
+        from pedalboard import Chorus, Phaser
+
+        mods = []
+        if "chorus" in pb:
+            c = pb["chorus"]
+            mods.append(Chorus(c["rate_hz"], c["depth"], c["centre_delay_ms"], c["feedback"], c["mix"]))
+        if "phaser" in pb:
+            c = pb["phaser"]
+            mods.append(Phaser(c["rate_hz"], c["depth"], c["centre_hz"], c["feedback"], c["mix"]))
+        out = _pb(out, mods, sr)
 
     step = 60.0 / bpm / 4.0 * sr
     if fx["delay_send"]:
@@ -77,7 +143,13 @@ def apply_fx(dry: np.ndarray, fx: dict, sr: int, bpm: float, seed: int) -> np.nd
                         feedback_delay(x, int(fx["delay_steps_r"] * step), fx["delay_feedback"], fx["delay_lowpass_hz"], sr)],
                        axis=1)
         out = out + fx["delay_send"] * wet
-    if fx["reverb_send"]:
+    if fx["reverb_send"] and pb and pb["algo_reverb"]:
+        from pedalboard import Reverb
+
+        room = float(np.clip(fx["reverb_rt60_s"] / 4.0, 0.05, 0.98))
+        wet = _pb(out, [Reverb(room, pb["algo_reverb_damping"], wet_level=1.0, dry_level=0.0, width=0.5)], sr)
+        out = out + fx["reverb_send"] * wet
+    elif fx["reverb_send"]:
         ir = reverb_ir(fx["reverb_rt60_s"], sr, np.random.default_rng(seed))
         if fx["spring"]:
             ir = sosfilt(butter(2, [300, 4500], btype="band", fs=sr, output="sos"), ir, axis=0)

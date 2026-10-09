@@ -132,3 +132,20 @@ def test_twin_spread_moves_the_twin_sound_only(monkeypatch):
                 assert tw[0]["params"][key] != orig["params"][key]
                 return
     raise AssertionError("no tonal twin in 30 songs")
+
+
+def test_pedalboard_fx_change_only_the_sound(monkeypatch):
+    from priism.gen import fx as fxmod
+
+    off_mix, _, off = render_song(5, duration_s=8, sample_rate=22050)
+    monkeypatch.setattr(fxmod, "PB_FX", True)
+    a, tracks, on = render_song(5, duration_s=8, sample_rate=22050)
+    b, _, _ = render_song(5, duration_s=8, sample_rate=22050)
+    np.testing.assert_array_equal(a, b)  # still fully determined by the seed
+    assert [s["kind"] for s in on["sources"]] == [s["kind"] for s in off["sources"]]
+    assert [s["gain_db"] for s in on["sources"]] == [s["gain_db"] for s in off["sources"]]
+    assert all("pb" in s["fx"] for s in on["sources"]) and not any("pb" in s["fx"] for s in off["sources"])
+    assert not np.array_equal(a, off_mix)
+    assert np.all(np.isfinite(a)) and np.max(np.abs(a)) <= 1.0
+    for t in tracks:
+        assert np.max(np.abs(t)) > 1e-4
