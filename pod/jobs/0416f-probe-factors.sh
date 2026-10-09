@@ -7,6 +7,7 @@
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
+git -C priism pull -q --ff-only  # this probe needs the factor heads (main 37c92f1 or later)
 test -f runs/gen-real-d/DONE
 # nproc can show every core of the host: the container's CPU quota is the real limit.
 N=$(nproc)
