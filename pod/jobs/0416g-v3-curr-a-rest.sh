@@ -1,10 +1,5 @@
-# after: 0416
-# GPU: curriculum for v3 (slot queries drawn from the mix, no slot tied to an instrument: Lucas's rule).
-# Cold v3 on twin-only songs of 3 to 8 sources was at 0.5 dB at step 1000 (D 8.9) and warm draws were worse:
-# with exchangeable slots the decoder has to learn the routing again. As in the first curriculum (A: 2-4
-# sources, then B: 2-8), start easy: 2 to 4 sources, half the songs with twins. Probe first: kept only if the
-# broad set gains 2 dB over step 0 by step 1000 (cold v3 on hard songs gained 1.3); then job 0416g runs up to 6000
-# steps, stopping on a plateau. Next stage (2-8 sources, twins) decided from its result.
+# after: 0416c 0416f
+# GPU: rest of v3 curriculum stage A (see 0416c), only when its 1000-step probe passed; resumes its last.pt.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -28,13 +23,6 @@ run() {
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
-run --batch 6 --stop-at 1000
-python3 - <<'PY2'
-import json, sys
-v = [x for x in json.load(open("runs/v3-curr-a/history.json")) if "valid_sep_snr" in x]
-s0, s1 = v[0], v[-1]
-print(f"gate: v3 curriculum A broad {s0['valid_sep_snr']:.2f} -> {s1['valid_sep_snr']:.2f} (step {s1['step']})")
-sys.exit(0 if s1["step"] >= 1000 and s1["valid_sep_snr"] >= s0["valid_sep_snr"] + 2 else 1)
-PY2
-# The rest runs in job 0416g, after the factor probe 0416f (its comparison only needs 1000 steps).
-touch runs/v3-curr-a/PROBE_OK
+if [ ! -f runs/v3-curr-a/PROBE_OK ]; then echo "probe of 0416c did not pass: nothing to do"; exit 0; fi
+run --batch 6 --plateau 3
+touch runs/v3-curr-a/DONE
