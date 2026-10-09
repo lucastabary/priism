@@ -185,7 +185,7 @@ environ 175 M de paramètres, d'après la taille du fichier. Les trois devraient
 | Tronc | A appris à distinguer | Pour nous |
 |---|---|---|
 | **BS-Roformer-SW** (actuel) | 6 stems : bass, drums, other, vocals, guitar, piano | les synthés sont tous dans « other » |
-| **MVSep Mega 53** (MSST v1.0.21) | 53 stems hiérarchiques : drums ⊃ kick, snare, toms, hh ; vocal ⊃ lead, back ; synth, keys, organ, percussion, strings… | le plus riche en identité ; même code |
+| **MVSep Mega 53** (MSST v1.0.21) | 53 stems qui se recouvrent : vocal ⊃ lead, back ; kick, snare, toms, hh ; synth, keys, organ, percussion, strings… | le plus riche en identité ; même code ; tronc presque identique à celui de SW (cosinus 0,9999), donc affiné à partir de lui |
 | **X-LANCE MSR 2025** (licence MIT) | têtes spécialisées *synth*, *perc*, *orch*, fine-tunées depuis SW | le plus orienté synthés |
 
 Le pari : le tronc de Mega 53 contient déjà, gratuitement, une bonne partie de la notion d'instrument.
@@ -336,6 +336,15 @@ Les 53 têtes sont indépendantes : rien n'oblige un parent à valoir la somme d
 l'incohérence de l'enseignant et doit être filtré. MSST entraîne déjà avec des labels partiels
 (`dataset_type` 7 : seules les têtes dont le stem existe reçoivent une perte, via `active_stem_ids`).
 Détail couche par couche : document « MVSep Mega 53 : le modèle couche par couche ».
+
+**Mesuré le 9 octobre 2026** (4 morceaux mshoxxDB + 2 extraits MUSDB, SNR moyen en dB, Mega contre SW) :
+batterie 10,6 contre 16,2 ; basse 10,7 contre 11,3 ; voix 10,2 contre 11,2 ; reste 4,1 contre 7,7. Sur de
+la musique électronique, la tête `drums` de Mega rate souvent le kick des boîtes à rythmes (part reprise :
+0,03 à 0,37 sur acid house, drum & bass et techno), et sa tête `synth` reprend les basses synthé. Aucun des
+deux ne sépare les parties de synthé. D'où la répartition de l'ancrage :
+- **groupes** (batterie, basse, autre) : ancre sur **SW** ;
+- **feuilles** que SW n'a pas : `kick`, la hiérarchie des voix, `organ`, `piano`, `strings`, prises chez **Mega**,
+  filtrées par confiance.
 
 Il remplace la cascade SW → DrumSep, dont les liens de téléchargement MSST sont morts ; un miroir existe dans
 `audio-separator`, à garder en secours. On remesure sa qualité stem par stem en phase 0 (mshoxxDB, MoisesDB)
@@ -579,7 +588,7 @@ DawDreamer).
 | Une source discrète (pad sous tout le reste) ne domine aucun jeton | source absente des clusters, retrouvée dans le reste | seuil de dominance plus bas pour la découverte ; seconde découverte sur le reste |
 | La coupe du dendrogramme est instable d'un genre à l'autre | comptage mauvais sur NI | seuil appris par un petit régresseur (statistiques des fusions) ; nombre de pistes fixé par l'utilisateur |
 | L'écart entre requêtes oracle et découverte reste grand | phase 3 très en dessous de la phase 2 | requêtes bruitées plus tôt ; affinage de la découverte par quelques itérations d'attention entre q_k et les jetons, dans l'esprit de l'attention par slots mais au niveau du morceau |
-| Licences | MoisesDB, MedleyDB, MUSDB, FMA : non commercial. Licence de SW **inconnue** (auteur inconnu, dépôt d'origine disparu). Poids de Mega 53 sans licence explicite (dépôt MIT) ; X-LANCE sous MIT mais entraîné sur MoisesDB | usage personnel et recherche pour l'instant. Avant toute distribution : Slakh, StemGMD (CC BY) et le générateur (libre), plus un tronc dont la licence est claire |
+| Licences | MoisesDB, MedleyDB, MUSDB, FMA : non commercial. Licence de SW **inconnue** (auteur inconnu, dépôt d'origine disparu). Poids de Mega 53 sous MIT (déclaration de ZFTurbo, 25 septembre 2026, issue n° 245), sans garantie sur les données d'entraînement ; X-LANCE sous MIT mais entraîné sur MoisesDB | usage personnel et recherche pour l'instant. Avant toute distribution : Slakh, StemGMD (CC BY) et le générateur (libre), plus un tronc dont la licence est claire |
 | Disponibilité des poids | le dépôt d'origine de SW renvoie 401, des miroirs existent | épingler le SHA-256 et garder une copie sur le volume du pod |
 | Mécanismes qui s'empilent à nouveau | plus de 2 drapeaux expérimentaux actifs | une expérience = une hypothèse = une ligne du banc, consignée dans `docs/journal.md` |
 
