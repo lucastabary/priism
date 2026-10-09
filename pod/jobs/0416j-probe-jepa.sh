@@ -8,6 +8,8 @@ W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
 git -C priism pull -q --ff-only  # this probe needs the factor heads (main 37c92f1 or later)
 test -f runs/gen-real-d/DONE
+# The control is the warm v3 duel (0416-duel-v3w writes runs/duel-v3 with a WARM mark): same flags as here.
+test -f runs/duel-v3/WARM
 # nproc can show every core of the host: the container's CPU quota is the real limit.
 N=$(nproc)
 if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then N=$(( q / per < N ? q / per : N ))
@@ -19,7 +21,7 @@ GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM eac
 rm -f runs/USE_JEPA
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --msst-slots --factor-feedback --factor-jepa \
+    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --msst-slots-warm --factor-feedback --factor-jepa \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 3:8 \
     --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/probe-jepa --exist-weight 2 \
     --steps 4000 --stop-at 1000 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
