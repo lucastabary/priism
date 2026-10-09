@@ -1,5 +1,7 @@
 # after: 0416d 0416f
 # GPU: rest of v3 curriculum stage A (see 0416d), only when its 1000-step probe passed; resumes its last.pt.
+# Twins pushed apart in the mix (PRIISM_TWIN_PLACE 0.7: pans, reverb depth, tone; Lucas 2026-10-09) as an easy
+# step; later stages lower it towards 0. Validation keeps natural placement.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -12,7 +14,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 [ "$N" -ge 1 ] || N=1
 # One thread per process: math libraries otherwise start one thread per visible
 # host core (48) in every loader and generator, far above the 10-core quota.
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.3 PRIISM_TWIN_SPREAD=0
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.5 PRIISM_TWIN_EXTRA_P=0.3 PRIISM_TWIN_PLACE=0.7 PRIISM_TWIN_SPREAD=0
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \

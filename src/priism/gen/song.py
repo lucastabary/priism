@@ -40,10 +40,51 @@ TWIN_EXTRA_P = float(os.environ.get("PRIISM_TWIN_EXTRA_P", "0"))
 # draws a drift in [0, PRIISM_TWIN_SPREAD]. Real "two 303s" rarely share every knob; 0 (default) keeps
 # exact copies and every song as before (own generator).
 TWIN_SPREAD = float(os.environ.get("PRIISM_TWIN_SPREAD", "0"))
+# How far apart twins sit in the mix (Lucas, 2026-10-09: same instrument, different effects and depth):
+# 0 (default) keeps every song as before; at 1 the parts of one instrument get spread pans, one dry and
+# close, the others deeper in reverb, and contrasting tone (one darker, one thinner). Their own generator.
+# Meant as an easy first step of a curriculum, lowered towards 0 later: training only on far-apart twins
+# would teach a placement shortcut, as the sound drift did (identical twins got worse).
+TWIN_PLACE = float(os.environ.get("PRIISM_TWIN_PLACE", "0"))
 _ACID_DRIFT = {"cutoff_hz": (80, 3000), "resonance": (0.0, 0.97), "env_mod_oct": (0.3, 6.0), "decay_s": (0.05, 2.0),
                "accent_amount": (0.1, 1.0), "gate_fraction": (0.3, 0.9)}
 _PATCH_DRIFT = {"cutoff": (100, 12000), "res": (0.0, 0.9), "env_oct": (0.0, 5.0), "f_decay": (0.02, 1.5),
                 "decay": (0.03, 2.0), "drive": (0.0, 2.0), "detune_cents": (0.0, 50.0)}
+
+
+def _twin_places(sources: list[dict]) -> dict:
+    """Spot of each part of a twin family (original and its twins) in the mix, scaled by TWIN_PLACE: spread
+    pans, rising reverb depth, alternating tone. Keyed by source id; sources outside a family are absent."""
+    fam: dict = {}
+    for s in sources:
+        if s["twin_of"] is not None:
+            fam.setdefault(s["twin_of"], [s["twin_of"]]).append(s["id"])
+    seeds = {s["id"]: s["seed"] for s in sources}
+    out = {}
+    for root, ids in fam.items():
+        rng = np.random.default_rng([seeds[root], 0x7A1])
+        order = list(rng.permutation(len(ids)))
+        k = len(ids)
+        for rank, i in zip(order, ids):
+            pos = -1.0 + 2.0 * rank / (k - 1)  # -1 .. 1: from one side to the other
+            out[i] = {"pan": 0.8 * pos * TWIN_PLACE, "depth": rank / (k - 1), "tone": 1 if rank % 2 else -1,
+                      "amount": TWIN_PLACE, "u": float(rng.uniform(0.6, 1.0))}
+    return out
+
+
+def _place(fx: dict, p: dict) -> None:
+    """Move one twin part to its spot (edits ``fx`` in place); ``amount`` 0 leaves it as drawn."""
+    a = p["amount"]
+    fx["pan"] = float(np.clip((1 - a) * fx["pan"] + p["pan"], -0.9, 0.9))
+    # Depth: the first part close and dry, the last far in the room (long reverb, some echo).
+    fx["reverb_send"] = float((1 - a) * fx["reverb_send"] + a * p["depth"] * 0.35 * p["u"])
+    if p["depth"] > 0.5 and a > 0:
+        fx["reverb_rt60_s"] = float(max(fx["reverb_rt60_s"], 1.5 + 2.0 * p["depth"] * p["u"]))
+    # Tone: one part darker (lowpass down), the other thinner (highpass up), in octaves scaled by ``amount``.
+    if p["tone"] < 0:
+        fx["lowpass_hz"] = float(max(600.0, fx["lowpass_hz"] * 2 ** (-2.0 * a * p["u"])))
+    else:
+        fx["highpass_hz"] = float(min(1500.0, fx["highpass_hz"] * 2 ** (2.0 * a * p["u"])))
 
 
 def _drift(params: dict, ranges: dict, seed: int) -> dict:
@@ -390,9 +431,12 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             e = _env_follow(kick_dry, sr, 0.002, 0.15)
             duck = e / (np.max(e) + 1e-12)
 
+    place = _twin_places(plan["sources"]) if TWIN_PLACE > 0 else {}
     tracks = []
     for s in plan["sources"]:
         fx = sample_fx(s["kind"], plan["genre"], rng)
+        if s["id"] in place:
+            _place(fx, place[s["id"]])
         if fxmod.PB_FX:
             fx["pb"] = sample_pb_fx(s["kind"], plan["genre"], s["seed"])
         if bus:

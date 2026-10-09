@@ -166,3 +166,29 @@ def test_bus_fx_share_rooms_and_keep_the_mix_a_sum(monkeypatch):
         if s["fx"]["reverb_send"]:
             assert s["fx"]["room"] in rooms and s["fx"]["reverb_rt60_s"] == s["fx"]["room"]["rt60_s"]
     assert np.all(np.isfinite(mix)) and np.max(np.abs(mix)) <= 1.0
+
+
+def test_twin_place_spreads_the_parts_of_one_instrument(monkeypatch):
+    from priism.gen import song
+
+    monkeypatch.setattr(song, "TWIN_P", 1.0)
+    monkeypatch.setattr(song, "TWIN_EXTRA_P", 0.5)
+    for seed in range(20):
+        _, _, meta = song.render_song(seed, duration_s=4, sample_rate=22050)
+        fam = [s for s in meta["sources"] if s["twin_of"] is not None]
+        if fam:
+            break
+    off_mix, _, off = song.render_song(seed, duration_s=4, sample_rate=22050)
+    monkeypatch.setattr(song, "TWIN_PLACE", 1.0)
+    on_mix, tracks, on = song.render_song(seed, duration_s=4, sample_rate=22050)
+    np.testing.assert_allclose(on_mix, np.sum(tracks, axis=0), atol=1e-4)  # still a sum of the tracks
+    root = fam[0]["twin_of"]
+    ids = [root] + [s["id"] for s in on["sources"] if s["twin_of"] == root]
+    pans = sorted(on["sources"][i]["fx"]["pan"] for i in ids)
+    assert pans[-1] - pans[0] >= 1.5  # from one side to the other
+    rev = sorted(on["sources"][i]["fx"]["reverb_send"] for i in ids)
+    assert rev[0] == 0.0 and rev[-1] > 0.1  # one dry, one deep
+    outside = [s["id"] for s in on["sources"] if s["id"] not in ids and s["twin_of"] is None
+               and not any(o["twin_of"] == s["id"] for o in on["sources"])]
+    for i in outside:  # other sources keep their effects
+        assert on["sources"][i]["fx"] == off["sources"][i]["fx"]
