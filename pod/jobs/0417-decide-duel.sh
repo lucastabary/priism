@@ -3,7 +3,8 @@
 # Picks the mechanism for stage F after the 4000-step twin duel (v2 and v3 = v2 + slot queries from the mix),
 # both against D's own step-0 validation (logged first in each duel run). On the twins alone (twin_snr,
 # identical-timbre twin sets): the best of v2/v3 must beat D by 0.3 dB without losing 0.5 dB on the broad set;
-# v3 is kept over v2 only when it is also 0.3 dB above v2. Writes runs/USE_V2, and runs/USE_SA for v3.
+# v3 is kept over v2 when it is also 0.3 dB above v2, and in any case unless it is clearly worse than D
+# (Lucas: no output tied to an instrument type, so no fixed learned queries). Writes runs/USE_V2, and runs/USE_SA for v3.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 cd "$W"
@@ -48,6 +49,10 @@ for n, r in runs.items():
     print(f"{n} (step {r['step']}): twin gain {gain:+.2f} dB vs D, broad drop {drop:+.2f} dB")
     if gain >= 0.3 and drop <= 0.5:
         ok[n] = score(r)
+    if n == "v3" and gain >= -0.3 and drop <= 0.5:
+        # Lucas 2026-10-09: no output tied to an instrument type, so no learned fixed queries. v3's queries come
+        # from the mix: it is kept whenever it is not clearly worse than D, even without a twin gain.
+        ok.setdefault("v3_rule", score(r))
 # v3 over v2 at the same step (v2 may have been stopped early): v3's validation at v2's last step.
 if "v3" in ok and "v2" in ok:
     same = next((x for x in hist("duel-v3") if x["step"] == runs["v2"]["step"] and "valid_sep_snr" in x), None)
@@ -57,10 +62,10 @@ if "v3" in ok and "v2" in ok:
 pick = "v1"
 if "v3" in ok and ("v2" not in ok or ok.get("v3_same", ok["v3"]) >= ok["v2"] + 0.3):
     pick = "v3"
+elif "v3_rule" in ok:
+    pick = "v3"
 elif "v2" in ok:
     pick = "v2"
-elif "v3" in ok:
-    pick = "v3"
 print(f"-> {pick}")
 if pick in ("v2", "v3"):
     Path("runs/USE_V2").write_text(f"{pick}\n")
