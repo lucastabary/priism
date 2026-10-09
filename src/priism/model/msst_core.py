@@ -73,9 +73,17 @@ class SlotQueries(nn.Module):
     to go to. Here slots start as random draws of one shared distribution (exchangeable) and compete for
     the grid's tokens (softmax over slots), so two 303 lines can take two slots. Draws are fixed in eval."""
 
-    def __init__(self, dim: int, iters: int = 3):
+    def __init__(self, dim: int, iters: int = 3, residual: bool = False):
         super().__init__()
         self.iters = iters
+        # residual (warm start): the slots are the initial draw plus a zero-initialised update, so at step 0
+        # they are draws of mu/sigma, which `warm_start` sets to the spread of a trained run's fixed queries:
+        # the decoder then gets queries like the ones it learnt instead of foreign ones (cold v3 began at -0.8 dB).
+        self.residual = residual
+        if residual:
+            self.out = nn.Linear(dim, dim)
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
         self.mu = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
         self.log_sigma = nn.Parameter(torch.full((1, 1, dim), -1.0))
         self.norm_in, self.norm_slots, self.norm_mlp = nn.LayerNorm(dim), nn.LayerNorm(dim), nn.LayerNorm(dim)
@@ -92,7 +100,7 @@ class SlotQueries(nn.Module):
         else:
             g = torch.Generator(device=x.device).manual_seed(0)
             noise = torch.randn(1, k, D, device=x.device, generator=g).expand(B, -1, -1)
-        slots = self.mu + self.log_sigma.exp() * noise
+        slots = start = self.mu + self.log_sigma.exp() * noise
         for _ in range(self.iters):
             prev = slots
             q = self.to_q(self.norm_slots(slots))
@@ -101,7 +109,14 @@ class SlotQueries(nn.Module):
             upd = torch.einsum("bnk,bnd->bkd", attn, vals)
             slots = self.gru(upd.reshape(-1, D), prev.reshape(-1, D)).reshape(B, k, D)
             slots = slots + self.mlp(self.norm_mlp(slots))
-        return slots
+        return start + self.out(slots) if self.residual else slots
+
+    @torch.no_grad()
+    def warm_start(self, queries: torch.Tensor) -> None:
+        """Draw distribution = per-dimension mean and spread of trained fixed queries (K, D): one shared
+        distribution, so the slots stay exchangeable (no slot inherits a query's instrument)."""
+        self.mu.copy_(queries.mean(0).view_as(self.mu))
+        self.log_sigma.copy_(queries.std(0).clamp_min(1e-4).log().view_as(self.log_sigma))
 
 
 class SlotRefiner(nn.Module):
@@ -144,7 +159,7 @@ class SlotRefiner(nn.Module):
 class MsstAttractorSeparator(nn.Module):
     def __init__(self, roformer: nn.Module, max_sources: int = 16, decoder_depth: int = 2, heads: int = 8,
                  init_head: int = 2, film_init_std: float = 0.01, grad_checkpoint: bool = False, v2: bool = False,
-                 slot_attention: bool = False):
+                 slot_attention: bool = False, slot_warm: bool = False):
         super().__init__()
         self.r = roformer
         self.grad_checkpoint = grad_checkpoint  # recompute activations in backward: long chunks fit in 24 GB
@@ -155,10 +170,11 @@ class MsstAttractorSeparator(nn.Module):
         nn.init.zeros_(self.film.bias)
         self.head = copy.deepcopy(roformer.mask_estimators[init_head])
         del self.r.mask_estimators  # the fixed stems are gone; only the shared conditioned head remains
+        slot_attention = slot_attention or slot_warm
         self.v2 = v2 or slot_attention
         self.slot_attention = slot_attention
         if slot_attention:
-            self.slots = SlotQueries(dim)
+            self.slots = SlotQueries(dim, residual=slot_warm)
         if self.v2:  # twins: attractors read a time-frequency grid, slots get their own context (see the classes)
             self.grid = GridMemory(dim, len(roformer.band_split.to_features))
             self.refiner = SlotRefiner(dim)

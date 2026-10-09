@@ -51,7 +51,8 @@ def _train_sep(args: argparse.Namespace) -> None:
           log_every=args.log_every, core_lr_scale=args.core_lr_scale, stop_at=args.stop_at,
           plateau=args.plateau, valid_chunk_s=args.valid_chunk,
           msst={"config": args.msst_config, "ckpt": args.msst_ckpt, "path": args.msst_path,
-                "max_sources": args.max_sources, "v2": args.msst_v2, "slot_attention": args.msst_slots} if args.preset == "msst" else None)
+                "max_sources": args.max_sources, "v2": args.msst_v2, "slot_attention": args.msst_slots,
+                "slot_warm": args.msst_slots_warm} if args.preset == "msst" else None)
 
 
 def _listen(args: argparse.Namespace) -> None:
@@ -330,6 +331,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-ckpt", help="its checkpoint")
     p.add_argument("--msst-path", help="MSST checkout")
     p.add_argument("--max-sources", type=int, default=16, help="attractor slots of the msst preset")
+    p.add_argument("--msst-slots-warm", action="store_true",
+                   help="--msst-slots whose draws start at the spread of --init's fixed queries (zero-init update)")
     p.add_argument("--msst-slots", action="store_true",
                    help="attractor queries drawn from the mix by slot attention (implies --msst-v2)")
     p.add_argument("--msst-v2", action="store_true",

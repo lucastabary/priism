@@ -313,3 +313,35 @@ def test_slot_attention_queries_are_exchangeable_and_deterministic_in_eval(tmp_p
     m.eval()
     with torch.no_grad():
         torch.testing.assert_close(m(mix)["sources"], m(mix)["sources"])  # fixed draws at inference
+
+
+def test_warm_slots_start_as_draws_of_the_fixed_queries_spread(tmp_path):
+    import os
+    import sys
+
+    msst = os.environ.get("MSST_PATH")
+    if not msst:
+        pytest.skip("MSST_PATH not set (MSST checkout needed)")
+    sys.path.insert(0, msst)
+    pytest.importorskip("rotary_embedding_torch")
+    from models.bs_roformer.bs_roformer import BSRoformer
+
+    from priism.model.msst_core import MsstAttractorSeparator
+
+    bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
+    mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
+                            stft_n_fft=256, stft_hop_length=64, stft_win_length=256, flash_attn=False)
+    v1 = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2)
+    m = MsstAttractorSeparator(mk(), max_sources=5, decoder_depth=1, heads=2, slot_warm=True)
+    assert m.slot_attention and m.v2
+    m.load_state_dict(v1.state_dict(), strict=False)
+    q = v1.attractors.queries.detach()
+    m.slots.warm_start(q)
+    grid = torch.randn(2, 7, 16)
+    s = m.slots(grid, 5)
+    torch.testing.assert_close(s.mean((0, 1)), q.mean(0), atol=3 * q.std(0).max().item(), rtol=0)
+    m.slots.eval()
+    with torch.no_grad():  # zero-init update: the slots are exactly the fixed draws
+        g = torch.Generator().manual_seed(0)
+        start = m.slots.mu + m.slots.log_sigma.exp() * torch.randn(1, 5, 16, generator=g)
+        torch.testing.assert_close(m.slots(grid, 5), start.expand(2, -1, -1))

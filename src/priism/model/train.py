@@ -41,7 +41,8 @@ def build_model(preset: str, msst: dict | None = None) -> tuple[torch.nn.Module,
         ckpt = m.get("ckpt")
         roformer = load_msst_roformer(m["config"], ckpt if ckpt not in (None, "None") else None, m["path"])
         model = MsstAttractorSeparator(roformer, max_sources=int(m.get("max_sources") or 16), grad_checkpoint=True,
-                                       v2=bool(m.get("v2")), slot_attention=bool(m.get("slot_attention")))
+                                       v2=bool(m.get("v2")), slot_attention=bool(m.get("slot_attention")),
+                                       slot_warm=bool(m.get("slot_warm")))
         sr = yaml.load(Path(m["config"]).read_text(), Loader=yaml.FullLoader)["audio"]["sample_rate"]
         return model, sr, {"preset": preset, **{k: str(v) if isinstance(v, Path) else v for k, v in m.items()}}
     cfg = PRESETS[preset]
@@ -92,13 +93,16 @@ def train(data: str | Path | None, out: str | Path, preset: str = "tiny", steps:
     model, sr, saved_cfg = build_model(preset, msst)
     if init:
         state = torch.load(init, map_location="cpu")
-        if preset == "msst" and ((msst or {}).get("v2") or (msst or {}).get("slot_attention")):
+        if preset == "msst" and any((msst or {}).get(k) for k in ("v2", "slot_attention", "slot_warm")):
             # Weights of a run without these parts: the new parts start fresh (v2's at identity).
             missing, unexpected = model.load_state_dict(state, strict=False)
             if unexpected or any(not k.startswith(("grid.", "refiner.", "slots.")) for k in missing):
                 raise ValueError(f"{init} does not fit: missing {missing}, unexpected {unexpected}")
             if missing:
                 log(f"new v2 parts start fresh: {len(missing)} tensors")
+            if (msst or {}).get("slot_warm") and any(k.startswith("slots.") for k in missing):
+                model.slots.warm_start(state["attractors.queries"].float())
+                log("slot draws warm-started from the fixed queries' spread")
         else:
             model.load_state_dict(state)
         log(f"weights from {init}")
