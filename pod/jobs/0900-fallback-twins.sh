@@ -21,6 +21,8 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFER
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Twin mechanism v2 when job 0352 found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
+# Slot queries drawn from the mix (v3) when job 0417 picked them (runs/USE_SA).
+if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots"; fi
 INIT=runs/curr-c/model.pt
 for r in gen-real-d surge-e twins-f; do [ -f runs/$r/DONE ] && INIT=runs/$r/model.pt; done
 echo "fallback from $INIT"

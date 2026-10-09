@@ -1,6 +1,8 @@
 # after: 0410
-# GPU: twin duel, control (v1). The 1000-step probes (0350/0351) left both at ~3 dB on twin
-# parts: too short for v2's new parts, which start at identity. Here 4000 full steps on twin-only songs
+# GPU: twin duel, v3 = v2 + slot queries drawn from the mix (--msst-slots), replacing the v1 control.
+# The CPU thread's slot diagnosis (2026-10-09) showed the fixed queries specialise one slot per instrument
+# type (kick in slot 9 for 93 %, ~7 of 16 slots unused; 75 % of twin families share one top slot): a second
+# part of the same instrument has no slot that takes it. v2 at step 1000 of its duel had not moved the twins. Here 4000 full steps on twin-only songs
 # (every song holds one instrument playing 2 to 4 parts, 3 to 8 sources, identical timbre: E showed that
 # training on drifted twins lowered the identical-twin scores), same settings for both;
 # job 0417 compares them on the identical-timbre twin sets and picks the mechanism for stage F.
@@ -20,12 +22,12 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFER
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
-    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt \
+    --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --msst-slots \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 3:8 \
-    --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/duel-ctl --exist-weight 2 \
+    --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/duel-v3 --exist-weight 2 \
     --steps 4000 --chunk 4 --lr 1e-4 --core-lr-scale 0.1 --device cuda --workers 4 \
     --real data/fma --real-every 2 \
     --save-every 1000 --log-every 50 "$@"
 }
 # Batch 6 like every stage; 4 if it does not fit in memory (the comparison then notes it).
-run --batch 6 || { rm -rf runs/duel-ctl; echo "### retry with batch 4"; run --batch 4; }
+run --batch 6 || { rm -rf runs/duel-v3; echo "### retry with batch 4"; run --batch 4; touch runs/duel-v3/BATCH4; }

@@ -26,8 +26,10 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 # host core (48) in every loader and generator, far above the 10-core quota.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=0.7 PRIISM_TWIN_EXTRA_P=0.5 PRIISM_TWIN_SPREAD=0
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
-# Twin mechanism v2 when job 0417 (or 0352) found it better than the control (runs/USE_V2).
+# Twin mechanism v2 when job 0417 found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
+# Slot queries drawn from the mix (v3) when job 0417 picked them (runs/USE_SA).
+if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots"; fi
 # 8 s chunks when job 0417b found them better for twins (runs/USE_CHUNK8): same audio per step.
 CH="--chunk 4 --batch 6"; if [ -f runs/USE_CHUNK8 ]; then CH="--chunk 8 --batch 3 --valid-chunk 4"; fi
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation

@@ -16,7 +16,7 @@ def at(run, step):
         return None
     return next((x for x in json.loads(p.read_text()) if x["step"] == step and "valid_sep_snr" in x), None)
 
-ref_run = "duel-v2" if Path("runs/USE_V2").exists() else "duel-ctl"
+ref_run = "duel-v3" if Path("runs/USE_SA").exists() else "duel-v2"  # without a winner: v2 (closest to v1)
 ref, c8 = at(ref_run, 2000), at("chunk8", 2000)
 if not ref or not c8:
     print(f"missing: {ref_run}={bool(ref)} chunk8={bool(c8)}; keeping 4 s")

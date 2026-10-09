@@ -18,6 +18,8 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1 PRIISM_SURGE_P=0.6 PRIISM_TWIN_P=1.0 PRIISM_TWIN_EXTRA_P=0.5 PRIISM_TWIN_SPREAD=0
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
+# Slot queries drawn from the mix (v3) when job 0417 picked them (runs/USE_SA).
+if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots"; fi
 run() {
   priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
     --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt $V2 \

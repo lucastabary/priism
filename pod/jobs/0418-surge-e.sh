@@ -31,6 +31,8 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFER
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 # Twin mechanism v2 when job 0352 found it better than the control (runs/USE_V2).
 V2=""; if [ -f runs/USE_V2 ]; then V2="--msst-v2"; fi
+# Slot queries drawn from the mix (v3) when job 0417 picked them (runs/USE_SA).
+if [ -f runs/USE_SA ]; then V2="--msst-v2 --msst-slots"; fi
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
 run() {
@@ -43,6 +45,8 @@ run() {
     --save-every 1000 --log-every 50 "$@"
 }
 if [ -f runs/surge-e/last.pt ]; then
+  # 0410 trained v1: resuming loads its exact layers, so no v2/v3 parts here (F adds them from E).
+  V2=""
   run --lr 5e-5 --plateau 3
   touch runs/surge-e/DONE
   exit 0
