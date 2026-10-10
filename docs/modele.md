@@ -12,16 +12,16 @@ voir la note de conception `architecture-identite.md`.*
 - **Le modèle** : un *séparateur à attracteurs*. On garde le cœur d'un modèle de séparation déjà entraîné
   (**BS-RoFormer-SW**), on remplace ses sorties fixes (une par stem : drums, bass, other…) par **16 « emplacements »**
   que le modèle remplit lui-même, et il dit pour chacun si une source s'y trouve vraiment.
-- **L'entraînement** : sur des **morceaux synthétiques** générés à la volée (`priism gen`), dont on connaît
+- **L'entraînement** : sur des **morceaux synthétiques** générés à la volée (`priism-lab gen`), dont on connaît
   chaque piste. Les pistes ne portent pas de nom pour le modèle : on cherche juste le meilleur appariement entre
   ses sorties et les vraies pistes (*entraînement invariant par permutation*, PIT).
 - **L'évaluation** : sur de vrais morceaux avec stems (65 NI Free Stems).
 
 ```mermaid
 flowchart LR
-    G["Générateur<br/>priism gen"] -->|"morceaux + pistes séparées"| T["Entraînement<br/>priism train-sep"]
+    G["Générateur<br/>priism-lab gen"] -->|"morceaux + pistes séparées"| T["Entraînement<br/>priism-lab train-sep"]
     P["BS-RoFormer-SW<br/>pré-entraîné"] --> T
-    T -->|"model.pt"| E["Évaluation<br/>priism eval-sep<br/>(vrais stems NI)"]
+    T -->|"model.pt"| E["Évaluation<br/>priism-lab eval-sep<br/>(vrais stems NI)"]
     T -->|"model.pt"| S["Séparation d'un morceau<br/>N pistes + reste"]
 ```
 
@@ -188,7 +188,7 @@ apprendre.
 
 ## 5. L'évaluation sur du vrai son
 
-Le code : `src/priism/model/evaluate.py` (commande `priism eval-sep`).
+Le code : `src/priism/model/evaluate.py` (commande `priism-lab eval-sep`).
 
 Le synthétique ne suffit pas : ce qui compte, c'est le vrai son. On teste sur les **65 NI Free Stems**
 (`testset/ni-free-stems`), de vrais morceaux livrés en 4 stems (ex. Drums / Bass / Synths / Vocals).
@@ -226,7 +226,7 @@ La note de conception propose aussi ces éléments, **absents du code actuel** :
   que « piste 3 » soit la même source d'un extrait à l'autre. Prévu : une première passe qui regroupe les
   vecteurs d'identité sur tout le morceau, puis une séparation avec ces identités fixées.
 - **MixIT sur du vrai son sans stems** : apprendre aussi sur de vrais morceaux (FMA, déjà téléchargeable via
-  `priism fma`) en additionnant deux morceaux et en demandant au modèle de les redécouper.
+  `priism-lab fma`) en additionnant deux morceaux et en demandant au modèle de les redécouper.
 - **Perte de *deep clustering*** auxiliaire, pour que des sources qui se ressemblent aient des vecteurs
   d'identité proches (utile pour fusionner des pistes à la demande).
 - **Vraies données avec stems** (MUSDB18-HQ, MoisesDB) dans l'entraînement.

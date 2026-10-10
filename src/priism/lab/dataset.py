@@ -8,7 +8,7 @@ Two steps:
   These full tracks have no acid and teach the model to keep drums, bass and
   the rest right (no catastrophic forgetting).
 * ``synth_mix``: cut random chunks of those slot folders and lay synthetic
-  examples (acid lines, skanks, any source of ``priism.sources``) over most
+  examples (acid lines, skanks, any source of ``priism.lab.sources``) over most
   of them. A layer's target is the synthetic audio, the other slots stay
   what they were, so ground truth is exact. Some chunks get no layer on
   purpose, so the model learns to leave a slot empty. ``acid_mix`` is the

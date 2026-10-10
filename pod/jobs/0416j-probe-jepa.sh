@@ -22,7 +22,7 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFER
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
 rm -f runs/USE_JEPA
 run() {
-  priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+  priism-lab train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
     --msst-path msst --max-sources 16 --init runs/gen-real-d/model.pt --msst-v2 --factor-feedback --factor-jepa \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 3:8 \
     --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/probe-jepa --exist-weight 2 \

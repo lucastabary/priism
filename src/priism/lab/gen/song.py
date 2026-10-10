@@ -474,7 +474,7 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
         mix = mix * (0.999 / peak)
 
     meta = {k: v for k, v in plan.items()}
-    meta.update(sample_rate=sr, duration_s=n / sr, master=master, generator="priism.gen v2 step 1")
+    meta.update(sample_rate=sr, duration_s=n / sr, master=master, generator="priism.lab.gen v2 step 1")
     if bus:
         meta["bus_fx"] = bus
     for s, t in zip(meta["sources"], tracks):

@@ -2,7 +2,7 @@
 
 Every part is a list of note events played by a randomly drawn patch. The
 patch is a small subtractive/FM synth; the 303 and the skank reuse the
-existing ``priism.acid`` and ``priism.skank`` voices.
+existing ``priism.lab.acid`` and ``priism.lab.skank`` voices.
 """
 
 from __future__ import annotations

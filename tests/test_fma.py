@@ -1,7 +1,7 @@
 import io
 import zipfile
 
-from priism.data.fma import RangeFile, member_name, select_tracks
+from priism.lab.data.fma import RangeFile, member_name, select_tracks
 
 
 def test_range_file_reads_a_zip_lazily():

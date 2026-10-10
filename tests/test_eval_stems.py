@@ -1,7 +1,7 @@
 import numpy as np
 import soundfile as sf
 
-from priism.model.eval_stems import busiest, evaluate, score_excerpt
+from priism.lab.model.eval_stems import busiest, evaluate, score_excerpt
 
 
 def test_score_excerpt_strict_vs_grouped():
@@ -38,7 +38,7 @@ def test_evaluate_on_mshoxx_layout(tmp_path):
 
 
 def test_cascade_splits_loud_stems_only():
-    from priism.model.eval_stems import cascade_fn
+    from priism.lab.model.eval_stems import cascade_fn
 
     mix = np.ones((2, 100), np.float32)
     first = lambda m: np.stack([m * 0.999, m * 0.001])  # second stem is 60 dB down: kept whole

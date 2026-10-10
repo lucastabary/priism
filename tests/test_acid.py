@@ -3,9 +3,9 @@ import json
 import numpy as np
 import soundfile as sf
 
-from priism.acid.generate import generate, render
-from priism.acid.params import AcidParams, Step, sample_params
-from priism.acid.synth import control_signals, render_dry
+from priism.lab.acid.generate import generate, render
+from priism.lab.acid.params import AcidParams, Step, sample_params
+from priism.lab.acid.synth import control_signals, render_dry
 
 
 def test_render_is_deterministic_and_well_formed():

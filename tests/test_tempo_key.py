@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from priism.data.tempo_key import estimate_tempo, find_pairs, pairing
+from priism.lab.data.tempo_key import estimate_tempo, find_pairs, pairing
 
 SR = 22050
 
@@ -43,7 +43,7 @@ def test_pairing_allows_small_shifts_and_half_tempo():
 def test_key_of_a_minor_chord_loop(tmp_path):
     pytest.importorskip("essentia")
     sf = pytest.importorskip("soundfile")
-    from priism.data.tempo_key import estimate_key
+    from priism.lab.data.tempo_key import estimate_key
 
     t = np.arange(int(2 * SR)) / SR
     chords = [[57, 60, 64], [53, 57, 60], [55, 59, 62], [52, 56, 59]]  # Am F G E

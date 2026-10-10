@@ -18,7 +18,7 @@ elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ];
 # host core (48) in every loader and generator, far above the 10-core quota.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUNBUFFERED=1
 GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM each
-priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+priism-lab train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
   --msst-path msst --max-sources 16 \
   --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --valid data/gen_valid --out runs/attr-v1 \
   --steps 30000 --batch 6 --chunk 4 --lr 3e-4 --core-lr-scale 0.1 --device cuda --workers 4 \

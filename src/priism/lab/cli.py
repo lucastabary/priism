@@ -1,4 +1,4 @@
-"""Command line entry point (``priism --help`` lists the commands)."""
+"""Research command line (``priism-lab --help`` lists the commands)."""
 
 from __future__ import annotations
 
@@ -263,7 +263,7 @@ def _pod(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="priism")
+    parser = argparse.ArgumentParser(prog="priism-lab")
     sub = parser.add_subparsers(required=True)
 
     p = sub.add_parser("acid", help="generate synthetic 303 acid lines for training")

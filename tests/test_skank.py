@@ -2,9 +2,9 @@ import json
 
 import numpy as np
 
-from priism.skank.generate import render, sample_params
-from priism.skank.params import STYLES, SkankParams
-from priism.sources import SOURCES, generate, render_params
+from priism.lab.skank.generate import render, sample_params
+from priism.lab.skank.params import STYLES, SkankParams
+from priism.lab.sources import SOURCES, generate, render_params
 
 
 def test_render_is_deterministic_and_well_formed():

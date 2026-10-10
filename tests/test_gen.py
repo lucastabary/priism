@@ -3,8 +3,8 @@ import json
 import numpy as np
 import soundfile as sf
 
-from priism.gen.genres import GENRES
-from priism.gen.song import MAX_SOURCES, MIN_SOURCES, plan_song, render_song, write_song
+from priism.lab.gen.genres import GENRES
+from priism.lab.gen.song import MAX_SOURCES, MIN_SOURCES, plan_song, render_song, write_song
 
 
 def test_mix_is_sum_of_tracks():
@@ -78,7 +78,7 @@ def test_ambiguous_pair_splits_one_part():
 
 
 def test_lossy_keeps_length_and_alignment():
-    from priism.gen.augment import lossy
+    from priism.lab.gen.augment import lossy
 
     sr = 22050
     t = np.arange(sr * 3) / sr
@@ -90,7 +90,7 @@ def test_lossy_keeps_length_and_alignment():
 
 
 def test_multi_twins_give_three_or_more_parts_of_one_instrument(monkeypatch):
-    from priism.gen import song
+    from priism.lab.gen import song
 
     base = [song.plan_song(seed, 30.0) for seed in range(40)]
     monkeypatch.setattr(song, "TWIN_P", 1.0)
@@ -112,7 +112,7 @@ def test_multi_twins_give_three_or_more_parts_of_one_instrument(monkeypatch):
 
 
 def test_twin_spread_moves_the_twin_sound_only(monkeypatch):
-    from priism.gen import song
+    from priism.lab.gen import song
 
     monkeypatch.setattr(song, "TWIN_P", 1.0)
     base = {"cutoff": 800.0, "res": 0.5, "osc": "saw", "drive": 0.0}
@@ -135,7 +135,7 @@ def test_twin_spread_moves_the_twin_sound_only(monkeypatch):
 
 
 def test_pedalboard_fx_change_only_the_sound(monkeypatch):
-    from priism.gen import fx as fxmod
+    from priism.lab.gen import fx as fxmod
 
     off_mix, _, off = render_song(5, duration_s=8, sample_rate=22050)
     monkeypatch.setattr(fxmod, "PB_FX", True)
@@ -152,7 +152,7 @@ def test_pedalboard_fx_change_only_the_sound(monkeypatch):
 
 
 def test_bus_fx_share_rooms_and_keep_the_mix_a_sum(monkeypatch):
-    from priism.gen import song as songmod
+    from priism.lab.gen import song as songmod
 
     _, _, off = render_song(9, duration_s=8, sample_rate=22050, genre="dub")
     monkeypatch.setattr(songmod, "BUS_FX", True)
@@ -169,7 +169,7 @@ def test_bus_fx_share_rooms_and_keep_the_mix_a_sum(monkeypatch):
 
 
 def test_twin_place_spreads_the_parts_of_one_instrument(monkeypatch):
-    from priism.gen import song
+    from priism.lab.gen import song
 
     monkeypatch.setattr(song, "TWIN_P", 1.0)
     monkeypatch.setattr(song, "TWIN_EXTRA_P", 0.5)

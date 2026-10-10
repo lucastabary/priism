@@ -5,7 +5,7 @@ import re
 import numpy as np
 import soundfile as sf
 
-from priism.listen import build, scan_song
+from priism.lab.listen import build, scan_song
 
 
 def _song(folder, tracks=("00_kick", "01_bass")):

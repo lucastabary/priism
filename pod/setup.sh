@@ -10,7 +10,7 @@
 #
 # The retry matters: the network can come up a few seconds after the container starts.
 #
-# Needs PRIISM_WORKER_TOKEN in the pod environment (see `priism pod token`).
+# Needs PRIISM_WORKER_TOKEN in the pod environment (see `priism-lab pod token`).
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 export PRIISM_WORKSPACE="$W"
@@ -24,7 +24,7 @@ if [ -d priism ]; then git -C priism pull --ff-only; else git clone https://gith
 # Install priism without [separate]: audio-separator needs rotary-embedding-torch>=0.6,
 # and with it MSST training crashes on the EMA update. MSST pins 0.3.5, which works.
 grep -v -E '^(torch|torchaudio)([<>=~ ]|$)|wxpython|pyaudio|keyboard|sageattention' msst/requirements.txt > /tmp/msst-req.txt
-pip install -q -e priism
+pip install -q -e "priism[lab]"
 pip install -q -r /tmp/msst-req.txt
 # Surge XT for the generator: built once on the volume by job 0401, linked here on every start.
 bash priism/pod/surge/build.sh --link-only
@@ -50,4 +50,4 @@ done
 # Results (runs/, queue logs) can be pulled over HTTPS: the pod disk is not persistent.
 # The guard stops a stuck job (silent log or idle GPU) so the queue moves on without anyone watching.
 nohup python3 "$W/priism/pod/guard.py" --queue "$W/queue" >> "$W/queue/guard.out" 2>&1 &
-exec priism worker --queue "$W/queue" --port "${PRIISM_WORKER_PORT:-8000}" --files-root "$W"
+exec priism-lab worker --queue "$W/queue" --port "${PRIISM_WORKER_PORT:-8000}" --files-root "$W"

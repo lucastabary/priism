@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from priism.gen import song, surge
-from priism.gen.tonal import Note
+from priism.lab.gen import song, surge
+from priism.lab.gen.tonal import Note
 
 pytestmark = pytest.mark.skipif(not surge.available(), reason="surgepy not installed")
 

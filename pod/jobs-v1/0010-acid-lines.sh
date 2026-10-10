@@ -5,6 +5,6 @@ set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace}
 bash "$W/priism/pod/fetch_musdb.sh" &
 dl=$!
-priism acid --out "$W/data/acid_train" --count 6000 --seed 0 --duration 16 --workers "$(nproc)"
-priism acid --out "$W/data/acid_valid" --count 300 --seed 1000000 --duration 16 --workers "$(nproc)"
+priism-lab acid --out "$W/data/acid_train" --count 6000 --seed 0 --duration 16 --workers "$(nproc)"
+priism-lab acid --out "$W/data/acid_valid" --count 300 --seed 1000000 --duration 16 --workers "$(nproc)"
 wait "$dl"

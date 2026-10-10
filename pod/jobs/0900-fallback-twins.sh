@@ -24,7 +24,7 @@ for r in gen-real-d surge-e twins-f general-g; do [ -f runs/$r/DONE ] && INIT=ru
 # Same mechanism as the run it starts from (its config.json).
 V2=$(python3 -c "import json,sys; c=json.load(open(sys.argv[1])); print(' '.join(f for k, f in (('v2','--msst-v2'), ('slot_attention','--msst-slots'), ('slot_warm','--msst-slots-warm')) if c.get(k)))" "$(dirname "$INIT")/config.json")
 echo "fallback from $INIT $V2"
-priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+priism-lab train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
   --msst-path msst --max-sources 16 --init "$INIT" $V2 \
   --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
   --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/fallback-twins --exist-weight 2 \

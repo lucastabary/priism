@@ -28,7 +28,7 @@ GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM eac
 # Probe first: 1000 steps on the full run's schedule, judged against its step-0 validation
 # (pod/probe_gate.py); the full run only resumes from it when the probe brought something.
 run() {
-  priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+  priism-lab train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
     --msst-path msst --max-sources 16 --init runs/curr-c/model.pt \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:16 \
     --valid data/gen_valid data/gen_valid_twins data/gen_valid_twins3 --out runs/gen-real-d --exist-weight 2 \

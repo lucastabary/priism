@@ -35,8 +35,8 @@ class Source:
 SOURCES = {
     s.name: s
     for s in [
-        Source("acid", "priism.acid.generate", "TB-303 style lines with saturation, dub delay and reverb"),
-        Source("skank", "priism.skank.generate", "dub/reggae offbeat chords: guitar, organ bubble, piano, chord stabs"),
+        Source("acid", "priism.lab.acid.generate", "TB-303 style lines with saturation, dub delay and reverb"),
+        Source("skank", "priism.lab.skank.generate", "dub/reggae offbeat chords: guitar, organ bubble, piano, chord stabs"),
     ]
 }
 

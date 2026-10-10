@@ -6,7 +6,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from priism.worker import Queue, make_handler
+from priism.lab.worker import Queue, make_handler
 
 TOKEN = "t" * 40
 
@@ -63,7 +63,7 @@ def test_http_api_needs_the_token_and_queues_jobs(tmp_path):
 
 
 def test_files_can_be_listed_downloaded_and_resumed(tmp_path):
-    from priism.worker import download
+    from priism.lab.worker import download
 
     root = tmp_path / "ws"
     (root / "runs").mkdir(parents=True)

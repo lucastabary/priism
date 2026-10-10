@@ -2,10 +2,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from priism.model.data import SongChunks, collate, merged_sources  # noqa: E402
-from priism.model.loss import neg_snr, pit_loss  # noqa: E402
-from priism.model.separator import AttractorSeparator, default_bands  # noqa: E402
-from priism.model.train import PRESETS  # noqa: E402
+from priism.lab.model.data import SongChunks, collate, merged_sources  # noqa: E402
+from priism.lab.model.loss import neg_snr, pit_loss  # noqa: E402
+from priism.lab.model.separator import AttractorSeparator, default_bands  # noqa: E402
+from priism.lab.model.train import PRESETS  # noqa: E402
 
 
 def tiny():
@@ -48,7 +48,7 @@ def test_neg_snr_soft_cap():
 
 
 def test_dataset_merges_groups_and_drops_silence(tmp_path):
-    from priism.gen.song import plan_song, write_song
+    from priism.lab.gen.song import plan_song, write_song
 
     seed = next(s for s in range(3000) if any(x["split_notes"] for x in plan_song(s, 8)["sources"]))
     write_song(seed, tmp_path, duration_s=8, sample_rate=22050)
@@ -74,7 +74,7 @@ def test_msst_attractor_separator_runs_on_a_small_roformer():
     pytest.importorskip("rotary_embedding_torch")
     from models.bs_roformer.bs_roformer import BSRoformer
 
-    from priism.model.msst_core import MsstAttractorSeparator
+    from priism.lab.model.msst_core import MsstAttractorSeparator
 
     bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)  # 129 bins for n_fft 256
     r = BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
@@ -86,7 +86,7 @@ def test_msst_attractor_separator_runs_on_a_small_roformer():
     out["sources"].abs().mean().backward()
     with torch.autocast("cpu", dtype=torch.bfloat16):  # as on GPU (bf16): complex ops must stay in fp32
         assert model(mix)["sources"].dtype == torch.float32
-    from priism.model.distill import teacher_stems
+    from priism.lab.model.distill import teacher_stems
 
     with torch.autocast("cpu", dtype=torch.bfloat16):  # the stock model as teacher, inside the bf16 training step
         teacher = BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
@@ -95,8 +95,8 @@ def test_msst_attractor_separator_runs_on_a_small_roformer():
 
 
 def test_train_saves_and_resumes(tmp_path):
-    from priism.gen.song import write_song
-    from priism.model.train import train
+    from priism.lab.gen.song import write_song
+    from priism.lab.model.train import train
 
     for s in range(2):
         write_song(s, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
@@ -112,8 +112,8 @@ def test_train_saves_and_resumes(tmp_path):
 
 
 def test_probe_stops_early_then_resumes(tmp_path):
-    from priism.gen.song import write_song
-    from priism.model.train import train
+    from priism.lab.gen.song import write_song
+    from priism.lab.model.train import train
 
     write_song(0, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
     kw = dict(preset="tiny", batch=2, chunk_s=1.0, log_every=1, save_every=10, valid=tmp_path / "songs",
@@ -125,7 +125,7 @@ def test_probe_stops_early_then_resumes(tmp_path):
 
 
 def test_streamed_songs_feed_training(tmp_path):
-    from priism.model.stream import LiveSongs, SongStream, ready_songs
+    from priism.lab.model.stream import LiveSongs, SongStream, ready_songs
 
     pool = SongStream(tmp_path / "pool", workers=2, duration_s=3, sample_rate=22050, max_songs=3, first_seed=5)
     try:
@@ -139,7 +139,7 @@ def test_streamed_songs_feed_training(tmp_path):
 
 
 def test_group_outputs_sums_outputs_into_their_stem():
-    from priism.model.evaluate import group_outputs
+    from priism.lab.model.evaluate import group_outputs
 
     torch.manual_seed(0)
     refs = torch.randn(3, 2, 500)
@@ -150,7 +150,7 @@ def test_group_outputs_sums_outputs_into_their_stem():
 def test_stream_curriculum_limits_sources(tmp_path):
     import json
 
-    from priism.model.stream import SongStream, ready_songs
+    from priism.lab.model.stream import SongStream, ready_songs
 
     pool = SongStream(tmp_path / "pool", workers=2, duration_s=2, sample_rate=22050, max_songs=10, first_seed=7,
                       sources=(2, 3))
@@ -163,7 +163,7 @@ def test_stream_curriculum_limits_sources(tmp_path):
 
 
 def test_group_loss_rewards_outputs_that_sum_to_the_stems():
-    from priism.model.distill import group_loss
+    from priism.lab.model.distill import group_loss
 
     torch.manual_seed(0)
     refs = torch.randn(1, 3, 2, 800)
@@ -178,8 +178,8 @@ def test_msst_training_with_real_song_distillation(tmp_path):
     import numpy as np
     import soundfile as sf
 
-    from priism.gen.song import write_song
-    from priism.model.train import train
+    from priism.lab.gen.song import write_song
+    from priism.lab.model.train import train
 
     msst = os.environ.get("MSST_PATH")
     if not msst:
@@ -213,7 +213,7 @@ model:
 
 
 def test_plateau_detection():
-    from priism.model.train import _stalled
+    from priism.lab.model.train import _stalled
 
     h = [{"step": 0, "valid_sep_snr": 5.0}, {"step": 1, "valid_sep_snr": 8.0}, {"step": 2, "valid_sep_snr": 8.05},
          {"step": 3, "valid_sep_snr": 7.9}]
@@ -224,8 +224,8 @@ def test_plateau_detection():
 
 
 def test_grouping_ignores_near_silent_stems():
-    from priism.model.distill import group_loss
-    from priism.model.evaluate import group_outputs
+    from priism.lab.model.distill import group_loss
+    from priism.lab.model.evaluate import group_outputs
 
     torch.manual_seed(0)
     refs = torch.randn(1, 4, 2, 2000)
@@ -237,9 +237,9 @@ def test_grouping_ignores_near_silent_stems():
 
 
 def test_validation_scores_twins_alone(tmp_path, monkeypatch):
-    from priism.gen import song
-    from priism.model.data import SongChunks
-    from priism.model.train import build_model, evaluate
+    from priism.lab.gen import song
+    from priism.lab.model.data import SongChunks
+    from priism.lab.model.train import build_model, evaluate
 
     monkeypatch.setattr(song, "TWIN_P", 1.0)
     monkeypatch.setattr(song, "TWIN_EXTRA_P", 1.0)
@@ -266,7 +266,7 @@ def test_msst_v2_starts_from_v1_weights_and_runs(tmp_path):
     pytest.importorskip("rotary_embedding_torch")
     from models.bs_roformer.bs_roformer import BSRoformer
 
-    from priism.model.msst_core import MsstAttractorSeparator
+    from priism.lab.model.msst_core import MsstAttractorSeparator
 
     bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
     mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
@@ -296,7 +296,7 @@ def test_slot_attention_queries_are_exchangeable_and_deterministic_in_eval(tmp_p
     pytest.importorskip("rotary_embedding_torch")
     from models.bs_roformer.bs_roformer import BSRoformer
 
-    from priism.model.msst_core import MsstAttractorSeparator
+    from priism.lab.model.msst_core import MsstAttractorSeparator
 
     bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
     mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
@@ -326,7 +326,7 @@ def test_warm_slots_start_as_draws_of_the_fixed_queries_spread(tmp_path):
     pytest.importorskip("rotary_embedding_torch")
     from models.bs_roformer.bs_roformer import BSRoformer
 
-    from priism.model.msst_core import MsstAttractorSeparator
+    from priism.lab.model.msst_core import MsstAttractorSeparator
 
     bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
     mk = lambda: BSRoformer(dim=16, depth=1, stereo=True, num_stems=4, freqs_per_bands=bands, dim_head=8, heads=2,
@@ -351,9 +351,9 @@ def test_training_on_real_multitracks_with_grouped_stems(tmp_path):
     import numpy as np
     import soundfile as sf
 
-    from priism.gen.song import write_song
-    from priism.model.distill import StemCrops
-    from priism.model.train import train
+    from priism.lab.gen.song import write_song
+    from priism.lab.model.distill import StemCrops
+    from priism.lab.model.train import train
 
     write_song(0, tmp_path / "songs", duration_s=4, sample_rate=22050, n_sources=2)
     rng = np.random.default_rng(0)

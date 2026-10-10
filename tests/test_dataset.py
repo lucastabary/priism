@@ -3,7 +3,7 @@ import json
 import numpy as np
 import soundfile as sf
 
-from priism.dataset import MixSettings, acid_mix, restem
+from priism.lab.dataset import MixSettings, acid_mix, restem
 
 SR = 44100
 
@@ -59,7 +59,7 @@ def test_acid_mix_writes_exact_targets(tmp_path):
 
 
 def test_synth_mix_layers_new_slots_and_distractors(tmp_path):
-    from priism.dataset import Layer, parse_layer, synth_mix
+    from priism.lab.dataset import Layer, parse_layer, synth_mix
 
     n = 3 * SR
     _musdb_like(tmp_path / "musdb", "song", n)
@@ -85,7 +85,7 @@ def test_synth_mix_layers_new_slots_and_distractors(tmp_path):
 
 
 def test_parse_layer():
-    from priism.dataset import parse_layer
+    from priism.lab.dataset import parse_layer
 
     layer = parse_layer("rest=data/acid:0.3:-20:-6")
     assert (layer.slot, str(layer.dir), layer.prob, layer.rel_db) == ("rest", "data/acid", 0.3, (-20.0, -6.0))
@@ -93,7 +93,7 @@ def test_parse_layer():
 
 
 def test_synth_mix_folds_background_slots_for_a_two_stem_specialist(tmp_path):
-    from priism.dataset import Layer, synth_mix
+    from priism.lab.dataset import Layer, synth_mix
 
     _musdb_like(tmp_path / "musdb", "song", 3 * SR)
     slots_dir = tmp_path / "slots"
@@ -117,7 +117,7 @@ def test_fold_sums_other_stems_and_links_kept_ones(tmp_path):
     import numpy as np
     import soundfile as sf
 
-    from priism.dataset import fold_slots
+    from priism.lab.dataset import fold_slots
 
     ex = tmp_path / "src" / "mix_0000000"
     ex.mkdir(parents=True)

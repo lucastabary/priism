@@ -5,4 +5,4 @@
 # with 4 GB left on the volume (25 GB in all), which other projects share.
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
-priism fma --out "$W/data/fma" --subset full --limit 100 --max-gb 12 --min-free-gb 4
+priism-lab fma --out "$W/data/fma" --subset full --limit 100 --max-gb 12 --min-free-gb 4

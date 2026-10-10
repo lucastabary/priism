@@ -6,9 +6,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from priism.gen.song import render_song, write_song  # noqa: E402
-from priism.model.data import SongChunks, collate  # noqa: E402
-from priism.model.factors import FactorHeads, factor_loss, harmonic_comb, rasterize  # noqa: E402
+from priism.lab.gen.song import render_song, write_song  # noqa: E402
+from priism.lab.model.data import SongChunks, collate  # noqa: E402
+from priism.lab.model.factors import FactorHeads, factor_loss, harmonic_comb, rasterize  # noqa: E402
 
 
 def test_every_source_has_a_timeline_that_matches_its_audio():
@@ -83,7 +83,7 @@ def test_factor_loss_learns_and_z_finds_its_source():
 
 
 def test_tiny_training_with_factors_logs_their_scores_and_reloads(tmp_path):
-    from priism.model.train import load_run, train
+    from priism.lab.model.train import load_run, train
 
     write_song(5, tmp_path / "songs", duration_s=6.0, sample_rate=22050)
     h = train(tmp_path / "songs", tmp_path / "run", preset="tiny", steps=2, batch=2, chunk_s=1.0, log_every=1,
@@ -101,7 +101,7 @@ def _small_msst(**kw):
     pytest.importorskip("rotary_embedding_torch")
     from models.bs_roformer.bs_roformer import BSRoformer
 
-    from priism.model.msst_core import MsstAttractorSeparator
+    from priism.lab.model.msst_core import MsstAttractorSeparator
 
     bands = (2,) * 24 + (4,) * 8 + (8,) * 4 + (17,)
     torch.manual_seed(0)
@@ -128,7 +128,7 @@ def test_msst_factors_start_where_a_run_without_them_was():
 
 
 def test_jepa_target_is_frozen_kept_out_of_the_weights_and_trainable_through_the_factors():
-    from priism.model.factors import jepa_loss
+    from priism.lab.model.factors import jepa_loss
 
     m = _small_msst(v2=True, factors=True, factor_jepa=True, jepa_target=True).train()
     assert not any(k.startswith("jepa_target") for k in m.state_dict())
@@ -150,7 +150,7 @@ def test_msst_training_with_jepa_logs_it_and_reloads(tmp_path):
         pytest.skip("MSST_PATH not set (MSST checkout needed)")
     import yaml
 
-    from priism.model.train import load_run, train
+    from priism.lab.model.train import load_run, train
 
     write_song(4, tmp_path / "songs", duration_s=4.0, sample_rate=44100)
     cfg = tmp_path / "cfg.yaml"
@@ -167,7 +167,7 @@ def test_msst_training_with_jepa_logs_it_and_reloads(tmp_path):
 
 
 def test_semitone_filterbank_finds_a_tone_and_its_harmonics_reach_mix_pitch():
-    from priism.model.factors import MixPitch, semitone_filterbank
+    from priism.lab.model.factors import MixPitch, semitone_filterbank
 
     sr, n_fft = 44100, 2048
     fb = semitone_filterbank(n_fft // 2 + 1, sr, n_fft)

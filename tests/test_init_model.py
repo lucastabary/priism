@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-from priism.train.init_model import _Loader, make_config, remap_heads
+from priism.lab.train.init_model import _Loader, make_config, remap_heads
 
 torch = pytest.importorskip("torch")
 

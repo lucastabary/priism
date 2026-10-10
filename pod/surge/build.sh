@@ -8,7 +8,7 @@
 set -euo pipefail
 W=${PRIISM_WORKSPACE:-/workspace/priism}
 OUT="$W/surge-py"
-COMMIT=348cfb3d0bd081797cfd6505d5f8d3ffd6f34c49  # tested with priism.gen.surge
+COMMIT=348cfb3d0bd081797cfd6505d5f8d3ffd6f34c49  # tested with priism.lab.gen.surge
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 link() {

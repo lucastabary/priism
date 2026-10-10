@@ -20,7 +20,7 @@ else  # heads only: everything before the mask estimators stays frozen
   FLAGS=(--freeze_layers band_split layers final_norm)
 fi
 if [ ! -f "$RUN/config.yaml" ]; then
-  priism train-init --config "$W/models/BS-Roformer-SW.yaml" --ckpt "$W/models/BS-Roformer-SW.ckpt" \
+  priism-lab train-init --config "$W/models/BS-Roformer-SW.yaml" --ckpt "$W/models/BS-Roformer-SW.ckpt" \
     --map "$STEM=other" rest=other --out "$RUN" \
     --overrides "{\"audio\": {\"min_mean_abs\": 0.0}, \"model\": {\"use_torch_checkpoint\": true}, $TRAINING$EXTRA}"
 fi

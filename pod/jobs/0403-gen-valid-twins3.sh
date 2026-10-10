@@ -9,7 +9,7 @@ python3 - "$W/data/gen_valid_twins3" <<'PY'
 import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
-from priism.gen.song import plan_song, write_song
+from priism.lab.gen.song import plan_song, write_song
 
 out = sys.argv[1]
 n_src = lambda s: 4 + s % 5

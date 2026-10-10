@@ -20,8 +20,8 @@ c'est écrire un module avec trois fonctions et l'inscrire dans `SOURCES` :
 | `params_from_dict(d)` | relit le JSON, pour régénérer à l'identique |
 
 ```bash
-priism synth list
-priism synth skank --out data/skank_train --count 6000 --duration 16 --workers 16
+priism-lab synth list
+priism-lab synth skank --out data/skank_train --count 6000 --duration 16 --workers 16
 ```
 
 Sources disponibles : `acid` (TB-303) et `skank` (accords à contretemps :
@@ -39,7 +39,7 @@ générateur : `synth-mix` ne lit que des FLAC/WAV.
 dirigée vers un slot.
 
 ```bash
-priism synth-mix data/slots_musdb_train --slots drums bass skank rest \
+priism-lab synth-mix data/slots_musdb_train --slots drums bass skank rest \
   --layer skank=data/skank_train:0.8 \
   --layer rest=data/acid_train:0.3:-20:-6 \
   --out data/train_skank --count 6000
@@ -73,7 +73,7 @@ modifié), moins de mémoire GPU, et chaque spécialiste s'entraîne seul.
 MSST le gère (`--train_lora_peft`, section `lora` de la config) :
 
 ```bash
-priism train-init --config BS-Roformer-SW.yaml --ckpt BS-Roformer-SW.ckpt \
+priism-lab train-init --config BS-Roformer-SW.yaml --ckpt BS-Roformer-SW.ckpt \
   --map skank=other rest=other --out runs/skank-v1 \
   --overrides '{"lora": {"r": 16, "lora_alpha": 32, "target_modules": ["to_qkv", "to_gates", "to_out.0"],
                           "modules_to_save": ["mask_estimators"]}}'
@@ -127,9 +127,9 @@ aura été entraîné ; l'empaquetage Mixxx reste hors du champ actuel.
 
 1. Écrire la source (`src/priism/<stem>/`) et l'inscrire dans `SOURCES`, avec
    ses tests.
-2. Générer train et validation (`priism synth`, seeds disjointes).
-3. `priism synth-mix` avec la cible et un ou deux distracteurs.
-4. `priism train-init --map <stem>=other rest=other` (mode B) puis MSST.
+2. Générer train et validation (`priism-lab synth`, seeds disjointes).
+3. `priism-lab synth-mix` avec la cible et un ou deux distracteurs.
+4. `priism-lab train-init --map <stem>=other rest=other` (mode B) puis MSST.
 5. Évaluer : SDR sur la validation synthétique, et à l'oreille sur de vrais
    morceaux du genre.
 

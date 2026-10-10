@@ -26,7 +26,7 @@ GEN=$(( N > 9 ? N - 6 : 3 )); GEN=$(( GEN > 12 ? 12 : GEN ))  # ~1 GB of RAM eac
 if [ -f runs/v3-curr-a/PROBE_OK ]; then INIT=runs/v3-curr-a/model.pt; MECH="--msst-v2 --msst-slots"; echo "mechanism: v3"
 else INIT=runs/gen-real-d/model.pt; MECH=""; echo "mechanism: v1 (fixed queries): v3 curriculum probe did not pass"; fi
 run() {
-  priism train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
+  priism-lab train-sep --preset msst --msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt \
     --msst-path msst --max-sources 16 --init "$INIT" $MECH \
     --stream /root/priism-stream --stream-workers "$GEN" --stream-songs 300 --stream-sources 2:8 \
     --valid data/gen_valid data/gen_valid_twins --valid-stems data/raw/musdb18hq/test --out runs/general-g \

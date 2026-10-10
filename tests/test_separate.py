@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from priism import separate
-from priism.separate import Profile, assemble_slots, load_profile
+from priism.lab import separate
+from priism.lab.separate import Profile, assemble_slots, load_profile
 
 
 def _noise(n, seed):

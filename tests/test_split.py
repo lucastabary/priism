@@ -1,6 +1,6 @@
 import numpy as np
 
-from priism.model.split import split_song
+from priism.lab.model.split import split_song
 
 SR = 1000
 
