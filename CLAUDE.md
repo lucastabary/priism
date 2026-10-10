@@ -8,7 +8,8 @@ a class-agnostic separator trained on synthetic songs, with GPU pod tooling.
 ## The contract with MyMixxx (read first)
 
 [`docs/contract.md`](docs/contract.md) is the source of truth, shared with the MyMixxx agent and repo
-(`C:\Users\lucas\Projects\MyMixx`, design in `docs/mymixxx/stem-prep-editor.md` there). Schemas:
+(`C:\Users\lucas\Projects\MyMixx`, branch `mymixxx`: brief and design in `docs/mymixxx/priism-brief.md`
+and `docs/mymixxx/stem-prep-editor.md` there). Schemas:
 `src/priism/engine/schema/*.json`. Shared example: `fixtures/contract/` (regenerate with
 `python scripts/make_fixture.py`, then rerun the tests).
 
@@ -52,6 +53,12 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv\Scripts\python.exe torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 uv pip install --python .venv\Scripts\python.exe -e ".[dev,demucs]"     # add ,lab for research code
 ```
+
+MyMixxx launches `.venv\Scripts\priism.exe` (stem prep window: `version --json`, `separate --profile fast`,
+`export-ni --codec alac`). That launcher runs the venv's base Python, which uv keeps under
+`%APPDATA%\uv\python`. Gotcha: processes started from the Claude desktop app's Terminal panel see a
+virtualized AppData, so priism.exe fails there with "No Python at '...cpython-3.12...'"; a normal
+terminal (or Mixxx itself) works.
 
 Extras: `demucs` (Demucs models), `lab` (research), `lab-separate[-cpu]` (audio-separator, lab only),
 `fast` (numba), `dev` (pytest, jsonschema).
