@@ -1,1 +1,1 @@
-"""Priism: ML stem separation for DJ mixing."""
+"""Priism: stem separation engine for MyMixxx (research code lives in ``priism.lab``)."""

@@ -1,0 +1,21 @@
+# No ML: frequency bands instead of instruments, for building and testing clients
+# (MyMixxx) without models or a GPU. Two steps, to exercise the separation tree:
+# the low band comes off the mix, then the rest is split into mid and high.
+name = "fake"
+version = "1"
+description = "Band-split stand-in for real separation (no ML, CPU, seconds per track)"
+suggested_slots = [["high"], ["low"], ["mid"], ["residual"]]
+
+[[steps]]
+input = "mix"
+model = "fake:bands"
+outputs = [{ id = "low", kind = "bass", label = "Low band (< 150 Hz)", from = ["low"] }]
+rest = { id = "upper" }
+
+[[steps]]
+input = "upper"
+model = "fake:bands"
+outputs = [
+  { id = "mid", kind = "other", label = "Mid band (150 Hz - 2.5 kHz)", from = ["mid"] },
+  { id = "high", kind = "drums", label = "High band (> 2.5 kHz)", from = ["high"] },
+]

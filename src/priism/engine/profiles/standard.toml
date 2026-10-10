@@ -1,0 +1,16 @@
+# The usual 4 stems with Demucs v4 fine-tuned (one model per stem, bagged).
+# What the four stems leave of the mix (a few tenths of a percent) goes to the residual.
+name = "standard"
+version = "1"
+description = "htdemucs_ft: drums, bass, other, vocals"
+suggested_slots = [["drums"], ["bass"], ["other", "residual"], ["vocals"]]
+
+[[steps]]
+input = "mix"
+model = "demucs:htdemucs_ft"
+outputs = [
+  { id = "drums", kind = "drums", label = "Drums", from = ["drums"] },
+  { id = "bass", kind = "bass", label = "Bass", from = ["bass"] },
+  { id = "other", kind = "other", label = "Other", from = ["other"] },
+  { id = "vocals", kind = "vocals", label = "Vocals", from = ["vocals"] },
+]

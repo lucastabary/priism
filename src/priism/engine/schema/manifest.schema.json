@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lucastabary/priism/schema/manifest.schema.json",
+  "title": "priism manifest",
+  "description": "Output of `priism separate`. Rules a schema cannot express (unique ids, references to the models table and to stems) are listed in docs/contract.md. Unknown fields must be ignored by readers.",
+  "type": "object",
+  "required": ["schema_version", "priism_version", "source", "stems", "residual", "suggested_slots"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+    "priism_version": {"type": "string"},
+    "profile": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    },
+    "source": {
+      "type": "object",
+      "required": ["path", "sha256", "sample_rate", "channels", "frames"],
+      "properties": {
+        "path": {"type": "string", "description": "Original track (absolute path on the machine that ran priism)."},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Identity hash supplied by the caller (MyMixxx: SHA-256 of the decoded audio, interleaved float32 little-endian, as decoded by Mixxx); the input file's own SHA-256 when not supplied."},
+        "sample_rate": {"type": "integer", "minimum": 1},
+        "channels": {"type": "integer", "enum": [1, 2], "description": "Channels of the input; stems are always stereo."},
+        "frames": {"type": "integer", "minimum": 1},
+        "decoder": {"type": "string", "description": "What produced the PCM, e.g. mixxx:SoundSourceMp3. Informative."}
+      }
+    },
+    "models": {
+      "type": "object",
+      "description": "Models used, keyed by the id stems refer to.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["backend", "name", "version"],
+        "properties": {
+          "backend": {"type": "string"},
+          "name": {"type": "string"},
+          "version": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "stems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "kind", "file"],
+        "properties": {
+          "id": {"$ref": "#/$defs/stem_id"},
+          "label": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1, "description": "Open vocabulary: vocals, drums, bass, guitar, piano, synth, strings, fx, other..."},
+          "file": {"$ref": "#/$defs/relative_path"},
+          "models": {"type": "array", "items": {"type": "string"}},
+          "parent": {"type": "string", "description": "Node of the separation tree it was split from ('mix' = the source)."},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "residual": {
+      "type": "object",
+      "required": ["file"],
+      "properties": {"file": {"$ref": "#/$defs/relative_path"}}
+    },
+    "suggested_slots": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[a-z0-9_]+$"}}
+    }
+  },
+  "$defs": {
+    "stem_id": {"type": "string", "pattern": "^[a-z0-9_]+$", "not": {"enum": ["residual", "mix"]}},
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "POSIX path relative to the manifest's folder, no '..'.",
+      "not": {"pattern": "(^/|^[A-Za-z]:|\\\\|(^|/)\\.\\.(/|$))"}
+    }
+  }
+}

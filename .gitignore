@@ -6,3 +6,7 @@ out/
 /data/
 *.wav
 *.flac
+
+# Shared contract fixture (small, synthetic)
+!fixtures/**/*.wav
+!fixtures/**/*.flac

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lucastabary/priism/schema/project.schema.json",
+  "title": "priism project",
+  "description": "Written by MyMixxx, input of `priism export-ni`: how the manifest's stems fill the 4 slots of an NI stem file. Rules needing the manifest (known stem ids, each stem in one slot at most) are in docs/contract.md.",
+  "type": "object",
+  "required": ["schema_version", "manifest", "slots"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+    "manifest": {
+      "type": "string",
+      "description": "Path of manifest.json relative to this file.",
+      "not": {"pattern": "(^/|^[A-Za-z]:|\\\\|(^|/)\\.\\.(/|$))"}
+    },
+    "slots": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["name", "color", "stems"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "color": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+          "stems": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9_]+$"}},
+          "gain": {"type": "array", "items": {"type": "number"}, "description": "Linear gain per stem, same length as stems (default 1.0 each)."}
+        }
+      }
+    },
+    "discarded": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9_]+$"}}
+  }
+}

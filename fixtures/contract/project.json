@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.1",
+  "manifest": "manifest.json",
+  "slots": [
+    {
+      "name": "Highs",
+      "color": "#FF5A3C",
+      "stems": [
+        "high"
+      ]
+    },
+    {
+      "name": "Lows",
+      "color": "#3C8CFF",
+      "stems": [
+        "low"
+      ],
+      "gain": [
+        1.0
+      ]
+    },
+    {
+      "name": "Mids",
+      "color": "#FFD23C",
+      "stems": [
+        "mid"
+      ]
+    },
+    {
+      "name": "Rest",
+      "color": "#3CFF8C",
+      "stems": [
+        "residual"
+      ]
+    }
+  ],
+  "discarded": []
+}
