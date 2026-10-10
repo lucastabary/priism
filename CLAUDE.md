@@ -32,7 +32,7 @@ src/priism/
     separate.py          # runs a profile, writes stems/ + manifest.json
     backends/            # models behind one interface: fake.py, demucs.py (load_model("backend:name"))
     manifest.py          # manifest/project dataclasses, contract rules, atomic JSON write
-    export_ni.py, mp4.py # NI export: ffmpeg AAC mux + moov/udta/stem box
+    export_ni.py, mp4.py # NI export: ffmpeg mux (ALAC default; AAC is 661 frames late in Mixxx/Windows) + moov/udta/stem box
     progress.py          # --progress jsonl events
     schema/              # JSON Schemas of the contract
   lab/                   # research code, `priism-lab` CLI (see below); never imported by engine/

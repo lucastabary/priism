@@ -59,9 +59,10 @@ class Reporter:
         else:
             self.err.write("done: " + ", ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
 
-    def error(self, message: str) -> None:
-        """Errors always reach stderr (the contract); in jsonl mode they are also an event."""
+    def error(self, message: str, **fields: Any) -> None:
+        """Errors always reach stderr (the contract); in jsonl mode they are also an event,
+        with optional structured ``fields`` (e.g. peaks when export-ni refuses to clip)."""
         if self.mode == "jsonl":
-            self._emit({"event": "error", "message": message})
+            self._emit({"event": "error", "message": message, **fields})
         self.err.write(f"error: {message}\n")
         self.err.flush()

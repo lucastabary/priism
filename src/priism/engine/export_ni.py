@@ -2,14 +2,19 @@
 
 Layout (the NI Stem format, as Mixxx's ``SoundSourceSTEM`` and Traktor read it):
 
-- 5 stereo AAC tracks, same rate: track 0 the full mix, tracks 1-4 the project's slots
+- 5 stereo tracks, same codec and rate: track 0 the full mix, tracks 1-4 the project's slots
   (slot audio = sum of gain x stem);
 - a ``moov/udta/stem`` box holding JSON: slot names and colours, mastering DSP disabled
   (slots must sum to the mix as they are).
 
-AAC adds an encoder delay (priming samples) in front of the audio; ffmpeg's MP4 muxer
-records it in an edit list, which decoders that honour edit lists (FFmpeg, so Mixxx's
-``SoundSourceSTEM``) skip, keeping frame 0 on frame 0 of the source.
+Codec: ALAC 24-bit by default. It is lossless and has no encoder delay, so the decoded
+tracks are bit-exact and aligned everywhere. AAC is the option for smaller files: its
+encoder delay is recorded in an edit list, which FFmpeg's native decoder honours (lag 0),
+but Mixxx on Windows decodes AAC with libfdk_aac and comes out 661 frames late (measured on
+the shared fixture; upstream Mixxx also skips its AAC stem tests on Windows).
+
+ALAC is integer PCM: a track above 0 dBFS would clip, so clipping is an error by default
+with ALAC and a warning with AAC (which keeps the peaks).
 
 Track 0 is rebuilt as the sum of every stem plus the residual, which is the decoded source
 by construction, so the export does not need the original file.
@@ -27,11 +32,26 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from .audio import FLAC_MAX
 from .manifest import RESIDUAL, ContractError, Manifest, Project, read_json
 from .mp4 import add_stem_box
 from .progress import Reporter
 
 AAC_BITRATE = "256k"
+CODECS = {
+    # ALAC holds 24 bits in 32-bit samples; ffmpeg reads the float input and rounds it.
+    "alac": ["-c:a", "alac", "-sample_fmt", "s32p", "-bits_per_raw_sample", "24"],
+    "aac": ["-c:a", "aac", "-b:a", AAC_BITRATE],
+}
+DEFAULT_ON_CLIP = {"alac": "error", "aac": "warn"}
+
+
+class ClipError(ContractError):
+    """A track exceeds full scale; carries the peaks so a client can offer to lower the gains."""
+
+    def __init__(self, message: str, peaks_dbfs: dict, clipped: list[str]):
+        super().__init__(message)
+        self.fields = {"peaks_dbfs": peaks_dbfs, "clipped": clipped}
 
 # NI's reference values, all disabled: Traktor would otherwise compress and limit the slots.
 MASTERING_DSP = {
@@ -69,9 +89,15 @@ def peak_dbfs(x: np.ndarray) -> float:
     return round(20 * np.log10(p), 2) if p > 0 else -120.0
 
 
-def export_ni(project_path: str | Path, out_path: str | Path, *, fail_on_clip: bool = False,
-              bitrate: str = AAC_BITRATE, reporter: Reporter | None = None) -> dict:
+def export_ni(project_path: str | Path, out_path: str | Path, *, codec: str = "alac", on_clip: str | None = None,
+              reporter: Reporter | None = None) -> dict:
+    """``on_clip``: "error" or "warn" when a track exceeds full scale (default: error for ALAC, warn for AAC)."""
     reporter = reporter or Reporter()
+    if codec not in CODECS:
+        raise ValueError(f"unknown codec {codec!r}; known: {', '.join(CODECS)}")
+    on_clip = on_clip or DEFAULT_ON_CLIP[codec]
+    if on_clip not in ("error", "warn"):
+        raise ValueError(f"on_clip must be 'error' or 'warn', got {on_clip!r}")
     project_path, out_path = Path(project_path), Path(out_path)
     if not shutil.which("ffmpeg"):
         raise RuntimeError("export-ni needs ffmpeg on PATH")
@@ -98,15 +124,16 @@ def export_ni(project_path: str | Path, out_path: str | Path, *, fail_on_clip: b
 
     # Track order of the file: the mix, then the slots. Clipped tracks are named ("mix" or the slot name).
     names = ["mix"] + [s.name for s in project.slots]
-    track_peaks = [peak_dbfs(y) for y in [mix] + slots]
+    tracks = [mix] + slots
+    track_peaks = [peak_dbfs(y) for y in tracks]
     peaks = {"mix": track_peaks[0], "slots": track_peaks[1:]}
-    clipped = [n for n, p in zip(names, track_peaks) if p > 0.0]
+    over = [k for k, y in enumerate(tracks) if np.max(np.abs(y), initial=0.0) > FLAC_MAX]
+    clipped = [names[k] for k in over]
     if clipped:
-        msg = f"peaks above 0 dBFS in {clipped} " \
-              f"({', '.join(f'{p:+.2f} dB' for p in track_peaks if p > 0.0)})"
-        if fail_on_clip:
-            raise ContractError(msg)
-        reporter.warning(msg + "; kept as is (AAC holds them, lower the gains to avoid clipping on output)")
+        msg = f"peaks at or above 0 dBFS in {clipped} ({', '.join(f'{track_peaks[k]:+.2f} dB' for k in over)})"
+        if on_clip == "error":
+            raise ClipError(msg + "; lower the slot gains", peaks, clipped)
+        reporter.warning(msg + ("; clipped by ALAC" if codec == "alac" else "; kept as is by AAC"))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out_path.parent, prefix=".priism-export-") as tmp:
@@ -120,7 +147,7 @@ def export_ni(project_path: str | Path, out_path: str | Path, *, fail_on_clip: b
         cmd = ["ffmpeg", "-v", "error", "-y", *inputs]
         for k in range(5):
             cmd += ["-map", f"{k}:a:0"]
-        cmd += ["-c:a", "aac", "-b:a", bitrate, "-map_metadata", "-1", "-fflags", "+bitexact",
+        cmd += CODECS[codec] + ["-map_metadata", "-1", "-fflags", "+bitexact",
                 "-disposition:a:0", "default"] + [x for k in range(1, 5) for x in (f"-disposition:a:{k}", "0")]
         cmd += ["-f", "mp4", str(muxed)]
         reporter.progress("encode", 0.0)
@@ -132,4 +159,4 @@ def export_ni(project_path: str | Path, out_path: str | Path, *, fail_on_clip: b
         final = tmp / "final.mp4"
         final.write_bytes(add_stem_box(muxed.read_bytes(), payload))
         os.replace(final, out_path)  # same volume (tmp is next to the output), so atomic
-    return {"output": str(out_path), "peaks_dbfs": peaks, "clipped": clipped}
+    return {"output": str(out_path), "codec": codec, "peaks_dbfs": peaks, "clipped": clipped}

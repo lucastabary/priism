@@ -11,7 +11,8 @@ Guarantees, whatever models are combined:
 - every stem has the track's sample rate and exact frame count, aligned on frame 0, so cues and
   beatgrids carry over;
 - stems + residual sum back to the track (bit-exact for 16/24-bit sources);
-- the NI export stays aligned after AAC encoding (encoder delay recorded in an edit list).
+- the NI export is lossless ALAC by default, decoding bit-exact and aligned (checked in Mixxx on
+  Windows); AAC is optional, but Mixxx on Windows decodes it 661 frames late.
 
 ## Install
 

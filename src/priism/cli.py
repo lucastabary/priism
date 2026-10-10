@@ -2,7 +2,8 @@
 
     priism separate <audio> --out <dir> [--profile P] [--source-path ...] [--source-sha256 ...]
                     [--source-decoder ...] [--device cpu] [--progress jsonl]
-    priism export-ni <dir> --project <project.json> --out <file.stem.mp4> [--fail-on-clip] [--progress jsonl]
+    priism export-ni <dir> --project <project.json> --out <file.stem.mp4> [--codec alac|aac]
+                     [--on-clip error|warn] [--progress jsonl]
     priism version [--json]
 
 Exit code 0 on success; otherwise a message on stderr (and an ``error`` event with --progress jsonl).
@@ -33,7 +34,7 @@ def _export_ni(args: argparse.Namespace, reporter: Reporter) -> None:
     from .engine.export_ni import export_ni
 
     project = Path(args.project) if args.project else Path(args.dir) / "project.json"
-    reporter.done(**export_ni(project, args.out, fail_on_clip=args.fail_on_clip, reporter=reporter))
+    reporter.done(**export_ni(project, args.out, codec=args.codec, on_clip=args.on_clip, reporter=reporter))
 
 
 def version_info() -> dict:
@@ -81,7 +82,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("dir", nargs="?", help="separation folder (default place of project.json)")
     p.add_argument("--project", help="project.json (default: <dir>/project.json)")
     p.add_argument("--out", required=True, help="output .stem.mp4")
-    p.add_argument("--fail-on-clip", action="store_true", help="error instead of warning when a track peaks > 0 dBFS")
+    p.add_argument("--codec", choices=["alac", "aac"], default="alac",
+                   help="alac: lossless, bit-exact and aligned everywhere (default); aac: ~4x smaller, "
+                        "but Mixxx on Windows decodes it 661 frames late")
+    p.add_argument("--on-clip", choices=["error", "warn"],
+                   help="when a track exceeds full scale (default: error for alac, warn for aac)")
     progress_flag(p)
     p.set_defaults(func=_export_ni)
 
@@ -99,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
         reporter.error("interrupted")
         sys.exit(130)
     except Exception as e:  # every failure becomes a message on stderr and a non-zero exit code
-        reporter.error(f"{type(e).__name__}: {e}")
+        reporter.error(f"{type(e).__name__}: {e}", **getattr(e, "fields", {}))
         sys.exit(1)
 
 

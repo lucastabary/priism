@@ -1,4 +1,4 @@
-# priism ↔ MyMixxx contract (schema 1.1)
+# priism ↔ MyMixxx contract (schema 1.2)
 
 priism is the stem separation engine of MyMixxx. MyMixxx runs it as a command line program
 (`QProcess`); they exchange files described here. The JSON Schemas in
@@ -14,13 +14,15 @@ unknown fields.
 |---|---|
 | 1.0 | Initial proposal (MyMixxx brief, 2026-10-10). |
 | 1.1 | `source.decoder`, `profile`, `models` table referenced by `stems[].models`, optional `stems[].parent`; input decoded by MyMixxx; `export-ni` peak report. |
+| 1.2 | `export-ni --codec alac\|aac` (ALAC by default: Mixxx on Windows decodes AAC 661 frames late), `--on-clip error\|warn` replaces `--fail-on-clip`; `codec` in the `done` event; peaks in the clipping `error` event. |
 
 ## Commands
 
 ```
 priism separate <audio> --out <dir> [--profile <name|file.toml>] [--source-path <original>]
                 [--source-sha256 <hex>] [--source-decoder <str>] [--device cpu|cuda] [--progress jsonl]
-priism export-ni [<dir>] [--project <project.json>] --out <file.stem.mp4> [--fail-on-clip] [--progress jsonl]
+priism export-ni [<dir>] [--project <project.json>] --out <file.stem.mp4> [--codec alac|aac]
+                 [--on-clip error|warn] [--progress jsonl]
 priism version [--json]
 ```
 
@@ -31,8 +33,9 @@ priism version [--json]
     `fraction` is per stage, in [0, 1].
   - `{"event":"warning","message":"..."}`
   - `{"event":"done", ...}`: `separate` gives `{"manifest": "<path>"}`; `export-ni` gives
-    `{"output": "<path>", "peaks_dbfs": {"mix": -0.5, "slots": [x, x, x, x]}, "clipped": ["<track name>", ...]}`.
-  - `{"event":"error","message":"..."}` (also written to stderr).
+    `{"output": "<path>", "codec": "alac", "peaks_dbfs": {"mix": -0.5, "slots": [x, x, x, x]}, "clipped": ["<track name>", ...]}`.
+  - `{"event":"error","message":"..."}` (also written to stderr). When `export-ni` refuses to clip,
+    the event also carries `peaks_dbfs` and `clipped`, so the client can offer to lower the gains.
 - Killable at any time. `separate` deletes any previous `manifest.json` before starting and writes
   the new one last, atomically (temporary file + rename): a folder without `manifest.json` is
   unfinished. `export-ni` writes its output atomically too.
@@ -61,7 +64,7 @@ no guarantee that their timeline matches Mixxx's.
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "priism_version": "0.2.0",
   "profile": {"name": "standard", "version": "1"},
   "source": {"path": "D:/Music/track.mp3", "sha256": "…", "sample_rate": 44100, "channels": 2,
@@ -104,7 +107,7 @@ Rules beyond the schema:
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "manifest": "manifest.json",
   "slots": [
     {"name": "Drums",  "color": "#FF5A3C", "stems": ["drums", "percussion"], "gain": [1.0, 1.0]},
@@ -123,11 +126,16 @@ are left out of the slots; the mix track still holds the whole source.
 
 ## The NI `.stem.mp4` (output of `export-ni`)
 
-- 5 stereo AAC tracks (256 kb/s, the source's sample rate): track 0 = the full mix (sum of all stems
+- 5 stereo tracks, same codec, the source's sample rate: track 0 = the full mix (sum of all stems
   and the residual, i.e. the source), tracks 1–4 = the slots, slot = Σ gain × stem.
-- AAC encoder delay and padding are recorded in an edit list: decoders that honour it (FFmpeg, hence
-  Mixxx's `SoundSourceSTEM`) give back exactly `source.frames` frames, aligned on the source.
+- **Codec: ALAC 24-bit by default** (what MyMixxx uses). Lossless and without encoder delay: every
+  track decodes bit-exact (for stems on the 24-bit grid) to exactly `source.frames` frames. Checked
+  in Mixxx on Windows (`SoundSourceSTEM`): lag 0, max error 0.
+- `--codec aac` (256 kb/s, about 4× smaller): the encoder delay is recorded in an edit list, which
+  FFmpeg's native decoder honours (lag 0), but Mixxx on Windows decodes AAC with libfdk_aac and comes
+  out **661 frames late**. Not for MyMixxx; kept for sharing and other software.
 - `moov/udta/stem` box: JSON `{"version": 1, "stems": [{"name", "color"} × 4], "mastering_dsp": …}`
   with the compressor and limiter disabled (Traktor would otherwise process the slots).
-- No limiter: a slot summing above 0 dBFS is kept as is (AAC holds it), reported in `peaks_dbfs` and
-  `clipped` with a `warning` event; `--fail-on-clip` makes it an error.
+- No limiter and no silent gain change. A track exceeding full scale is an **error by default with
+  ALAC** (integer PCM would clip it), with the peaks in the error event; `--on-clip warn` clips it
+  instead, with a `warning` event. With AAC the default is `warn` and the peaks are kept as is.

@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from engine_helpers import synth_track  # noqa: E402
+from priism.engine import SCHEMA_VERSION  # noqa: E402
 from priism.engine.export_ni import export_ni  # noqa: E402
 from priism.engine.profile import load_profile  # noqa: E402
 from priism.engine.separate import separate  # noqa: E402
@@ -43,7 +44,7 @@ def main() -> None:
     separate(src, OUT, load_profile("fake"), source_path="source.wav", source_sha256=pcm_sha256(src),
              source_decoder="priism:fixture")
     (OUT / "project.json").write_text(json.dumps({
-        "schema_version": "1.1",
+        "schema_version": SCHEMA_VERSION,
         "manifest": "manifest.json",
         "slots": [
             {"name": "Highs", "color": "#FF5A3C", "stems": ["high"]},

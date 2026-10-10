@@ -106,15 +106,16 @@ def _decode(path, stream):
 
 
 @needs_ffmpeg
-def test_export_ni_is_aligned_and_carries_the_stem_box(tmp_path, capsys):
+@pytest.mark.parametrize("codec", ["alac", "aac"])
+def test_export_ni_is_aligned_and_carries_the_stem_box(tmp_path, capsys, codec):
     sf.write(tmp_path / "in.wav", synth_track(3.0), 44100, subtype="PCM_16")
     out = tmp_path / "out"
     main(["separate", str(tmp_path / "in.wav"), "--out", str(out), "--profile", "fake"])
     _project(out, [["high"], ["low"], ["mid"], ["residual"]])
     capsys.readouterr()
-    main(["export-ni", str(out), "--out", str(tmp_path / "x.stem.mp4"), "--progress", "jsonl"])
+    main(["export-ni", str(out), "--out", str(tmp_path / "x.stem.mp4"), "--codec", codec, "--progress", "jsonl"])
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert events[-1]["event"] == "done" and events[-1]["clipped"] == []
+    assert events[-1]["event"] == "done" and events[-1]["clipped"] == [] and events[-1]["codec"] == codec
     assert len(events[-1]["peaks_dbfs"]["slots"]) == 4
 
     meta = json.loads(read_stem_box((tmp_path / "x.stem.mp4").read_bytes()))
@@ -126,8 +127,12 @@ def test_export_ni_is_aligned_and_carries_the_stem_box(tmp_path, capsys):
     refs = [src, stems["high"][0], stems["low"][0], stems["mid"][0], stems["residual"][0]]
     for k, ref in enumerate(refs):
         dec = _decode(tmp_path / "x.stem.mp4", k)
-        assert len(dec) == len(src)  # the edit list trims the AAC priming and padding
-        # Alignment: the decoded track matches its reference better than at a 1-sample shift.
+        assert len(dec) == len(src)  # no priming or padding left (edit list for AAC)
+        if codec == "alac":
+            # Lossless: the fixture's stems are on the 24-bit grid, so the decode is bit-exact.
+            assert np.max(np.abs(dec - ref)) < 1e-7
+            continue
+        # Lossy: the decoded track matches its reference better than at a 1-sample shift.
         n = slice(4410, len(src) - 4410)
         err0 = np.sum((dec[n] - ref[n]) ** 2)
         for shift in (-1, 1):
@@ -135,7 +140,7 @@ def test_export_ni_is_aligned_and_carries_the_stem_box(tmp_path, capsys):
 
 
 @needs_ffmpeg
-def test_export_ni_reports_clipping_and_can_fail_on_it(tmp_path, capsys):
+def test_export_ni_clipping_is_an_error_with_alac_and_a_warning_with_aac(tmp_path, capsys):
     sf.write(tmp_path / "in.wav", synth_track(1.0), 44100, subtype="PCM_16")
     out = tmp_path / "out"
     separate(tmp_path / "in.wav", out, load_profile("fake"))
@@ -144,20 +149,22 @@ def test_export_ni_reports_clipping_and_can_fail_on_it(tmp_path, capsys):
     p["slots"][2]["gain"] = [8.0]
     (out / "project.json").write_text(json.dumps(p))
     capsys.readouterr()
-    main(["export-ni", str(out), "--out", str(tmp_path / "x.stem.mp4"), "--progress", "jsonl"])
-    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert any(e["event"] == "warning" for e in events) and events[-1]["clipped"] == ["S2"]
     with pytest.raises(SystemExit) as e:
-        main(["export-ni", str(out), "--out", str(tmp_path / "y.stem.mp4"), "--fail-on-clip", "--progress", "jsonl"])
+        main(["export-ni", str(out), "--out", str(tmp_path / "y.stem.mp4"), "--progress", "jsonl"])
     assert e.value.code == 1
-    assert json.loads(capsys.readouterr().out.splitlines()[-1])["event"] == "error"
+    err = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert err["event"] == "error" and err["clipped"] == ["S2"] and err["peaks_dbfs"]["slots"][2] > 0
     assert not (tmp_path / "y.stem.mp4").exists()
+    for args in (["--codec", "aac"], ["--on-clip", "warn"]):
+        main(["export-ni", str(out), "--out", str(tmp_path / "x.stem.mp4"), "--progress", "jsonl", *args])
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert any(e["event"] == "warning" for e in events) and events[-1]["clipped"] == ["S2"]
 
 
 def test_cli_version_and_errors(tmp_path, capsys):
     main(["version", "--json"])
     info = json.loads(capsys.readouterr().out)
-    assert info["schema_version"] == "1.1" and "fake" in info["profiles"] and "fake:bands" in info["models"]
+    assert info["schema_version"] == "1.2" and "fake" in info["profiles"] and "fake:bands" in info["models"]
     with pytest.raises(SystemExit) as e:
         main(["separate", str(tmp_path / "missing.wav"), "--out", str(tmp_path / "o"), "--profile", "fake",
               "--progress", "jsonl"])
