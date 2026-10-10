@@ -1,0 +1,99 @@
+# priism
+
+Stem separation engine for **MyMixxx** (Lucas's fork of Mixxx, C++/Qt). MyMixxx runs `priism` as a
+command line program to split a track into many stems, then to export a 4-slot NI `.stem.mp4` that
+Mixxx plays with per-stem volume, mute and effects. The repo also holds research code (`priism.lab`):
+a class-agnostic separator trained on synthetic songs, with GPU pod tooling.
+
+## The contract with MyMixxx (read first)
+
+[`docs/contract.md`](docs/contract.md) is the source of truth, shared with the MyMixxx agent and repo
+(`C:\Users\lucas\Projects\MyMixx`, design in `docs/mymixxx/stem-prep-editor.md` there). Schemas:
+`src/priism/engine/schema/*.json`. Shared example: `fixtures/contract/` (regenerate with
+`python scripts/make_fixture.py`, then rerun the tests).
+
+- Never change commands, manifest/project fields or progress events without Lucas's approval; every
+  change bumps `schema_version` (`priism.engine.SCHEMA_VERSION`): minor = additive, major = breaking.
+  Update the doc, the schemas, the fixture and tell the MyMixxx side.
+- Hard requirements: stems keep the input's sample rate and exact frame count, frame 0 = frame 0;
+  stems + residual sum to the source; lossless files; manifest written last and atomically.
+- MyMixxx decodes the track itself and passes a PCM WAV: priism must never resample, trim or
+  otherwise shift the input timeline.
+
+## Layout
+
+```
+src/priism/
+  cli.py                 # `priism`: separate / export-ni / version (the contract)
+  engine/
+    audio.py             # input reading, lossless writing (FLAC 24 / float WAV), resampling
+    profile.py           # profiles = trees of subtractive steps (input = outputs + rest)
+    profiles/*.toml      # bundled profiles: fake (band splits, no ML), standard (htdemucs_ft)
+    separate.py          # runs a profile, writes stems/ + manifest.json
+    backends/            # models behind one interface: fake.py, demucs.py (load_model("backend:name"))
+    manifest.py          # manifest/project dataclasses, contract rules, atomic JSON write
+    export_ni.py, mp4.py # NI export: ffmpeg AAC mux + moov/udta/stem box
+    progress.py          # --progress jsonl events
+    schema/              # JSON Schemas of the contract
+  lab/                   # research code, `priism-lab` CLI (see below); never imported by engine/
+tests/                   # test_engine_*.py for the engine; the others cover lab
+fixtures/contract/       # shared synthetic example (committed, ~6 MB)
+docs/                    # contract.md; modele.md, modular-training.md (lab, in French)
+pod/                     # RunPod job queue and scripts (lab)
+```
+
+## Environment
+
+Windows 11, no NVIDIA GPU on Lucas's laptop (i5-1235U, 16 GB): the engine runs ML models on CPU.
+ffmpeg and ffprobe must be on PATH (export-ni, non-WAV inputs).
+
+```powershell
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv\Scripts\python.exe -e ".[dev,demucs]"     # add ,lab for research code
+```
+
+Extras: `demucs` (Demucs models), `lab` (research), `lab-separate[-cpu]` (audio-separator, lab only),
+`fast` (numba), `dev` (pytest, jsonschema).
+
+## Run and test
+
+```powershell
+.venv\Scripts\priism.exe separate track.wav --out out\track --profile fake --progress jsonl
+.venv\Scripts\priism.exe export-ni out\track --out out\track.stem.mp4     # needs out\track\project.json
+.venv\Scripts\priism.exe version --json
+.venv\Scripts\python.exe -m pytest tests\test_engine_contract.py tests\test_engine_separate.py
+```
+
+Lucas's own tracks for manual tests: `C:\Users\lucas\Music\CleUSB` (MP3s; decode to WAV first, or pass
+them directly, accepting a non-Mixxx timeline). Never commit them.
+
+Known: on Windows, 14 lab tests fail and `tests/test_fma.py` errors at collection (POSIX-only code:
+process groups, `csv.field_size_limit(sys.maxsize)`, encodings). They pass on the Linux pod.
+
+## Adding a model or a profile
+
+- Model: a backend module in `engine/backends/` with `sample_rate`, `stems`, `info()` (with a weights
+  SHA-256) and `separate(audio, progress)`; register it in `backends/__init__.py`. Heavy imports go
+  inside the backend, so the engine and the fake profile need only numpy/scipy/soundfile.
+- Profile: a TOML in `engine/profiles/`, documented in `profile.py`. Put the model best at a stem
+  first and split its rest further; bump the profile `version` when its output changes.
+
+## Lab (research)
+
+`priism-lab <command>` (gen, train-sep, eval-sep, eval-stems, split, pod, worker…). The design is in
+`docs/modele.md` (attractor separator) and, on branch `claude/lucid-bohr-n21933`, `docs/plan-v2.md`
+(discover then extract). Measured on NI stems: pretrained BS-Roformer-SW beats the lab model (+8.1 vs
++2.5 dB per stem), so the engine uses pretrained models; the lab model may become a profile step later.
+Pod jobs (`pod/jobs/*.sh`, Linux) install `priism[lab]` from `main` and call `priism-lab`: merging
+a change to `main` affects jobs queued on the pod.
+
+## Conventions
+
+- Code, comments, docs, commits in English; Conventional Commits (`feat:`, `fix:`, `refactor:`…).
+  Older history uses plain sentences.
+- Match the surrounding style: `from __future__ import annotations`, dataclasses, numpy arrays shaped
+  (frames, channels) in the engine, docstrings that explain *why*.
+- Statistical rigor for model evaluations (several tracks, paired tests, effect sizes), see Lucas's
+  global instructions.
+- Never push without Lucas asking.
