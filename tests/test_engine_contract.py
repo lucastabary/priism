@@ -105,7 +105,7 @@ def test_atomic_write_leaves_only_the_file(tmp_path):
 
 
 def test_bundled_profiles_load():
-    assert {"fake", "standard"} <= set(bundled_profiles())
+    assert {"fake", "fast", "standard"} <= set(bundled_profiles())
     for name in bundled_profiles():
         assert load_profile(name).steps
 

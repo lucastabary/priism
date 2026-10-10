@@ -47,7 +47,8 @@ first without any stem being counted twice. See `src/priism/engine/profile.py`.
 
 | Profile | Models | Stems |
 |---|---|---|
-| `standard` | htdemucs_ft | drums, bass, other, vocals |
+| `standard` | htdemucs_ft (4 fine-tuned models) | drums, bass, other, vocals |
+| `fast` | htdemucs (1 model) | drums, bass, other, vocals |
 | `fake` | none (band filters) | low, mid, high: for testing clients |
 
 ## Development

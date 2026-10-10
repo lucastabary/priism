@@ -28,7 +28,7 @@ src/priism/
   engine/
     audio.py             # input reading, lossless writing (FLAC 24 / float WAV), resampling
     profile.py           # profiles = trees of subtractive steps (input = outputs + rest)
-    profiles/*.toml      # bundled profiles: fake (band splits, no ML), standard (htdemucs_ft)
+    profiles/*.toml      # bundled profiles: fake (band splits, no ML), fast (htdemucs), standard (htdemucs_ft)
     separate.py          # runs a profile, writes stems/ + manifest.json
     backends/            # models behind one interface: fake.py, demucs.py (load_model("backend:name"))
     manifest.py          # manifest/project dataclasses, contract rules, atomic JSON write
