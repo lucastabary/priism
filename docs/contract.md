@@ -1,4 +1,4 @@
-# priism ↔ MyMixxx contract (schema 1.2)
+# priism ↔ MyMixxx contract (schema 1.3)
 
 priism is the stem separation engine of MyMixxx. MyMixxx runs it as a command line program
 (`QProcess`); they exchange files described here. The JSON Schemas in
@@ -15,6 +15,7 @@ unknown fields.
 | 1.0 | Initial proposal (MyMixxx brief, 2026-10-10). |
 | 1.1 | `source.decoder`, `profile`, `models` table referenced by `stems[].models`, optional `stems[].parent`; input decoded by MyMixxx; `export-ni` peak report. |
 | 1.2 | `export-ni --codec alac\|aac` (ALAC by default: Mixxx on Windows decodes AAC 661 frames late), `--on-clip error\|warn` replaces `--fail-on-clip`; `codec` in the `done` event; peaks in the clipping `error` event. |
+| 1.3 | `version --json` lists each profile's progress `stages` in order. |
 
 ## Commands
 
@@ -40,7 +41,10 @@ priism version [--json]
   the new one last, atomically (temporary file + rename): a folder without `manifest.json` is
   unfinished. `export-ni` writes its output atomically too.
 - `version --json` gives `priism_version`, `schema_version`, `supported_schema_majors`, the bundled
-  `profiles` (version, description, models) and the available `models`.
+  `profiles` (version, description, models, `stages`) and the available `models`. `stages` lists, in
+  order, the stages a `separate` run with that profile emits, so a client can lay out a global
+  progress bar before the first event: `decode`, `load:<model>` per model, `step<N>:<model>` per step
+  of the separation tree (N from 1), `write`. Stage names are stable within a major version.
 
 ## Input of `separate` and the timeline
 
@@ -64,7 +68,7 @@ no guarantee that their timeline matches Mixxx's.
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "priism_version": "0.2.0",
   "profile": {"name": "standard", "version": "1"},
   "source": {"path": "D:/Music/track.mp3", "sha256": "…", "sample_rate": 44100, "channels": 2,
@@ -107,7 +111,7 @@ Rules beyond the schema:
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "manifest": "manifest.json",
   "slots": [
     {"name": "Drums",  "color": "#FF5A3C", "stems": ["drums", "percussion"], "gain": [1.0, 1.0]},

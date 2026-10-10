@@ -60,6 +60,11 @@ class Profile:
     def models(self) -> list[str]:
         return list(dict.fromkeys(s.model for s in self.steps))
 
+    def stages(self) -> list[str]:
+        """Progress stages of a run, in order: what ``separate`` emits and ``version --json`` announces."""
+        return (["decode"] + [f"load:{m}" for m in self.models]
+                + [step_stage(i, s.model) for i, s in enumerate(self.steps)] + ["write"])
+
     def consumed(self) -> set[str]:
         return {s.input for s in self.steps}
 
@@ -72,6 +77,10 @@ class Profile:
                 if o.id not in used:
                     out.append((step, o))
         return out
+
+
+def step_stage(index: int, model: str) -> str:
+    return f"step{index + 1}:{model}"
 
 
 def _output(d: dict, where: str, is_rest: bool) -> Output:

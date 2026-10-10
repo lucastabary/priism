@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 # Major versions this priism reads and writes; any minor of a supported major is accepted.
 SUPPORTED_SCHEMA_MAJORS = (1,)
 

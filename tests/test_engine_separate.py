@@ -164,10 +164,22 @@ def test_export_ni_clipping_is_an_error_with_alac_and_a_warning_with_aac(tmp_pat
 def test_cli_version_and_errors(tmp_path, capsys):
     main(["version", "--json"])
     info = json.loads(capsys.readouterr().out)
-    assert info["schema_version"] == "1.2" and "fake" in info["profiles"] and "fake:bands" in info["models"]
+    assert info["schema_version"] == "1.3" and "fake" in info["profiles"] and "fake:bands" in info["models"]
     with pytest.raises(SystemExit) as e:
         main(["separate", str(tmp_path / "missing.wav"), "--out", str(tmp_path / "o"), "--profile", "fake",
               "--progress", "jsonl"])
     assert e.value.code == 1
     captured = capsys.readouterr()
     assert json.loads(captured.out.splitlines()[-1])["event"] == "error" and "error:" in captured.err
+
+
+def test_progress_stages_are_the_ones_version_announces(tmp_path, capsys):
+    main(["version", "--json"])
+    announced = json.loads(capsys.readouterr().out)["profiles"]["fake"]["stages"]
+    assert announced == ["decode", "load:fake:bands", "step1:fake:bands", "step2:fake:bands", "write"]
+    sf.write(tmp_path / "in.wav", synth_track(1.0), 44100)
+    main(["separate", str(tmp_path / "in.wav"), "--out", str(tmp_path / "o"), "--profile", "fake",
+          "--progress", "jsonl"])
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    seen = list(dict.fromkeys(e["stage"] for e in events if e["event"] == "progress"))
+    assert seen == announced

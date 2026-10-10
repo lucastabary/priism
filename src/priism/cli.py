@@ -45,7 +45,8 @@ def version_info() -> dict:
     profiles = {}
     for name in bundled_profiles():
         p = load_profile(name)
-        profiles[name] = {"version": p.version, "description": p.description, "models": p.models}
+        profiles[name] = {"version": p.version, "description": p.description, "models": p.models,
+                          "stages": p.stages()}
     return {"priism_version": __version__, "schema_version": SCHEMA_VERSION,
             "supported_schema_majors": list(SUPPORTED_SCHEMA_MAJORS), "profiles": profiles,
             "models": available_models()}

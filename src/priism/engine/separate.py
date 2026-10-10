@@ -19,7 +19,7 @@ from . import __version__
 from .audio import fit, read_track, resample, sha256_file, write_lossless, write_residual
 from .backends import Model, load_model
 from .manifest import RESIDUAL, ROOT, Manifest, Profile as ProfileRef, Source, Stem, write_json_atomic
-from .profile import Profile
+from .profile import Profile, step_stage
 from .progress import Reporter
 
 MANIFEST = "manifest.json"
@@ -60,7 +60,7 @@ def separate(input_path: str | Path, out_dir: str | Path, profile: Profile, *, s
     lineage: dict[str, list[str]] = {ROOT: []}  # models each signal went through
     parents: dict[str, str] = {}
     for i, step in enumerate(profile.steps):
-        stage = f"step{i + 1}:{step.model}"
+        stage = step_stage(i, step.model)
         model = models[step.model]
         x = signals[step.input]
         raw = model.separate(resample(x.astype(np.float32), sr, model.sample_rate), reporter.stage(stage))
