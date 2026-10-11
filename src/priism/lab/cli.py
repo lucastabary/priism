@@ -28,6 +28,14 @@ def _gen(args: argparse.Namespace) -> None:
     print(f"{len(folders)} songs written to {args.out}")
 
 
+def _gen_stemloops(args: argparse.Namespace) -> None:
+    from .gen.stemloops import generate
+
+    folders = generate(args.data, args.out, per_song=args.per_song, seed=args.seed, duration_s=args.duration,
+                       sample_rate=args.sample_rate)
+    print(f"{len(folders)} songs written to {args.out}")
+
+
 def _fma(args: argparse.Namespace) -> None:
     from .data import fma
 
@@ -411,6 +419,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--sample-rate", type=int, default=44100)
     p.add_argument("--workers", type=int, default=1)
     p.set_defaults(func=_gen)
+
+    p = sub.add_parser("gen-stemloops", help="strict-loop build-ups cut from the stems of NI train songs")
+    p.add_argument("--data", required=True, help="folder of NI .stem.mp4 files (only the train part is read)")
+    p.add_argument("--out", required=True, help="output folder (gen layout, one folder per arranged song)")
+    p.add_argument("--per-song", type=int, default=4, help="arranged songs per NI song")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--duration", type=float, default=75.0, help="approximate seconds per song (whole loops)")
+    p.add_argument("--sample-rate", type=int, default=44100)
+    p.set_defaults(func=_gen_stemloops)
 
     p = sub.add_parser("fma", help="download chosen genres of the Free Music Archive (real songs, no stems)")
     p.add_argument("--out", required=True, help="output folder (<id>.mp3 + manifest.csv)")
