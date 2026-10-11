@@ -22,10 +22,11 @@ from .metrics import ownership, paired_compare, score
 from .track import online_registry, per_chunk, per_chunk_linked, whole_song
 
 METHODS = ("per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass")
-GRID = {"per_chunk": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8], "per_chunk_linked": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-        "whole_song": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+# Phase 1 picked the edge of the first grids (0.8 for the clusterings, 0.2 for the registry): widened.
+CUTS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+GRID = {"per_chunk": CUTS, "per_chunk_linked": CUTS, "whole_song": CUTS,
         # online: tau, the cosine to join a known source (its new clusters are cut at 1 - tau)
-        "online": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7], "online_two_pass": [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
+        "online": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], "online_two_pass": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
 
 
 def run_method(name: str, emb: np.ndarray, audible: np.ndarray, chunk: int, param: float, seed: int = 0

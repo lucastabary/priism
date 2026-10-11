@@ -86,13 +86,22 @@ def build_cache(trunk, sets: dict[str, tuple[str, Path]], out: str | Path, fit_s
 def select(cache: str | Path, spec: str) -> list[Cached]:
     """``set`` or ``set%dev`` / ``set%test``: the two halves of a set, split by a hash of the song name
     (stable whatever is added later), so thresholds can be tuned on one half of real songs and scored on
-    the other."""
-    name, _, half = spec.partition("%")
+    the other. ``set%train`` / ``set%dev2`` split the dev half again (about 2/3 and 1/3, another hash), to
+    train on real songs while ``%test`` stays exactly the half that phase 1 was scored on."""
+    name, _, part = spec.partition("%")
     songs = load_set(Path(cache) / name)
-    if not half:
-        return songs
-    if half not in ("dev", "test"):
-        raise ValueError(f"{spec}: half must be dev or test")
-    pick = lambda s: int(hashlib.md5(s.name.encode()).hexdigest(), 16) % 2 == (0 if half == "dev" else 1)
-    return [s for s in songs if pick(s)]
+    return [s for s in songs if in_part(s.name, part)] if part else songs
+
+
+def in_part(song: str, part: str) -> bool:
+    """Whether a song name falls in ``part`` (dev, test, train, dev2); usable without loading the cache."""
+    if part not in ("dev", "test", "train", "dev2"):
+        raise ValueError(f"unknown part {part!r}: dev, test, train or dev2")
+    half = "dev" if int(hashlib.md5(song.encode()).hexdigest(), 16) % 2 == 0 else "test"
+    if part in ("dev", "test"):
+        return half == part
+    if half != "dev":
+        return False
+    third = int(hashlib.sha1(song.encode()).hexdigest(), 16) % 3
+    return (third != 0) == (part == "train")
 
