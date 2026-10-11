@@ -227,3 +227,65 @@ def test_fx_automation_keeps_the_sum(monkeypatch):
         assert secs[0][0] == 0 and all(a[1] == b[0] for a, b in zip(secs, secs[1:]))
         assert all(a[2] != b[2] for a, b in zip(secs, secs[1:]))
     assert not np.allclose(mix, plain_mix)
+
+
+def test_strict_loops_plan(monkeypatch):
+    import priism.lab.gen.song as song
+
+    base = [plan_song(seed, duration_s=30) for seed in range(20)]
+    monkeypatch.setattr(song, "LOOP_STRICT_P", 1.0)
+    for seed, b in enumerate(base):
+        plan = plan_song(seed, duration_s=30)
+        assert [s["kind"] for s in plan["sources"]] == [s["kind"] for s in b["sources"]]  # same line-up
+        up, n_bars = plan["buildup"], plan["n_bars"]
+        loop, step = up["loop_bars"], up["step_bars"]
+        assert up["strict"] and step % loop == 0
+        assert up["entries"][0] == 0 and all(e % loop == 0 for e in up["entries"])
+        for s in plan["sources"]:
+            assert s["bars"] == list(range(s["entry_bar"], n_bars))  # in from its entry to the end
+
+
+def test_strict_loops_off_by_default():
+    import priism.lab.gen.song as song
+
+    assert song.LOOP_STRICT_P == 0.0
+    assert not any((plan_song(seed, duration_s=30)["buildup"] or {}).get("strict") for seed in range(20))
+
+
+def test_strict_loops_repeat_exactly(monkeypatch, tmp_path):
+    import json
+
+    import priism.lab.gen.song as song
+
+    monkeypatch.setattr(song, "LOOP_STRICT_P", 1.0)
+    sr = 22050
+    mix, tracks, meta = song.render_song(3, duration_s=20, sample_rate=sr)
+    np.testing.assert_allclose(mix, np.sum(tracks, axis=0), atol=1e-5)
+    up = meta["buildup"]
+    bar, period = up["bar_samples"], up["loop_bars"] * up["bar_samples"]
+    assert len(mix) == meta["n_bars"] * bar  # whole samples per bar
+    assert len(meta.pop("_master_gain")) == len(mix) // round(song.GAIN_HOP_S * sr)
+    assert len(up["master_gain_per_bar"]) == meta["n_bars"]
+    p_s = period / sr
+    for s in meta["sources"]:  # the notes repeat every loop from the entry on
+        t0 = s["entry_bar"] * bar / sr
+        first = [e for e in s["timeline"] if e[0] < t0 + p_s]
+        nxt = [e for e in s["timeline"] if t0 + p_s <= e[0] < t0 + 2 * p_s]
+        if s["entry_bar"] * bar + 2 * period <= len(mix):
+            assert len(first) == len(nxt)
+            assert all(abs(b[0] - a[0] - p_s) < 2e-4 and a[2:] == b[2:] for a, b in zip(first, nxt))
+
+    # Without the master stage, a part that entered first is periodic once its tails have settled.
+    monkeypatch.setattr(song, "_master_gains", lambda m, sr, p: np.ones(len(m)))
+    _, tracks, meta = song.render_song(3, duration_s=20, sample_rate=sr)
+    for s, t in zip(meta["sources"], tracks):
+        if s["entry_bar"] == 0 and len(t) >= 4 * period:
+            a, b = t[-2 * period:-period], t[-period:]
+            assert np.linalg.norm(b - a) <= 1e-2 * np.linalg.norm(a) + 1e-6
+
+    monkeypatch.undo()
+    monkeypatch.setattr(song, "LOOP_STRICT_P", 1.0)
+    folder = song.write_song(3, tmp_path, duration_s=8, sample_rate=sr)
+    m = json.loads((folder / "meta.json").read_text())
+    gain = np.load(folder / m["buildup"]["master_gain_file"])
+    assert "_master_gain" not in m and gain["gain"].ndim == 1 and float(gain["hop_s"]) == song.GAIN_HOP_S
