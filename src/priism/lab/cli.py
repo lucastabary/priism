@@ -262,6 +262,56 @@ def _pod(args: argparse.Namespace) -> None:
             print(f"pulled {f['path']} ({f['size'] / 1e6:.1f} MB)")
 
 
+def _cache_features(args: argparse.Namespace) -> None:
+    from .registry.features import MsstTrunk
+    from .registry.run import build_cache, parse_sets
+
+    sets = parse_sets(args.set)
+    trunk = MsstTrunk(args.msst_config, args.msst_ckpt, args.msst_path, args.device)
+    info = build_cache(trunk, sets, args.out, args.fit_set or next(iter(sets)), args.fit_songs, args.dims,
+                       args.pool, args.window, args.margin, args.limit)
+    for name, s in info["sets"].items():
+        if s["new"]:
+            print(f"{name}: {s['new']} songs, {s['seconds'] / max(s['audio_seconds'], 1e-9) * 60:.1f} s per minute of audio")
+
+
+def _registry_eval(args: argparse.Namespace) -> None:
+    import json
+
+    from .registry.evaluate import METHODS, compare, markdown
+    from .registry.head import load_head
+    from .registry.run import select
+
+    tune = [s for spec in args.tune for s in select(args.cache, spec)]
+    test = [s for spec in args.test for s in select(args.cache, spec)]
+    head = load_head(args.head) if args.head else None
+    embed = head.embed if head else (lambda x: x)
+    chunk = max(1, round(args.chunk / test[0].frame_s))
+    results = []
+    for level in (["track", "instrument"] if args.level == "both" else [args.level]):
+        r = compare(tune, test, embed, chunk, level, tuple(args.methods or METHODS))
+        print(markdown(r))
+        results.append(r)
+    if args.out:
+        from pathlib import Path
+
+        Path(args.out).write_text(json.dumps({"args": vars(args) | {"func": None}, "results": results}, indent=1,
+                                             default=float))
+
+
+def _train_id(args: argparse.Namespace) -> None:
+    from .registry.head import train_head
+    from .registry.run import select
+
+    train = [s for spec in args.train for s in select(args.cache, spec)]
+    valid = [s for spec in args.valid for s in select(args.cache, spec)]
+    summary = train_head(train, valid, args.out, level=args.level, steps=args.steps, lr=args.lr, dim=args.dim,
+                         context=args.context, chunk_s=args.chunk, min_gap_s=args.min_gap,
+                         eval_every=args.eval_every, threshold=args.threshold, plateau=args.plateau,
+                         max_minutes=args.max_minutes, seed=args.seed)
+    print(summary)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="priism-lab")
     sub = parser.add_subparsers(required=True)
@@ -499,6 +549,53 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--tail", type=int, default=100)
     p.add_argument("--secret-env", default="RUNPOD_API_KEY")
     p.set_defaults(func=_pod)
+
+    p = sub.add_parser("cache-features", help="run the frozen BS-Roformer trunk once per song, cache its tokens")
+    p.add_argument("--set", action="append", required=True,
+                   help="name=kind:path, kind is synth (priism-lab gen), ni (.stem.mp4) or multitrack; repeat")
+    p.add_argument("--out", required=True, help="cache folder (one subfolder per set, proj.npz, info.json)")
+    p.add_argument("--fit-set", help="training set the PCA is fitted on (default: the first --set)")
+    p.add_argument("--fit-songs", type=int, default=16)
+    p.add_argument("--dims", type=int, default=32, help="PCA dimensions kept per token")
+    p.add_argument("--pool", type=int, default=4, help="trunk frames averaged per token frame")
+    p.add_argument("--window", type=float, default=8.0, help="seconds the trunk sees at once")
+    p.add_argument("--margin", type=float, default=1.0, help="seconds dropped at the inner edges of each window")
+    p.add_argument("--limit", type=int, help="songs per set")
+    p.add_argument("--msst-config", required=True)
+    p.add_argument("--msst-ckpt", required=True)
+    p.add_argument("--msst-path", required=True, help="MSST repository (for its BSRoformer class)")
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_cache_features)
+
+    p = sub.add_parser("registry-eval", help="compare source-tracking methods on cached songs (phase 1/2)")
+    p.add_argument("--cache", required=True)
+    p.add_argument("--tune", nargs="+", required=True, help="sets the thresholds are tuned on (set or set%%dev)")
+    p.add_argument("--test", nargs="+", required=True, help="sets scored with the frozen thresholds (set%%test)")
+    p.add_argument("--head", help="identity head checkpoint (train-id); default: raw cached tokens")
+    p.add_argument("--level", choices=["track", "instrument", "both"], default="both")
+    p.add_argument("--methods", nargs="*", help="subset of methods")
+    p.add_argument("--chunk", type=float, default=4.0, help="seconds per chunk")
+    p.add_argument("--out", help="JSON file with every per-song score")
+    p.set_defaults(func=_registry_eval)
+
+    p = sub.add_parser("train-id", help="train the identity head on cached songs (phase 2, CPU is enough)")
+    p.add_argument("--cache", required=True)
+    p.add_argument("--train", nargs="+", required=True)
+    p.add_argument("--valid", nargs="+", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--level", choices=["track", "instrument"], default="instrument")
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--dim", type=int, default=64)
+    p.add_argument("--context", type=int, default=2, help="frames of context on each side (0: none)")
+    p.add_argument("--chunk", type=float, default=4.0)
+    p.add_argument("--min-gap", type=float, default=20.0, help="seconds between the two chunks of a song")
+    p.add_argument("--eval-every", type=int, default=250)
+    p.add_argument("--threshold", type=float, default=0.5, help="whole-song cut used for validation")
+    p.add_argument("--plateau", type=int, default=6, help="stop after this many evaluations without gain (0: never)")
+    p.add_argument("--max-minutes", type=float, default=120.0)
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=_train_id)
 
     args = parser.parse_args(argv)
     args.func(args)

@@ -192,3 +192,38 @@ def test_twin_place_spreads_the_parts_of_one_instrument(monkeypatch):
                and not any(o["twin_of"] == s["id"] for o in on["sources"])]
     for i in outside:  # other sources keep their effects
         assert on["sources"][i]["fx"] == off["sources"][i]["fx"]
+
+
+def test_build_up_enters_one_at_a_time(monkeypatch):
+    import priism.lab.gen.song as song
+
+    base = plan_song(21, duration_s=60, n_sources=6)
+    monkeypatch.setattr(song, "BUILDUP_P", 1.0)
+    plan = plan_song(21, duration_s=60, n_sources=6)
+    assert [s["kind"] for s in plan["sources"]] == [s["kind"] for s in base["sources"]]  # same line-up
+    step, end = plan["buildup"]["step_bars"], plan["buildup"]["end_bar"]
+    entries = sorted(s["entry_bar"] for s in plan["sources"])
+    assert entries == [k * step for k in range(len(entries))]
+    for s in plan["sources"]:
+        assert min(s["bars"]) == s["entry_bar"]
+        assert set(range(s["entry_bar"], end)) <= set(s["bars"])  # in until the last entry
+
+
+def test_build_up_off_by_default():
+    assert plan_song(21, duration_s=60)["buildup"] is None
+
+
+def test_fx_automation_keeps_the_sum(monkeypatch):
+    import priism.lab.gen.song as song
+
+    plain_mix, _, plain = render_song(4, duration_s=8, sample_rate=22050, n_sources=4)
+    monkeypatch.setattr(song, "FX_AUTO_P", 1.0)
+    mix, tracks, meta = render_song(4, duration_s=8, sample_rate=22050, n_sources=4)
+    np.testing.assert_allclose(mix, np.sum(tracks, axis=0), atol=1e-5)
+    assert [s["kind"] for s in meta["sources"]] == [s["kind"] for s in plain["sources"]]
+    for s in meta["sources"]:
+        assert len(s["fx_variants"]) >= 2 and s["fx_variants"][0] == s["fx"]
+        secs = s["fx_sections"]
+        assert secs[0][0] == 0 and all(a[1] == b[0] for a, b in zip(secs, secs[1:]))
+        assert all(a[2] != b[2] for a, b in zip(secs, secs[1:]))
+    assert not np.allclose(mix, plain_mix)

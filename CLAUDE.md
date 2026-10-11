@@ -95,6 +95,29 @@ process groups, `csv.field_size_limit(sys.maxsize)`, encodings). They pass on th
 Pod jobs (`pod/jobs/*.sh`, Linux) install `priism[lab]` from `main` and call `priism-lab`: merging
 a change to `main` affects jobs queued on the pod.
 
+Current direction (2026-10-11, replaces plan-v2): a source registry read over the whole song, chunk by
+chunk, on cached features of the frozen SW trunk, with Z (identity) first; P / L / V factor heads and an
+in-model JEPA come later, only if the registry phases pass. Budget is tight (phases 0-2, about 25 EUR of
+GPU), and the GPU may be a friend's PC over SSH rather than RunPod: GPU work must run as plain CLI
+commands, not only through the pod job queue.
+Code: `src/priism/lab/registry/` (features cache, tracking methods, metrics, identity head, evaluation),
+commands `priism-lab cache-features` (GPU, once per song), `registry-eval` and `train-id` (CPU is enough),
+`scripts/registry_phase1.sh probe|full` for a GPU machine, tests in `tests/test_registry.py`. Generator
+switches for it: `PRIISM_BUILDUP_P` (sources enter one at a time), `PRIISM_FX_AUTO_P` (effects change
+between sections); both default to 0, so other songs stay identical.
+
+### Lab philosophy: never leave a long run unwatched
+
+Every long training is monitored; nothing is left running if it stalls or misbehaves.
+- Before any long run: a CPU smoke test (tiny model, losses go down, shapes right), then a short GPU
+  run that measures memory and seconds per step and extrapolates the cost, then a probe (~1000 steps)
+  with its pass criterion written in advance. Ask Lucas, with the expected cost, before launching.
+- During a run: built-in guards stop it on their own (NaN/inf loss, divergence, a validation plateau
+  as in `train-sep --plateau`, a step or hour cap), and the logs are checked at regular intervals.
+  A run that stagnates, diverges or looks buggy is stopped right away, not left to finish.
+- Decide on real music (NI, MoisesDB), not on the synthetic validation, with several seeds or songs
+  and paired comparisons.
+
 ## Conventions
 
 - Code, comments, docs, commits in English; Conventional Commits (`feat:`, `fix:`, `refactor:`…).

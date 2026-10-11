@@ -46,6 +46,15 @@ TWIN_SPREAD = float(os.environ.get("PRIISM_TWIN_SPREAD", "0"))
 # Meant as an easy first step of a curriculum, lowered towards 0 later: training only on far-apart twins
 # would teach a placement shortcut, as the sound drift did (identical twins got worse).
 TWIN_PLACE = float(os.environ.get("PRIISM_TWIN_PLACE", "0"))
+# Share of songs arranged as a build-up (registry plan, 2026-10-11): sources enter one after the other, every
+# 1, 2 or 4 bars, and stay in until the last one has entered; after that each follows its usual activity.
+# Real intros do this, and each entry is a clear "new source" event for a model that reads the song in
+# order. Own generator: with the default 0, every song stays exactly as before.
+BUILDUP_P = float(os.environ.get("PRIISM_BUILDUP_P", "0"))
+# Share of sources whose effects change from one section to the next (same instrument, same part): sends,
+# filters, drive, pan. Effects that never change over a song let an identity vector learn them as part of
+# the timbre; changing them is the weak supervision that keeps them out of it. Own generator, default 0.
+FX_AUTO_P = float(os.environ.get("PRIISM_FX_AUTO_P", "0"))
 _ACID_DRIFT = {"cutoff_hz": (80, 3000), "resonance": (0.0, 0.97), "env_mod_oct": (0.3, 6.0), "decay_s": (0.05, 2.0),
                "accent_amount": (0.1, 1.0), "gate_fraction": (0.3, 0.9)}
 _PATCH_DRIFT = {"cutoff": (100, 12000), "res": (0.0, 0.9), "env_oct": (0.0, 5.0), "f_decay": (0.02, 1.5),
@@ -236,9 +245,75 @@ def plan_song(seed: int, duration_s: float = 75.0, genre: str | None = None, n_s
             src["merge_group"] = v["merge_group"] = src["id"]
             src["split_notes"], v["split_notes"] = "even", "odd"
 
+    brng = np.random.default_rng([seed, 0xB0])
+    buildup = None
+    if brng.random() < BUILDUP_P:
+        buildup = _build_up(sources, n_bars, brng)
+
     return {"seed": seed, "genre": g.name, "bpm": bpm, "swing": float(rng.uniform(*g.swing)), "n_bars": n_bars,
             "harmony": harmony, "block_starts": block_starts, "energy": energy, "sources": sources,
-            "drum_style": g.drum_style, "bass_style": g.bass_style}
+            "drum_style": g.drum_style, "bass_style": g.bass_style, "buildup": buildup}
+
+
+def _build_up(sources: list[dict], n_bars: int, rng: np.random.Generator) -> dict:
+    """Make sources enter one at a time (edits ``bars`` in place, sets ``entry_bar``). The two halves of an
+    ambiguous pair share their bars, so they enter together."""
+    groups: dict = {}
+    for s in sources:
+        groups.setdefault(s["merge_group"] if s["merge_group"] is not None else ("solo", s["id"]), []).append(s)
+    order = [list(groups.values())[i] for i in rng.permutation(len(groups))]
+    step = int(rng.choice([1, 2, 4]))
+    step = max(1, min(step, (n_bars - 4) // len(order)))  # leave a few bars where everything plays
+    end = min(n_bars, len(order) * step)
+    for k, group in enumerate(order):
+        entry = min(k * step, n_bars - 2)  # dense line-ups in short songs: the last ones enter together
+        for s in group:
+            s["entry_bar"] = entry
+            s["bars"] = sorted(set(range(entry, max(end, entry + 2))) | {b for b in s["bars"] if b >= end})
+    return {"step_bars": step, "end_bar": end}
+
+
+def _vary_fx(fx: dict, kind: str, rng: np.random.Generator) -> dict:
+    """Another setting of the same source's effects: 1 to 3 of its knobs moved, as a producer would automate
+    them between sections. The sound source, the part and the shared buses stay the same."""
+    out = dict(fx)
+    u = rng.uniform
+    knobs = ["lowpass_hz", "drive"]
+    if kind not in fxmod.NO_SPACE:
+        knobs += ["reverb_send", "delay_send", "delay_feedback"]
+    if kind not in ("kick", "sub", "bass", "tom"):
+        knobs.append("highpass_hz")
+    if kind not in fxmod.CENTERED:
+        knobs += ["pan", "width"]
+    for k in rng.choice(knobs, size=min(len(knobs), int(rng.integers(1, 4))), replace=False):
+        if k == "lowpass_hz":
+            out[k] = float(np.exp(u(np.log(800), np.log(16000))))
+        elif k == "highpass_hz":
+            out[k] = float(np.exp(u(np.log(20), np.log(600))))
+        elif k == "drive":
+            out[k] = 0.0 if fx["drive"] else float(u(0.2, 1.0))
+        elif k == "reverb_send":
+            out[k] = 0.0 if fx["reverb_send"] else float(u(0.05, 0.35))
+        elif k == "delay_send":
+            out[k] = 0.0 if fx["delay_send"] else float(u(0.1, 0.6))
+        elif k == "delay_feedback":
+            out[k] = float(u(0.2, 0.75))
+        elif k == "pan":
+            out[k] = float(np.clip(fx["pan"] + rng.choice([-1, 1]) * u(0.2, 0.5), -0.8, 0.8))
+        else:  # width
+            out[k] = float(u(0.0, 0.4))
+    return out
+
+
+def _fx_sections(n_bars: int, n_var: int, rng: np.random.Generator) -> list[tuple[int, int, int]]:
+    """(first bar, end bar, variant) per section: blocks of 2, 4 or 8 bars, never the same variant twice in a row."""
+    length = int(rng.choice([2, 4, 8]))
+    out, prev = [], -1
+    for b in range(0, n_bars, length):
+        v = int(rng.choice([i for i in range(n_var) if i != prev])) if b else 0
+        out.append((b, min(b + length, n_bars), v))
+        prev = v
+    return out
 
 
 # ---------------------------------------------------------------------------------------------- rendering
@@ -443,7 +518,22 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             fx["pb"] = sample_pb_fx(s["kind"], plan["genre"], s["seed"])
         if bus:
             _bus_source(fx, s, bus)
-        y = apply_fx(dry[s["id"]], fx, sr, plan["bpm"], s["seed"] + 1)
+        arng = np.random.default_rng([s["seed"], 0xFA])
+        if arng.random() < FX_AUTO_P:
+            # One effect chain per setting, each fed the dry part only during its own sections: tails (echo,
+            # reverb) ring on across a change, as with automated sends, and the chains still sum to the track.
+            variants = [fx] + [_vary_fx(fx, s["kind"], arng) for _ in range(int(arng.integers(1, 3)))]
+            sections = _fx_sections(plan["n_bars"], len(variants), arng)
+            y = 0.0
+            for v, vfx in enumerate(variants):
+                gate = _bar_mask([b for b0, b1, w in sections if w == v for b in range(b0, b1)], n, sr, plan["bpm"])
+                if np.any(gate):
+                    y = y + apply_fx(dry[s["id"]] * gate, vfx, sr, plan["bpm"], s["seed"] + 1)
+            bar_s = 4 * 60.0 / plan["bpm"]
+            s["fx_variants"] = variants
+            s["fx_sections"] = [[round(b0 * bar_s, 4), round(b1 * bar_s, 4), v] for b0, b1, v in sections]
+        else:
+            y = apply_fx(dry[s["id"]], fx, sr, plan["bpm"], s["seed"] + 1)
         if fx["sidechain"] and duck is not None:
             y = y * (1.0 - fx["sidechain"] * duck)[:, None]
         rms = np.sqrt(np.mean(y[np.abs(y).max(axis=1) > 1e-4] ** 2)) if np.any(np.abs(y) > 1e-4) else 0.0
