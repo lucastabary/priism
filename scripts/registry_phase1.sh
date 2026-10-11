@@ -3,13 +3,13 @@
 # Plain bash, meant for any Linux GPU machine reached over SSH (a friend's PC, a RunPod pod), not only the
 # pod job queue. Run it from a folder that will hold everything (data, models, cache, results):
 #
-#   PRIISM=/path/to/priism-checkout NI=/path/to/ni_stems MOISES=/path/to/moisesdb bash registry_phase1.sh probe
+#   PRIISM=/path/to/priism-checkout MOISES=/path/to/moisesdb bash registry_phase1.sh probe
 #   ... then, if the printed cost is acceptable:                                    bash registry_phase1.sh full
 #
 # probe: setup, 2 generated songs timed, the trunk run on 2 songs (s per minute of audio), cost extrapolated.
 #        Nothing long runs before someone has read these numbers (lab rule: measure before spending).
 # full:  generate the synthetic sets, cache every set, compare the tracking methods (registry-eval).
-# NI (*.stem.mp4) and MoisesDB are optional: a missing one is skipped, with a warning.
+# NI stems are downloaded if NI is not set; MoisesDB is optional (skipped, with a warning, if missing).
 set -euo pipefail
 STAGE=${1:?usage: registry_phase1.sh probe|full}
 PRIISM=${PRIISM:?set PRIISM to a checkout of the priism repo (branch lab/registry)}
@@ -40,6 +40,16 @@ python -c "import torch; assert torch.cuda.is_available(), 'no CUDA GPU visible'
 TRUNK=(--msst-config models/BS-Roformer-SW.yaml --msst-ckpt models/BS-Roformer-SW.ckpt --msst-path msst --device cuda)
 SETS=(--set synth-train=synth:data/reg-train --set synth-valid=synth:data/reg-valid)
 command -v ffmpeg >/dev/null || echo "warning: no ffmpeg on PATH: NI .stem.mp4 files cannot be read"
+# NI's 65 free Stems tracks (1.5 GB zip from native-instruments.com, "Free Stems Tracks" page), fetched once.
+if [ -z "${NI:-}" ]; then
+  NI=data/ni-free-stems
+  if ! ls "$NI"/*.stem.mp4 >/dev/null 2>&1; then
+    mkdir -p data/ni-download "$NI"
+    curl -fL --retry 3 -C - -o data/ni-download/free_stems.zip \
+      https://assets.native-instruments.com/downloads/free_stems_for_traktor_pro_2.zip
+    unzip -j -o -q data/ni-download/free_stems.zip '*.stem.mp4' -d "$NI"
+  fi
+fi
 if [ -n "${NI:-}" ] && ls "$NI"/*.stem.mp4 >/dev/null 2>&1; then SETS+=(--set ni=ni:"$NI"); else echo "warning: no NI set"; fi
 if [ -n "${MOISES:-}" ] && [ -d "$MOISES" ]; then SETS+=(--set moises=multitrack:"$MOISES"); else echo "warning: no MoisesDB set"; fi
 
