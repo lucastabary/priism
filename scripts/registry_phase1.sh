@@ -21,15 +21,18 @@ export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
 export PRIISM_BUILDUP_P=${PRIISM_BUILDUP_P:-0.5} PRIISM_FX_AUTO_P=${PRIISM_FX_AUTO_P:-0.5}
 
 # --- setup (idempotent) ----------------------------------------------------------------------------------
-[ -d venv ] || python3 -m venv venv
-# shellcheck disable=SC1091
-. venv/bin/activate
-python -c "import torch" 2>/dev/null || pip install -q torch torchaudio
-pip install -q -e "$PRIISM[lab]"
+# Under the agent (priism-lab already on PATH, from its venv) the environment is ready; by hand, make one.
+if ! command -v priism-lab >/dev/null; then
+  [ -d venv ] || python3 -m venv venv
+  # shellcheck disable=SC1091
+  . venv/bin/activate
+  python -c "import torch" 2>/dev/null || pip install -q torch torchaudio
+  pip install -q -e "$PRIISM[lab]"
+fi
 [ -d msst ] || git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training.git msst
 # As pod/setup.sh: keep the installed torch, skip MSST's GUI and audio-device packages (they fail headless).
 grep -v -E '^(torch|torchaudio)([<>=~ ]|$)|wxpython|pyaudio|keyboard|sageattention' msst/requirements.txt > msst-req.txt
-pip install -q -r msst-req.txt
+python -m pip install -q -r msst-req.txt
 mkdir -p models
 BASE=https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs
 for f in BS-Roformer-SW.yaml BS-Roformer-SW.ckpt; do

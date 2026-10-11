@@ -605,9 +605,19 @@ def _write_one(args):
 def generate(out_dir: str | Path, count: int, start_seed: int = 0, duration_s: float = 75.0,
              sample_rate: int = 44100, genre: str | None = None, workers: int = 1) -> list[str]:
     jobs = [(start_seed + i, out_dir, duration_s, sample_rate, genre, None) for i in range(count)]
+    out = []
+
+    def done(folder: str) -> None:  # one line per song: a watched run (agent, guard) sees progress
+        out.append(folder)
+        print(f"song {len(out)}/{count}: {folder}", flush=True)
+
     if workers <= 1:
-        return [_write_one(j) for j in jobs]
+        for j in jobs:
+            done(_write_one(j))
+        return out
     from concurrent.futures import ProcessPoolExecutor
 
     with ProcessPoolExecutor(workers) as ex:
-        return list(ex.map(_write_one, jobs))
+        for folder in ex.map(_write_one, jobs):
+            done(folder)
+    return out

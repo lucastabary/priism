@@ -312,6 +312,61 @@ def _train_id(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def _store(args: argparse.Namespace):
+    import os
+
+    from .agent.store import open_store
+
+    url = args.store or os.environ.get("PRIISM_STORE")
+    if not url:
+        sys.exit("--store (or PRIISM_STORE) is required: s3://bucket/prefix or a local folder")
+    return open_store(url, args.endpoint or os.environ.get("PRIISM_STORE_ENDPOINT"),
+                      args.region or os.environ.get("PRIISM_STORE_REGION"),
+                      args.profile or os.environ.get("PRIISM_STORE_PROFILE"))
+
+
+def _agent(args: argparse.Namespace) -> None:
+    from .agent.agent import Agent
+
+    Agent(_store(args), args.workdir, args.repo, name=args.name).run_forever(args.poll)
+
+
+def _jobs(args: argparse.Namespace) -> None:
+    import json
+    import time
+
+    from .agent import jobs
+
+    store = _store(args)
+    if args.action == "submit":
+        args.kind = args.id
+        env = dict(kv.split("=", 1) for kv in args.env)
+        job = jobs.Job(kind=args.kind, args=args.rest, gpu=not args.cpu, max_minutes=args.max_minutes,
+                       stall_minutes=args.stall_minutes, results=args.results, env=env)
+        print(jobs.submit(store, job))
+    elif args.action == "status":
+        st = jobs.status(store)
+        for name, a in st["agents"].items():
+            print(f"agent {name}: {a.get('state')} (job {a.get('job')}), seen {a['age_s'] / 60:.1f} min ago, "
+                  f"gpu {a.get('gpu')}, version {a.get('version')}")
+        for j in st["jobs"]:
+            age = f", updated {(time.time() - j['time']) / 60:.1f} min ago" if j.get("time") else ""
+            print(f"{j['state']:8} {j['id']}  {j.get('reason') or ''}{age}  {j.get('last_line') or ''}")
+    elif args.action == "log":
+        while True:
+            print(jobs.log(store, args.id, args.tail))
+            if not args.follow:
+                break
+            time.sleep(30)
+            print("-" * 40)
+    elif args.action == "cancel":
+        jobs.cancel(store, args.id)
+        print(f"cancel requested for {args.id}")
+    elif args.action == "pull":
+        got = jobs.pull(store, args.id, args.dest)
+        print(json.dumps([str(p) for p in got], indent=1) if args.verbose else f"{len(got)} files in {args.dest}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="priism-lab")
     sub = parser.add_subparsers(required=True)
@@ -596,6 +651,36 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-minutes", type=float, default=120.0)
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=_train_id)
+
+    def store_args(p):
+        p.add_argument("--store", help="s3://bucket/prefix or a local folder (default: $PRIISM_STORE)")
+        p.add_argument("--endpoint", help="S3 endpoint URL (default: $PRIISM_STORE_ENDPOINT)")
+        p.add_argument("--region", help="S3 region (default: $PRIISM_STORE_REGION)")
+        p.add_argument("--profile", help="AWS profile holding the keys (default: $PRIISM_STORE_PROFILE)")
+
+    p = sub.add_parser("agent", help="run lab jobs from a remote queue on this GPU machine (pull, offline-safe)")
+    store_args(p)
+    p.add_argument("--workdir", required=True, help="folder where jobs run and keep their files")
+    p.add_argument("--repo", required=True, help="priism checkout the jobs use (scripts, update)")
+    p.add_argument("--name", help="agent name (default: host name)")
+    p.add_argument("--poll", type=float, default=60.0, help="seconds between looks at an empty queue")
+    p.set_defaults(func=_agent)
+
+    p = sub.add_parser("jobs", help="remote job queue: submit, status, log, cancel, pull")
+    store_args(p)
+    p.add_argument("action", choices=["submit", "status", "log", "cancel", "pull"])
+    p.add_argument("id", nargs="?", help="job id (log, cancel, pull) or kind (submit: priism-lab, phase1, update)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help="submit: the job's arguments")
+    p.add_argument("--cpu", action="store_true", help="submit: no GPU needed (starts even if the GPU is busy)")
+    p.add_argument("--max-minutes", type=float, default=240.0)
+    p.add_argument("--stall-minutes", type=float, default=20.0)
+    p.add_argument("--results", nargs="*", default=[], help="submit: folders uploaded when the job ends")
+    p.add_argument("--env", nargs="*", default=[], help="submit: PRIISM_*=value settings")
+    p.add_argument("--tail", type=int, default=50)
+    p.add_argument("--follow", action="store_true")
+    p.add_argument("--dest", default=".")
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(func=_jobs)
 
     args = parser.parse_args(argv)
     args.func(args)

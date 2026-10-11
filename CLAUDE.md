@@ -106,6 +106,13 @@ commands `priism-lab cache-features` (GPU, once per song), `registry-eval` and `
 switches for it: `PRIISM_BUILDUP_P` (sources enter one at a time), `PRIISM_FX_AUTO_P` (effects change
 between sections); both default to 0, so other songs stay identical.
 
+Remote GPU (a friend's Windows PC, WSL2): `priism-lab agent` runs there as a systemd user service
+(`pod/agent/install.sh`) and pulls jobs from the R2 bucket `priism-jobs` (Lucas's Cloudflare account,
+endpoint `https://f098c4b3a591f78c07382e384992dbd5.r2.cloudflarestorage.com`, region `auto`; Lucas's keys in
+the AWS profile `priism-r2`). Jobs are allowlisted JSON (`src/priism/lab/agent/jobs.py`), never scripts; a
+GPU job starts only when the GPU is free. From the laptop: `priism-lab jobs submit|status|log|cancel|pull`
+with `PRIISM_STORE=s3://priism-jobs/queue`. R2's free tier is 10 GB: pull results, then delete them.
+
 ### Lab philosophy: never leave a long run unwatched
 
 Every long training is monitored; nothing is left running if it stalls or misbehaves.
