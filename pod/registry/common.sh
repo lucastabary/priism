@@ -17,7 +17,8 @@ else
   git clone -q -b lab/registry https://github.com/lucastabary/priism.git "$SRC"
 fi
 echo "registry code: $(git -C "$SRC" log --oneline -1)"
-pip install -q -e "$SRC[lab]"
+# numba: the 303 filter loop is ~50x slower in pure Python, and generation is the long step.
+pip install -q -e "$SRC[lab]" numba
 mkdir -p "$LOCAL" "$OUT"
 cd "$LOCAL"
 # The weights and MSST checkout already on the volume, the environment setup.sh prepared.
@@ -25,7 +26,9 @@ export PRIISM=$SRC MODELS=$W/models MSST=$W/msst DATA=$LOCAL/data CACHE=$LOCAL/c
 nproc_quota() {  # nproc can show every core of the host: the container's CPU quota is the real limit
   local n q per
   n=$(nproc)
-  if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then n=$(( q / per < n ? q / per : n )); fi
+  if read -r q per < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$q" != max ]; then n=$(( q / per < n ? q / per : n ))
+  elif q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null) && [ "$q" -gt 0 ]; then  # cgroup v1
+    per=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us); n=$(( q / per < n ? q / per : n )); fi
   echo $(( n > 2 ? n - 2 : 1 ))
 }
 export WORKERS=${WORKERS:-$(nproc_quota)}
