@@ -299,6 +299,18 @@ def _registry_eval(args: argparse.Namespace) -> None:
                                               "results": results}, indent=1, default=float))
 
 
+def _registry_domain(args: argparse.Namespace) -> None:
+    import json
+
+    from .registry.domain import probe
+    from .registry.run import select
+
+    a = [s for spec in args.a for s in select(args.cache, spec)]
+    b = [s for spec in args.b for s in select(args.cache, spec)]
+    for band in (False, True):
+        print(json.dumps(probe(a, b, n=args.tokens, band=band)), flush=True)
+
+
 def _train_id(args: argparse.Namespace) -> None:
     from .registry.head import train_head
     from .registry.run import select
@@ -633,6 +645,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", help="JSON file with every per-song score")
     p.add_argument("--jobs", type=int, help="worker processes, one song each (default: CPU count - 2)")
     p.set_defaults(func=_registry_eval)
+
+    p = sub.add_parser("registry-domain", help="linear probe: how easily cached song sets are told apart (domain gap)")
+    p.add_argument("--cache", required=True)
+    p.add_argument("--a", nargs="+", required=True, help="first sets (e.g. synth-train synth-valid)")
+    p.add_argument("--b", nargs="+", required=True, help="second sets (e.g. ni)")
+    p.add_argument("--tokens", type=int, default=1500, help="audible tokens sampled per song")
+    p.set_defaults(func=_registry_domain)
 
     p = sub.add_parser("train-id", help="train the identity head on cached songs (phase 2, CPU is enough)")
     p.add_argument("--cache", required=True)

@@ -163,3 +163,16 @@ def test_identity_head_learns_and_guards(tmp_path):
     assert len(hist) == 4 and "raw" in hist[0] and hist[-1]["loss"] < hist[1]["loss"]
     assert all(0 <= h["far_auc"] <= 1 for h in hist[1:]) and 0 <= hist[0]["raw"]["far_auc"] <= 1
     assert (tmp_path / "best.pt").exists()
+
+
+def test_domain_probe_separates_shifted_sets():
+    from priism.lab.registry.domain import probe
+
+    rng = np.random.default_rng(8)
+    a = _cached_toys(rng, 6, T=60, d=8)
+    b = _cached_toys(rng, 6, T=60, d=8)
+    same = probe(a, b, n=200)
+    for s in b:
+        s.tokens = s.tokens + 1.0  # a constant offset: the "generator signature"
+    shifted = probe(a, b, n=200)
+    assert shifted["song_auc"] > 0.95 and shifted["token_auc"] > same["token_auc"] + 0.2
