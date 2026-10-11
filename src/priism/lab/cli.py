@@ -277,26 +277,26 @@ def _cache_features(args: argparse.Namespace) -> None:
 
 def _registry_eval(args: argparse.Namespace) -> None:
     import json
+    import os
+    from pathlib import Path
 
     from .registry.evaluate import METHODS, compare, markdown
-    from .registry.head import load_head
     from .registry.run import select
 
     tune = [s for spec in args.tune for s in select(args.cache, spec)]
     test = [s for spec in args.test for s in select(args.cache, spec)]
-    head = load_head(args.head) if args.head else None
-    embed = head.embed if head else (lambda x: x)
     chunk = max(1, round(args.chunk / test[0].frame_s))
+    jobs = args.jobs or max(1, (os.cpu_count() or 2) - 2)
     results = []
     for level in (["track", "instrument"] if args.level == "both" else [args.level]):
-        r = compare(tune, test, embed, chunk, level, tuple(args.methods or METHODS))
-        print(markdown(r))
+        r = compare(tune, test, chunk, level, tuple(args.methods or METHODS), head=args.head, jobs=jobs)
+        print(markdown(r), flush=True)
         results.append(r)
     if args.out:
-        from pathlib import Path
-
-        Path(args.out).write_text(json.dumps({"args": vars(args) | {"func": None}, "results": results}, indent=1,
-                                             default=float))
+        for r in results:  # JSON keys must be strings
+            r["tuning"] = {m: {str(g): v for g, v in t.items()} for m, t in r["tuning"].items()}
+        Path(args.out).write_text(json.dumps({"args": {k: v for k, v in vars(args).items() if k != "func"},
+                                              "results": results}, indent=1, default=float))
 
 
 def _train_id(args: argparse.Namespace) -> None:
@@ -631,6 +631,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--methods", nargs="*", help="subset of methods")
     p.add_argument("--chunk", type=float, default=4.0, help="seconds per chunk")
     p.add_argument("--out", help="JSON file with every per-song score")
+    p.add_argument("--jobs", type=int, help="worker processes, one song each (default: CPU count - 2)")
     p.set_defaults(func=_registry_eval)
 
     p = sub.add_parser("train-id", help="train the identity head on cached songs (phase 2, CPU is enough)")

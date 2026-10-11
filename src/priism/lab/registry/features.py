@@ -186,6 +186,7 @@ class Cached:
     energy: np.ndarray  # (J, T, Nb) linear power, float32
     labels: list[dict]
     frame_s: float
+    path: str = ""  # the .npz it came from (parallel evaluation reloads it in each worker)
 
     @property
     def instruments(self) -> np.ndarray:
@@ -196,7 +197,7 @@ class Cached:
 def load_cache(path: str | Path) -> Cached:
     d = np.load(path)
     return Cached(Path(path).stem, d["tokens"].astype(np.float32), 10 ** d["energy"].astype(np.float32),
-                  json.loads(str(d["labels"])), float(d["frame_s"]))
+                  json.loads(str(d["labels"])), float(d["frame_s"]), str(path))
 
 
 def load_set(folder: str | Path) -> list[Cached]:
