@@ -307,7 +307,7 @@ def _train_id(args: argparse.Namespace) -> None:
     valid = [s for spec in args.valid for s in select(args.cache, spec)]
     summary = train_head(train, valid, args.out, level=args.level, steps=args.steps, lr=args.lr, dim=args.dim,
                          context=args.context, chunk_s=args.chunk, min_gap_s=args.min_gap,
-                         eval_every=args.eval_every, plateau=args.plateau,
+                         eval_every=args.eval_every, plateau=args.plateau, device=args.device,
                          max_minutes=args.max_minutes, seed=args.seed)
     print(summary)
 
@@ -650,6 +650,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--plateau", type=int, default=6, help="stop after this many evaluations without gain (0: never)")
     p.add_argument("--max-minutes", type=float, default=120.0)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cpu", help="cpu or cuda")
     p.set_defaults(func=_train_id)
 
     def store_args(p):

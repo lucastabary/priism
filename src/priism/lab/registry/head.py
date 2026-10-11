@@ -50,15 +50,21 @@ class IdentityHead(nn.Module):
         self.mlp = nn.Sequential(nn.LayerNorm(k), nn.Linear(k, hidden), nn.GELU(), nn.Linear(hidden, hidden),
                                  nn.GELU(), nn.Linear(hidden, dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
+        """``rows`` (n, 2) of (frame, band): embed only those tokens -> (n, dim). The convolution needs the
+        whole chunk, the MLP (most of the cost) only the tokens the loss uses."""
         if self.conv is not None:  # (T, Nb, k) -> conv along T, one filter per (band, feature)
             T, Nb, k = x.shape
             x = x + self.conv(x.reshape(T, Nb * k).T[None])[0].T.reshape(T, Nb, k)
-        return F.normalize(self.mlp(x + self.band), dim=-1)
+        x = x + self.band
+        if rows is not None:
+            x = x[rows[:, 0], rows[:, 1]]
+        return F.normalize(self.mlp(x), dim=-1)
 
     @torch.no_grad()
     def embed(self, tokens: np.ndarray) -> np.ndarray:
-        return self(torch.from_numpy(tokens)).numpy()
+        dev = self.band.device
+        return self(torch.from_numpy(tokens).to(dev)).float().cpu().numpy()
 
 
 def _refs(song: Cached, level: str) -> tuple[np.ndarray, np.ndarray]:
@@ -153,7 +159,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                chunk_s: float = 4.0, min_gap_s: float = 20.0, lr: float = 1e-3, temp: float = 0.1,
                dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
-               log=print) -> dict:
+               device: str = "cpu", log=print) -> dict:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -161,7 +167,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     T0, Nb, k = train[0].tokens.shape
     fs = train[0].frame_s
     chunk, min_gap = max(1, round(chunk_s / fs)), round(min_gap_s / fs)
-    head = IdentityHead(k, Nb, dim=dim, context=context)
+    head = IdentityHead(k, Nb, dim=dim, context=context).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 200)
                                               * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
@@ -180,11 +186,14 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
         zs, labels = [], []
         for si in rng.choice(len(train), min(songs_per_step, len(train)), replace=False):
             song = train[si]
+            by_chunk: dict[int, list] = {}
             for t0, r, rows in sample_tokens(song, *refs[si], chunk, min_gap, per_ref, own, rng):
-                x = torch.from_numpy(song.tokens[t0: t0 + chunk])
-                z = head(x)
-                zs.append(z[rows[:, 0], rows[:, 1]])
-                labels.append(torch.full((len(rows),), int(si) * 1000 + r))
+                by_chunk.setdefault(t0, []).append((r, rows))
+            for t0, items in by_chunk.items():  # one pass of the head per chunk, on the sampled tokens only
+                rows = torch.from_numpy(np.concatenate([rw for _, rw in items])).to(device)
+                zs.append(head(torch.from_numpy(song.tokens[t0: t0 + chunk]).to(device), rows))
+                labels.append(torch.from_numpy(np.concatenate([np.full(len(rw), int(si) * 1000 + r)
+                                                               for r, rw in items])).to(device))
         if len(zs) < 2:
             continue
         loss = supcon(torch.cat(zs), torch.cat(labels), temp)
@@ -212,7 +221,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             log(json.dumps(rec))
             if v["far_auc"] > best + plateau_delta:
                 best, since = v["far_auc"], 0
-                torch.save({"cfg": head.cfg, "state": head.state_dict(), "step": step, "valid": v}, out / "best.pt")
+                torch.save({"cfg": head.cfg, "state": {k: v.cpu() for k, v in head.state_dict().items()},
+                            "step": step, "valid": v}, out / "best.pt")
             else:
                 since += 1
             if plateau and since >= plateau:
@@ -224,7 +234,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                 log(reason)
                 break
             t_step = time.time()
-    torch.save({"cfg": head.cfg, "state": head.state_dict(), "step": step}, out / "last.pt")
+    torch.save({"cfg": head.cfg, "state": {k: v.cpu() for k, v in head.state_dict().items()}, "step": step},
+               out / "last.pt")
     summary = {"stopped": reason, "best_far_auc": best, "raw": raw, "level": level, "seed": seed}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
