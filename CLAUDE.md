@@ -122,6 +122,9 @@ Every long training is monitored; nothing is left running if it stalls or misbeh
 - During a run: built-in guards stop it on their own (NaN/inf loss, divergence, a validation plateau
   as in `train-sep --plateau`, a step or hour cap), and the logs are checked at regular intervals.
   A run that stagnates, diverges or looks buggy is stopped right away, not left to finish.
+- Test models along the way, not only at the end: score checkpoints on real music (NI dev) during long
+  runs, and read the training metrics (loss, validation, speed) at each evaluation. Logs must be flushed
+  line by line so a run can be read while it goes.
 - Decide on real music (NI, MoisesDB), not on the synthetic validation, with several seeds or songs
   and paired comparisons.
 

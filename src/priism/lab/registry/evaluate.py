@@ -21,6 +21,10 @@ from .features import Cached, load_cache
 from .metrics import ownership, paired_compare, score
 from .track import online_registry, per_chunk, per_chunk_linked, whole_song
 
+
+def _log(*a) -> None:  # flushed: a redirected log shows progress as it happens
+    print(*a, flush=True)
+
 METHODS = ("per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass")
 # Phase 1 picked the edge of the first grids (0.8 for the clusterings, 0.2 for the registry): widened.
 CUTS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
@@ -74,7 +78,7 @@ def _song_grid(args) -> tuple[str, dict]:
 
 
 def score_grid(songs: list[Cached], chunk: int, level: str, head: str | None = None, methods=METHODS,
-               jobs: int = 1, log=print) -> dict[str, dict]:
+               jobs: int = 1, log=_log) -> dict[str, dict]:
     """{song name: {(method, param): scores}} for every song; songs with a ``path`` are reloaded in the
     workers instead of being pickled across."""
     tasks = [(s.path or s, head, chunk, level, tuple(methods)) for s in songs]
@@ -99,7 +103,7 @@ def _f(rows: list[dict]) -> float:
 
 def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, level: str = "track",
             methods=METHODS, reference: str = "online_two_pass", head: str | None = None, jobs: int = 1,
-            log=print) -> dict:
+            log=_log) -> dict:
     """Tune each method on ``tune_songs``, score on ``test_songs`` -> per-song rows, means and paired tests."""
     tune_grid = score_grid(tune_songs, chunk, level, head, methods, jobs, log)
     test_grid = score_grid(test_songs, chunk, level, head, methods, jobs, log)

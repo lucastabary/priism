@@ -36,6 +36,10 @@ from .features import Cached
 from .metrics import ownership
 
 
+
+def _log(*a) -> None:  # flushed: a redirected log shows progress as it happens
+    print(*a, flush=True)
+
 class IdentityHead(nn.Module):
     """(T, Nb, k) cached tokens -> (T, Nb, dim) unit embeddings. A band embedding says where a token sits in
     frequency; ``context`` > 0 adds a depthwise convolution over that many frames on each side, so a
@@ -159,7 +163,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                chunk_s: float = 4.0, min_gap_s: float = 20.0, lr: float = 1e-3, temp: float = 0.1,
                dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
-               device: str = "cpu", log=print) -> dict:
+               device: str = "cpu", log=_log) -> dict:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
