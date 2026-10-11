@@ -280,6 +280,11 @@ def _registry_eval(args: argparse.Namespace) -> None:
     import os
     from pathlib import Path
 
+    # One BLAS/OpenMP thread per worker process (inherited by the workers): with N workers each starting a
+    # thread per visible core (48 on a 5-vCPU pod), the evaluation thrashed and slowed down several times.
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
     from .registry.evaluate import METHODS, compare, markdown
     from .registry.run import select
 
