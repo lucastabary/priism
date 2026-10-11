@@ -307,7 +307,7 @@ def _train_id(args: argparse.Namespace) -> None:
     valid = [s for spec in args.valid for s in select(args.cache, spec)]
     summary = train_head(train, valid, args.out, level=args.level, steps=args.steps, lr=args.lr, dim=args.dim,
                          context=args.context, chunk_s=args.chunk, min_gap_s=args.min_gap,
-                         eval_every=args.eval_every, threshold=args.threshold, plateau=args.plateau,
+                         eval_every=args.eval_every, plateau=args.plateau,
                          max_minutes=args.max_minutes, seed=args.seed)
     print(summary)
 
@@ -647,7 +647,6 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--chunk", type=float, default=4.0)
     p.add_argument("--min-gap", type=float, default=20.0, help="seconds between the two chunks of a song")
     p.add_argument("--eval-every", type=int, default=250)
-    p.add_argument("--threshold", type=float, default=0.5, help="whole-song cut used for validation")
     p.add_argument("--plateau", type=int, default=6, help="stop after this many evaluations without gain (0: never)")
     p.add_argument("--max-minutes", type=float, default=120.0)
     p.add_argument("--seed", type=int, default=0)

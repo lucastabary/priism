@@ -160,5 +160,6 @@ def test_identity_head_learns_and_guards(tmp_path):
                    min_gap_s=4.0, eval_every=20, dim=8, context=1, plateau=0, log=lambda *_: None)
     assert s["stopped"] == "steps"
     hist = [__import__("json").loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
-    assert len(hist) == 3 and hist[-1]["loss"] < hist[0]["loss"]
+    assert len(hist) == 4 and "raw" in hist[0] and hist[-1]["loss"] < hist[1]["loss"]
+    assert all(0 <= h["far_auc"] <= 1 for h in hist[1:]) and 0 <= hist[0]["raw"]["far_auc"] <= 1
     assert (tmp_path / "best.pt").exists()

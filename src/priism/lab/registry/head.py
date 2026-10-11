@@ -8,6 +8,11 @@ together tokens of the same source, in the same chunk or a minute apart (other e
 pushes apart the other sources of the song and of the other songs. ``level="instrument"`` counts twins as
 one identity (the timbre, Z), ``"track"`` as two (needs what they play, which tokens alone may not hold).
 
+Validation is threshold-free (``validate``): how well cosine similarity separates same-source from
+different-source token pairs far apart in a song, on a fixed sample, for the head and once for the raw
+tokens (the phase 1 baseline). Clustering with a fixed threshold would collapse into one cluster early in
+training and score the same at every step.
+
 Guards (lab rule: never leave a long run unwatched): the run stops on a non-finite loss, when the
 validation score has not improved by ``plateau_delta`` for ``plateau`` evaluations, or at ``max_minutes``.
 Every evaluation is appended to ``history.jsonl``; ``best.pt`` keeps the best validation score.
@@ -25,9 +30,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from scipy import stats
+
 from .features import Cached
-from .metrics import ownership, score
-from .track import whole_song
+from .metrics import ownership
 
 
 class IdentityHead(nn.Module):
@@ -92,25 +98,60 @@ def supcon(z: torch.Tensor, labels: torch.Tensor, temp: float = 0.1) -> torch.Te
     return -(logp * pos).sum(1)[has].div(pos.sum(1)[has]).mean()
 
 
-def validate(head: IdentityHead, songs: list[Cached], level: str, threshold: float, chunk: int) -> dict:
-    """Mean song-wide purity / completeness of whole-song clustering on the head's embeddings, and their
-    harmonic mean ``f`` (the early-stopping score)."""
-    rows = []
-    for s in songs:
-        groups = s.instruments if level == "instrument" else None
-        shares, audible = ownership(s.energy, groups)
-        lab = whole_song(head.embed(s.tokens), audible, threshold)
-        rows.append(score(lab, s.energy, chunk, groups))
-    p = float(np.nanmean([r["purity"] for r in rows]))
-    c = float(np.nanmean([r["completeness"] for r in rows]))
-    return {"purity": p, "completeness": c, "f": 2 * p * c / (p + c) if p + c > 0 else 0.0,
-            "permutation_rate": float(np.nanmean([r["permutation_rate"] for r in rows]))}
+def validation_pairs(songs: list[Cached], level: str, min_gap: int, n: int = 600, own: float = 0.6,
+                     seed: int = 0) -> list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
+    """Fixed sample per song, drawn once so every evaluation sees the same tokens: up to ``n`` clearly owned
+    tokens over the whole song (the same number per reference) -> [(song index, rows (m, 2), labels (m,),
+    far (m, m) bool: pairs at least ``min_gap`` frames apart)]."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for i, s in enumerate(songs):
+        shares, audible = _refs(s, level)
+        top, arg = shares.max(0), shares.argmax(0)
+        ok = audible & (top >= own)
+        refs = np.unique(arg[ok])
+        if len(refs) < 2:
+            continue
+        rows, labels = [], []
+        for r in refs:
+            cand = np.argwhere(ok & (arg == r))
+            pick = cand[rng.choice(len(cand), min(n // len(refs), len(cand)), replace=False)]
+            rows.append(pick)
+            labels += [int(r)] * len(pick)
+        rows = np.concatenate(rows)
+        out.append((i, rows, np.array(labels), np.abs(rows[:, None, 0] - rows[None, :, 0]) >= min_gap))
+    return out
+
+
+def _auc(pos: np.ndarray, neg: np.ndarray) -> float:
+    """P(a same-source pair is closer than a different-source pair), ties counted half (Mann-Whitney)."""
+    if len(pos) == 0 or len(neg) == 0:
+        return np.nan
+    allv = np.concatenate([pos, neg])
+    ranks = stats.rankdata(allv)
+    return float((ranks[: len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
+def validate(embed, songs: list[Cached], pairs) -> dict:
+    """Threshold-free score of an embedding (the head's, or the raw tokens for the baseline): mean over songs
+    of the AUC separating same-source from different-source token pairs, on all pairs and on far pairs
+    (``min_gap`` apart: the long-range identity this head is for). ``far_auc`` drives early stopping."""
+    a_all, a_far = [], []
+    for i, rows, labels, far in pairs:
+        z = embed(songs[i].tokens)[rows[:, 0], rows[:, 1]]
+        z = z / np.maximum(np.linalg.norm(z, axis=1, keepdims=True), 1e-8)
+        sim = z @ z.T
+        same = labels[:, None] == labels[None]
+        iu = np.triu(np.ones_like(same), 1).astype(bool)
+        a_all.append(_auc(sim[iu & same], sim[iu & ~same]))
+        a_far.append(_auc(sim[iu & same & far], sim[iu & ~same & far]))
+    return {"auc": float(np.nanmean(a_all)), "far_auc": float(np.nanmean(a_far)), "songs": len(pairs)}
 
 
 def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level: str = "instrument",
                steps: int = 5000, songs_per_step: int = 8, per_ref: int = 32, own: float = 0.6,
                chunk_s: float = 4.0, min_gap_s: float = 20.0, lr: float = 1e-3, temp: float = 0.1,
-               dim: int = 64, context: int = 2, eval_every: int = 250, threshold: float = 0.5,
+               dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
                log=print) -> dict:
     out = Path(out)
@@ -125,8 +166,14 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 200)
                                               * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
     refs = [_refs(s, level) for s in train]
+    pairs = validation_pairs(valid, level, min_gap)
     best, since, start, hist = -1.0, 0, time.time(), out / "history.jsonl"
     hist.unlink(missing_ok=True)
+    raw = validate(lambda x: x, valid, pairs)  # phase 1 baseline: the cached tokens themselves
+    log(json.dumps({"step": 0, "raw": raw}))
+    with hist.open("a") as f:
+        f.write(json.dumps({"step": 0, "raw": raw}) + "\n")
+    t_step = time.time()
     losses: list[float] = []
     reason = "steps"
     for step in range(1, steps + 1):
@@ -152,16 +199,19 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
         sched.step()
         losses.append(float(loss.detach()))
         if step % eval_every == 0 or step == steps:
+            sec_step = (time.time() - t_step) / len(losses)
             head.eval()
-            v = validate(head, valid, level, threshold, chunk)
+            t_val = time.time()
+            v = validate(head.embed, valid, pairs)
             head.train()
-            rec = {"step": step, "loss": float(np.mean(losses)), "minutes": (time.time() - start) / 60, **v}
+            rec = {"step": step, "loss": float(np.mean(losses)), "minutes": (time.time() - start) / 60,
+                   "sec_per_step": sec_step, "valid_sec": time.time() - t_val, **v}
             losses = []
             with hist.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
             log(json.dumps(rec))
-            if v["f"] > best + plateau_delta:
-                best, since = v["f"], 0
+            if v["far_auc"] > best + plateau_delta:
+                best, since = v["far_auc"], 0
                 torch.save({"cfg": head.cfg, "state": head.state_dict(), "step": step, "valid": v}, out / "best.pt")
             else:
                 since += 1
@@ -173,8 +223,9 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                 reason = f"time cap {max_minutes} min (step {step})"
                 log(reason)
                 break
+            t_step = time.time()
     torch.save({"cfg": head.cfg, "state": head.state_dict(), "step": step}, out / "last.pt")
-    summary = {"stopped": reason, "best_f": best, "level": level, "seed": seed}
+    summary = {"stopped": reason, "best_far_auc": best, "raw": raw, "level": level, "seed": seed}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 
