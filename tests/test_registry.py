@@ -136,7 +136,8 @@ def test_compare_runs_end_to_end():
     rng = np.random.default_rng(6)
     tune, test = _cached_toys(rng, 3), _cached_toys(rng, 4)
     r = compare(tune, test, chunk=20, level="track", log=lambda *_: None)
-    assert set(r["summary"]) == {"per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass"}
+    assert set(r["summary"]) == {"one", "per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass"}
+    assert r["summary"]["one"]["v_measure"]["mean"] == 0  # the trivial labelling scores nothing
     assert r["summary"]["whole_song"]["completeness"]["mean"] > 0.9
     assert "online_two_pass - per_chunk / completeness" in r["tests"]
     assert "| method |" in markdown(r)

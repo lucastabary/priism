@@ -25,16 +25,18 @@ from .track import online_registry, per_chunk, per_chunk_linked, whole_song
 def _log(*a) -> None:  # flushed: a redirected log shows progress as it happens
     print(*a, flush=True)
 
-METHODS = ("per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass")
+METHODS = ("one", "per_chunk", "per_chunk_linked", "whole_song", "online", "online_two_pass")
 # Phase 1 picked the edge of the first grids (0.8 for the clusterings, 0.2 for the registry): widened.
 CUTS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
-GRID = {"per_chunk": CUTS, "per_chunk_linked": CUTS, "whole_song": CUTS,
+GRID = {"one": [0.0], "per_chunk": CUTS, "per_chunk_linked": CUTS, "whole_song": CUTS,
         # online: tau, the cosine to join a known source (its new clusters are cut at 1 - tau)
         "online": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7], "online_two_pass": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]}
 
 
 def run_method(name: str, emb: np.ndarray, audible: np.ndarray, chunk: int, param: float, seed: int = 0
                ) -> tuple[np.ndarray, list | None]:
+    if name == "one":  # trivial baseline: every audible token in one cluster
+        return np.where(audible, 0, -1), None
     if name == "per_chunk":
         return per_chunk(emb, audible, chunk, param, seed), None
     if name == "per_chunk_linked":
@@ -97,8 +99,8 @@ def score_grid(songs: list[Cached], chunk: int, level: str, head: str | None = N
 
 
 def _f(rows: list[dict]) -> float:
-    p, c = np.nanmean([r["purity"] for r in rows]), np.nanmean([r["completeness"] for r in rows])
-    return float(2 * p * c / (p + c)) if p + c > 0 else 0.0
+    """Tuning objective: mean V-measure (purity / completeness would reward merging everything)."""
+    return float(np.nanmean([r["v_measure"] for r in rows]))
 
 
 def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, level: str = "track",
@@ -118,7 +120,7 @@ def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, leve
     tests = {}
     if reference in methods:
         pv = []
-        for metric in ("completeness", "purity", "permutation_rate"):
+        for metric in ("v_measure", "completeness", "purity", "permutation_rate"):
             for m in methods:
                 if m == reference:
                     continue
@@ -127,9 +129,10 @@ def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, leve
                 pv.append((name, tests[name].get("wilcoxon_p", np.nan)))
         for name, p_holm in _holm(pv).items():
             tests[name]["wilcoxon_p_holm"] = p_holm
+    grid = {name: {f"{m}@{g}": r for (m, g), r in g_rows.items()} for name, g_rows in {**tune_grid, **test_grid}.items()}
     return {"level": level, "params": params, "tuning": tuning, "n_tune": len(tune_songs),
             "n_test": len(test_songs), "summary": summary, "tests": tests, "songs": [s.name for s in test_songs],
-            "rows": rows}
+            "rows": rows, "grid": grid}
 
 
 def _mean_ci(x: list[float], n_boot: int = 5000, seed: int = 0) -> dict:
@@ -152,7 +155,7 @@ def _holm(pvals: list[tuple[str, float]]) -> dict[str, float]:
 
 
 def markdown(result: dict) -> str:
-    cols = ["purity", "completeness", "local_completeness", "permutation_rate", "count_error", "entry_f1"]
+    cols = ["v_measure", "local_v_measure", "homogeneity", "v_completeness", "permutation_rate", "n_clusters", "entry_f1"]
     lines = [f"Level: {result['level']}, tuned on {result['n_tune']} songs, {result['n_test']} test songs, "
              "mean [95 % CI]", "",
              "| method | param | " + " | ".join(cols) + " |", "|---|---|" + "---|" * len(cols)]

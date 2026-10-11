@@ -12,7 +12,11 @@ token-weighted contingency table C[k, r] says how much of reference r cluster k 
   losing track of sources from one chunk to the next, the defect this plan is about;
 - **permutation rate**: share of (chunk, reference) mass where the reference's majority cluster in that
   chunk is not its song-wide majority cluster;
-- **entries** (online methods): new ids matched to the moments references start playing.
+- **entries** (online methods): new ids matched to the moments references start playing;
+- **V-measure** (Rosenberg & Hirschberg 2007): entropy-based homogeneity and completeness and their
+  harmonic mean, global and local. Unlike purity it gives a trivial labelling 0: one cluster for the whole
+  song has completeness 1 but homogeneity 0, where purity would still credit it with the majority
+  reference's share. Thresholds are tuned on V, never on purity / completeness, which reward merging.
 
 Tokens count equally once audible (above ``floor_db`` under the song's loudest token), whatever their
 power: weighting by power would let the kick and the bass decide everything.
@@ -54,6 +58,23 @@ def _pur_comp(C: np.ndarray) -> tuple[float, float]:
     return float(C.max(1).sum() / tot), float(C.max(0).sum() / tot)
 
 
+def _vmeasure(C: np.ndarray) -> tuple[float, float, float]:
+    """(homogeneity, completeness, V) of a soft contingency table C (K, R)."""
+    tot = C.sum()
+    if tot <= 0:
+        return np.nan, np.nan, np.nan
+    P = C / tot
+    pk, pr = P.sum(1), P.sum(0)
+    nz = P > 0
+    h_r = -np.sum(pr[pr > 0] * np.log(pr[pr > 0]))
+    h_k = -np.sum(pk[pk > 0] * np.log(pk[pk > 0]))
+    h_r_k = -np.sum(P[nz] * np.log(P[nz] / np.broadcast_to(pk[:, None], P.shape)[nz]))
+    h_k_r = -np.sum(P[nz] * np.log(P[nz] / np.broadcast_to(pr[None, :], P.shape)[nz]))
+    hom = 1.0 if h_r == 0 else 1 - h_r_k / h_r
+    com = 1.0 if h_k == 0 else 1 - h_k_r / h_k
+    return float(hom), float(com), float(2 * hom * com / (hom + com)) if hom + com > 0 else 0.0
+
+
 def score(labels: np.ndarray, energy: np.ndarray, chunk: int, groups: np.ndarray | None = None,
           births: list[tuple[int, int]] | None = None, entry_tol: int | None = None, floor_db: float = 60.0
           ) -> dict:
@@ -62,9 +83,10 @@ def score(labels: np.ndarray, energy: np.ndarray, chunk: int, groups: np.ndarray
     shares, audible = ownership(energy, groups, floor_db)
     C = contingency(labels, shares, audible)
     pur, comp = _pur_comp(C)
+    hom, vcom, v = _vmeasure(C)
     major = C.argmax(0) if len(C) else np.zeros(shares.shape[0], int)  # song-wide cluster of each reference
     T = labels.shape[0]
-    lp, lc, w, perm, perm_w = [], [], [], 0.0, 0.0
+    lp, lc, lv, w, perm, perm_w = [], [], [], [], 0.0, 0.0
     for t0 in range(0, T, chunk):
         sl = slice(t0, t0 + chunk)
         Cc = contingency(labels[sl], shares[:, sl], audible[sl])
@@ -73,6 +95,7 @@ def score(labels: np.ndarray, energy: np.ndarray, chunk: int, groups: np.ndarray
         p, c = _pur_comp(Cc)
         lp.append(p)
         lc.append(c)
+        lv.append(_vmeasure(Cc)[2])
         w.append(Cc.sum())
         mass = Cc.sum(0)
         here = mass > 0.01 * mass.sum()  # references really present in this chunk
@@ -86,7 +109,9 @@ def score(labels: np.ndarray, energy: np.ndarray, chunk: int, groups: np.ndarray
            "local_purity": float(np.average(lp, weights=w)) if len(w) else np.nan,
            "local_completeness": float(np.average(lc, weights=w)) if len(w) else np.nan,
            "permutation_rate": perm / perm_w if perm_w else np.nan,
-           "count_error": abs(n_clu - n_ref), "n_clusters": n_clu, "n_refs": n_ref}
+           "count_error": abs(n_clu - n_ref), "n_clusters": n_clu, "n_refs": n_ref,
+           "homogeneity": hom, "v_completeness": vcom, "v_measure": v,
+           "local_v_measure": float(np.average(lv, weights=w)) if len(w) else np.nan}
     out["track_loss"] = out["local_completeness"] - out["completeness"]
     if births is not None:
         out.update(entry_scores(births, C, shares, audible, chunk, entry_tol or chunk))
