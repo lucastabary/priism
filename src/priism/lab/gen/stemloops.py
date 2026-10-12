@@ -214,7 +214,16 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
                         "window_start_s": round(starts[j] / sr, 3), "own_window": j in plan["unpitched"],
                         "timeline": []})
 
-    # Master stage as in ``song.render_song``: one gain curve on the sum, applied to every track.
+    return master_and_meta(tracks, sources, sr, bar, n_bars, loop, step, rng, genre="stem_loops",
+                           generator="priism.lab.gen.stemloops",
+                           window_start_s=round(w["start"] / sr, 3) if plan["pitched"] else None)
+
+
+def master_and_meta(tracks: list[np.ndarray], sources: list[dict], sr: int, bar: int, n_bars: int, loop: int,
+                    step: int, rng: np.random.Generator, genre: str, generator: str,
+                    **buildup) -> tuple[np.ndarray, list[np.ndarray], dict]:
+    """Master stage as in ``song.render_song`` (one gain curve on the sum, applied to every track), then the
+    meta of a strict-loop song: the same ``buildup`` schema whatever made the loops."""
     mix = np.sum(tracks, axis=0)
     u = rng.uniform
     master = {"comp_threshold": float(u(0.2, 0.6)), "comp_ratio": float(u(1.5, 4.0)),
@@ -226,12 +235,13 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
     g = g * (0.999 / peak if peak > 0.999 else 1.0)
     tracks = [(t * g[:, None]).astype(np.float32) for t in tracks]
     mix = np.sum(tracks, axis=0, dtype=np.float32)
+    n = n_bars * bar
     hop = int(round(GAIN_HOP_S * sr))
     meta = {"bpm": 4 * 60.0 * sr / bar, "n_bars": n_bars, "sample_rate": sr, "duration_s": n / sr,
-            "genre": "stem_loops", "master": master, "sources": sources, "generator": "priism.lab.gen.stemloops",
+            "genre": genre, "master": master, "sources": sources, "generator": generator,
             "buildup": {"strict": True, "loop_bars": loop, "step_bars": step, "bar_samples": bar,
-                        "end_bar": min(n_bars, len(order) * step), "entries": sorted({s["entry_bar"] for s in sources}),
-                        "window_start_s": round(w["start"] / sr, 3) if plan["pitched"] else None,
+                        "end_bar": min(n_bars, len(sources) * step), "entries": sorted({s["entry_bar"] for s in sources}),
+                        **buildup,
                         "master_gain_per_bar": [round(float(np.mean(g[b * bar:(b + 1) * bar])), 5)
                                                 for b in range(n_bars)]},
             "_master_gain": g[: len(g) // hop * hop].reshape(-1, hop).mean(axis=1).astype(np.float32)}
@@ -250,7 +260,7 @@ def write_song(mix: np.ndarray, tracks: list[np.ndarray], meta: dict, folder: st
     meta["buildup"]["master_gain_file"] = "master_gain.npz"
     sf.write(folder / "mix.flac", mix, sr, subtype="PCM_24")
     for s, t in zip(meta["sources"], tracks):
-        s["file"] = f"sources/{s['id']:02d}_stem{s['stem']}.flac"
+        s["file"] = f"sources/{s['id']:02d}_" + (f"stem{s['stem']}" if "stem" in s else s["kind"]) + ".flac"
         sf.write(folder / s["file"], t, sr, subtype="PCM_24")
     (folder / "meta.json").write_text(json.dumps(meta, indent=1, default=_json_default))
     return folder

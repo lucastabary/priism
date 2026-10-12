@@ -28,6 +28,20 @@ def _gen(args: argparse.Namespace) -> None:
     print(f"{len(folders)} songs written to {args.out}")
 
 
+def _freesound_fetch(args: argparse.Namespace) -> None:
+    from .gen.fsloops import fetch
+
+    fetch(args.out, per_category=args.per_category, max_per_user=args.max_per_user, dry_run=args.dry_run)
+
+
+def _gen_fsloops(args: argparse.Namespace) -> None:
+    from .gen.fsloops import generate
+
+    folders = generate(args.index, args.out, args.count, seed=args.seed, duration_s=args.duration,
+                       sample_rate=args.sample_rate)
+    print(f"{len(folders)} songs written to {args.out}")
+
+
 def _gen_stemloops(args: argparse.Namespace) -> None:
     from .gen.stemloops import generate
 
@@ -433,6 +447,22 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--duration", type=float, default=75.0, help="approximate seconds per song (whole loops)")
     p.add_argument("--sample-rate", type=int, default=44100)
     p.set_defaults(func=_gen_stemloops)
+
+    p = sub.add_parser("freesound-fetch", help="download CC0 loop previews from Freesound (FREESOUND_API_KEY)")
+    p.add_argument("--out", required=True, help="folder: audio/<id>.ogg + index.jsonl")
+    p.add_argument("--per-category", type=int, default=300, help="loops per category (drums, bass, pad...)")
+    p.add_argument("--max-per-user", type=int, default=10, help="at most this many loops per uploader")
+    p.add_argument("--dry-run", action="store_true", help="list only and print the download size")
+    p.set_defaults(func=_freesound_fetch)
+
+    p = sub.add_parser("gen-fsloops", help="strict-loop build-ups from downloaded Freesound loops")
+    p.add_argument("--index", required=True, help="folder written by freesound-fetch")
+    p.add_argument("--out", required=True, help="output folder (gen layout)")
+    p.add_argument("--count", type=int, default=100)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--duration", type=float, default=75.0, help="approximate seconds per song (whole loops)")
+    p.add_argument("--sample-rate", type=int, default=44100)
+    p.set_defaults(func=_gen_fsloops)
 
     p = sub.add_parser("fma", help="download chosen genres of the Free Music Archive (real songs, no stems)")
     p.add_argument("--out", required=True, help="output folder (<id>.mp3 + manifest.csv)")

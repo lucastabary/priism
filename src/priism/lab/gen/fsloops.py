@@ -1,0 +1,226 @@
+"""Strict-loop build-ups made of CC0 loops from Freesound: real timbres from many kits, not just the NI songs.
+
+The NI-train loops (``stemloops``) stopped helping once every loop came from the same 21 songs: more timbres
+are needed, not more cuts of the same ones. Freesound holds thousands of loops in the public domain (CC0),
+uploaded by different people with different kits and synths. ``fetch`` lists and downloads loop previews
+(API key in ``FREESOUND_API_KEY``; previews need no OAuth, the original files do), ``arrange`` stacks loops
+of one tempo (and compatible keys for pitched parts) into a strict build-up with the meta of
+``song._strict_loops``, so the registry code reads them like any other strict-loop song.
+
+Previews are lossy (128 kbit/s Ogg Vorbis); so are the NI stems (AAC). Loops are for training only: real
+evaluation stays on NI and MoisesDB.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
+
+from .stemloops import _tile_loop, master_and_meta, write_song
+
+API = "https://freesound.org/apiv2/search/"
+# Category -> Freesound tag searched together with "loop". Unpitched categories ignore keys.
+CATEGORIES = {"drums": "drums", "percussion": "percussion", "bass": "bass", "synth": "synth", "pad": "pad",
+              "lead": "lead", "chords": "chords", "arp": "arpeggio"}
+UNPITCHED = {"drums", "percussion"}
+# Level of each category relative to the drums, in dB (before jitter), as LEVEL_DB in song.py.
+LEVEL_DB = {"drums": 0, "percussion": -8, "bass": -2, "synth": -8, "pad": -10, "lead": -9, "chords": -8, "arp": -12}
+FIELDS = "id,name,username,license,tags,duration,bpm,tonality,tonality_confidence,previews"
+NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+_FLAT = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
+
+
+def _get(url: str, key: str) -> dict:
+    req = urllib.request.Request(url, headers={"Authorization": f"Token {key}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read())
+
+
+def search(category: str, key: str, limit: int, bpm_range: tuple[int, int] = (70, 180)) -> list[dict]:
+    """CC0 loops of one category with a tempo, best rated first (one API call per 150 results)."""
+    flt = (f'license:"Creative Commons 0" tag:loop tag:{CATEGORIES[category]} '
+           f"duration:[1 TO 30] bpm:[{bpm_range[0]} TO {bpm_range[1]}]")
+    out, page = [], 1
+    while len(out) < limit:
+        q = urllib.parse.urlencode({"query": "", "filter": flt, "fields": FIELDS, "sort": "rating_desc",
+                                    "page_size": 150, "page": page})
+        res = _get(f"{API}?{q}", key)
+        out += [dict(r, category=category) for r in res.get("results", [])]
+        if not res.get("next"):
+            break
+        page += 1
+        time.sleep(1.0)  # well under the API's rate limit
+    return out[:limit]
+
+
+def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, dry_run: bool = False) -> list[dict]:
+    """List CC0 loops per category, keep at most ``max_per_user`` per uploader (more kits, fewer copies of
+    one), and download their HQ Ogg previews to ``out_dir/audio`` with ``out_dir/index.jsonl``. ``dry_run``
+    lists and prints the expected download size without fetching any audio."""
+    key = os.environ.get("FREESOUND_API_KEY")
+    if not key:
+        raise SystemExit("set FREESOUND_API_KEY (an API key from https://freesound.org/apiv2/apply)")
+    out_dir = Path(out_dir)
+    seen, per_user, rows = set(), {}, []
+    for cat in CATEGORIES:
+        for r in search(cat, key, per_category * 3):
+            if r["id"] in seen or per_user.get(r["username"], 0) >= max_per_user or not r.get("bpm"):
+                continue
+            seen.add(r["id"])
+            per_user[r["username"]] = per_user.get(r["username"], 0) + 1
+            rows.append(r)
+            if sum(x["category"] == cat for x in rows) >= per_category:
+                break
+        print(f"{cat}: {sum(x['category'] == cat for x in rows)} loops", flush=True)
+    secs = sum(r["duration"] for r in rows)
+    print(f"{len(rows)} loops from {len(per_user)} uploaders, {secs / 3600:.1f} h, "
+          f"~{secs * 128e3 / 8 / 1e9:.2f} GB of 128 kbit/s previews", flush=True)
+    if dry_run:
+        return rows
+    (out_dir / "audio").mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "index.jsonl", "a", encoding="utf-8") as idx:
+        for k, r in enumerate(rows):
+            dest = out_dir / "audio" / f"{r['id']}.ogg"
+            if not dest.exists():
+                tmp = dest.with_suffix(".tmp")
+                urllib.request.urlretrieve(r["previews"]["preview-hq-ogg"], tmp)
+                tmp.replace(dest)
+                idx.write(json.dumps({k2: r[k2] for k2 in ("id", "name", "username", "license", "tags", "duration",
+                                                         "bpm", "tonality", "tonality_confidence", "category")}) + "\n")
+            if k % 50 == 0:
+                print(f"downloaded {k + 1}/{len(rows)}", flush=True)
+    return rows
+
+
+# --------------------------------------------------------------------------------------------- arranging
+
+def _key(tonality: str | None) -> tuple[int, str] | None:
+    """("A minor") -> (9, "minor"); None when unknown."""
+    if not tonality or " " not in tonality:
+        return None
+    note, mode = tonality.split(" ", 1)
+    note = _FLAT.get(note, note)
+    return (NOTES.index(note), mode.strip().lower()) if note in NOTES else None
+
+
+def _compatible(a: tuple[int, str], b: tuple[int, str]) -> bool:
+    """Same key, or relative major/minor (A minor and C major share their notes)."""
+    if a == b:
+        return True
+    (ra, ma), (rb, mb) = a, b
+    if ma == "minor" and mb == "major":
+        return (ra + 3) % 12 == rb
+    if ma == "major" and mb == "minor":
+        return (rb + 3) % 12 == ra
+    return False
+
+
+def load_index(folder: str | Path, min_key_confidence: float = 0.5) -> list[dict]:
+    """Usable loops of a ``fetch`` folder: a whole number of bars (1, 2, 4 or 8, within 3 %) at their tempo,
+    and, for pitched categories, a key detected with at least ``min_key_confidence``."""
+    rows = []
+    for line in (Path(folder) / "index.jsonl").read_text(encoding="utf-8").splitlines():
+        r = json.loads(line)
+        bars = r["duration"] * r["bpm"] / 240.0
+        k = min((1, 2, 4, 8), key=lambda b: abs(b - bars))
+        if abs(bars - k) > 0.03 * k:
+            continue
+        r["loop_bars"] = k
+        r["key"] = None if r["category"] in UNPITCHED else _key(r.get("tonality"))
+        if r["category"] not in UNPITCHED and (r["key"] is None
+                                               or (r.get("tonality_confidence") or 0) < min_key_confidence):
+            continue
+        r["file"] = str(Path(folder) / "audio" / f"{r['id']}.ogg")
+        rows.append(r)
+    return rows
+
+
+def _read(path: str, sr: int) -> np.ndarray:
+    x, fsr = sf.read(path, dtype="float32", always_2d=True)
+    x = x.T if x.shape[1] == 2 else np.repeat(x.T[:1], 2, 0)
+    if fsr != sr:
+        g = np.gcd(int(fsr), int(sr))
+        x = resample_poly(x, sr // g, fsr // g, axis=1).astype(np.float32)
+    return x
+
+
+def arrange(loops: list[dict], sr: int, seed: int, duration_s: float = 75.0,
+            n_range: tuple[int, int] = (3, 6)) -> tuple[np.ndarray, list[np.ndarray], dict]:
+    """(mix (n, 2), tracks [(n, 2)], meta) of one strict-loop song from Freesound loops: one tempo, one key
+    for the pitched parts, each part from a different uploader, entering one at a time."""
+    rng = np.random.default_rng(seed)
+    by_bpm: dict = {}
+    for r in loops:
+        by_bpm.setdefault(int(r["bpm"]), []).append(r)
+    tempos = [b for b, rs in by_bpm.items() if len({r["username"] for r in rs}) >= 2
+              and len({r["category"] for r in rs}) >= 2]
+    if not tempos:
+        raise ValueError("no tempo with loops from two uploaders and two categories")
+    bpm = int(rng.choice(tempos))
+    pool = [by_bpm[bpm][i] for i in rng.permutation(len(by_bpm[bpm]))]
+    want = int(rng.integers(n_range[0], n_range[1] + 1))
+    picked, users, key = [], set(), None
+    for r in pool:  # the first pitched loop sets the key; one loop per uploader
+        if r["username"] in users or sum(p["category"] == r["category"] for p in picked) >= 2:
+            continue
+        if r["key"] is not None:
+            if key is not None and not _compatible(key, r["key"]):
+                continue
+            key = key or r["key"]
+        picked.append(r)
+        users.add(r["username"])
+        if len(picked) == want:
+            break
+    if len(picked) < 2:
+        raise ValueError(f"fewer than two compatible loops at {bpm} bpm")
+
+    bar = int(round(240.0 * sr / bpm))
+    loop = max(r["loop_bars"] for r in picked)  # loops of 1, 2, 4 or 8 bars all repeat within the longest
+    n_bars = max(4 * loop, int(round(duration_s * sr / bar / loop)) * loop)
+    step = loop * int(rng.choice([1, 2]))
+    while step > loop and len(picked) * step > n_bars - 2 * loop:
+        step -= loop
+    last = max(0, (n_bars - 2 * loop) // loop * loop)
+    n = n_bars * bar
+    tracks, sources = [], []
+    for k, r in enumerate(picked):
+        x = _read(r["file"], sr)
+        period = r["loop_bars"] * bar  # the file is one loop: trim or pad it to whole bars at the song tempo
+        x = np.pad(x, ((0, 0), (0, max(0, period - x.shape[1]))))[:, :period]
+        entry = min(k * step, last)
+        y = _tile_loop(x, 0, period, entry * bar, n, 0).T  # no seam fade: loop files are made to repeat
+        rms = np.sqrt(np.mean(x ** 2)) + 1e-12
+        gain_db = LEVEL_DB[r["category"]] + float(rng.normal(0, 2.5))
+        tracks.append(y * (10 ** (gain_db / 20) * 0.1 / rms))
+        sources.append({"id": k, "kind": r["category"], "family": r["category"], "twin_of": None,
+                        "merge_group": None, "entry_bar": entry, "bars": list(range(entry, n_bars)),
+                        "loop_bars": r["loop_bars"], "freesound_id": r["id"], "username": r["username"],
+                        "license": r["license"], "source_bpm": r["bpm"], "tonality": r.get("tonality"),
+                        "gain_db": round(gain_db, 2), "timeline": []})
+    return master_and_meta(tracks, sources, sr, bar, n_bars, loop, step, rng, genre="freesound_loops",
+                           generator="priism.lab.gen.fsloops",
+                           key=f"{NOTES[key[0]]} {key[1]}" if key else None)
+
+
+def generate(index_dir: str | Path, out_dir: str | Path, count: int, seed: int = 0, duration_s: float = 75.0,
+             sample_rate: int = 44100) -> list[str]:
+    """``count`` arranged songs (``song_fs<seed>``) from the loops of a ``fetch`` folder."""
+    loops = load_index(index_dir)
+    print(f"{len(loops)} usable loops", flush=True)
+    out = []
+    for i in range(count):
+        folder = Path(out_dir) / f"song_fs{seed + i:06d}"
+        if not (folder / "meta.json").exists():
+            mix, tracks, meta = arrange(loops, sample_rate, seed + i, duration_s)
+            write_song(mix, tracks, meta, folder)
+        out.append(str(folder))
+        print(f"song {len(out)}/{count}: {folder}", flush=True)
+    return out
