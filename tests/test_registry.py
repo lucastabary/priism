@@ -177,3 +177,15 @@ def test_domain_probe_separates_shifted_sets():
         s.tokens = s.tokens + 1.0  # a constant offset: the "generator signature"
     shifted = probe(a, b, n=200)
     assert shifted["song_auc"] > 0.95 and shifted["token_auc"] > same["token_auc"] + 0.2
+
+
+def test_supcon_ignore_drops_pairs():
+    z = torch.nn.functional.normalize(torch.tensor([[1.0, 0], [0, 1.0], [1, 0.1]]), dim=1)
+    labels = torch.tensor([0, 1, 2])
+    ign = torch.zeros(3, 3, dtype=torch.bool)
+    ign[0, 2] = ign[2, 0] = True
+    # no positives at all -> only rows with a positive count; give row 0 and 1 the same label instead
+    labels = torch.tensor([0, 0, 2])
+    a = supcon(z, labels, ignore=None)
+    b = supcon(z, labels, ignore=ign)  # token 2 (close to 0) no longer a negative for 0: lower loss
+    assert b < a

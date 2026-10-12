@@ -71,6 +71,16 @@ class IdentityHead(nn.Module):
         return self(torch.from_numpy(tokens).to(dev)).float().cpu().numpy()
 
 
+def _group_refs(song: Cached, level: str) -> np.ndarray:
+    """(R,) bool: references that are group stems (NI stems, loops cut from them: kind "stem*"), which hold
+    several instruments, so two moments of one are not the same fine source."""
+    kinds = np.array([str(lab.get("kind", "")).startswith("stem") for lab in song.labels])
+    if level != "instrument":
+        return kinds
+    groups = song.instruments
+    return np.array([kinds[groups == g].all() for g in np.unique(groups)])
+
+
 def _refs(song: Cached, level: str) -> tuple[np.ndarray, np.ndarray]:
     groups = song.instruments if level == "instrument" else None
     return ownership(song.energy, groups)
@@ -97,11 +107,13 @@ def sample_tokens(song: Cached, shares: np.ndarray, audible: np.ndarray, chunk: 
     return out
 
 
-def supcon(z: torch.Tensor, labels: torch.Tensor, temp: float = 0.1) -> torch.Tensor:
-    """Supervised contrastive loss over unit rows z (N, d) with integer labels (N,)."""
+def supcon(z: torch.Tensor, labels: torch.Tensor, temp: float = 0.1, ignore: torch.Tensor | None = None
+           ) -> torch.Tensor:
+    """Supervised contrastive loss over unit rows z (N, d) with integer labels (N,). ``ignore`` (N, N) bool:
+    pairs left out of both the positives and the denominator (neither pulled together nor pushed apart)."""
     sim = z @ z.T / temp
     eye = torch.eye(len(z), dtype=torch.bool, device=z.device)
-    sim = sim.masked_fill(eye, -1e9)
+    sim = sim.masked_fill(eye if ignore is None else eye | ignore, -1e9)
     pos = (labels[:, None] == labels[None]) & ~eye
     logp = sim - torch.logsumexp(sim, 1, keepdim=True)
     has = pos.any(1)
@@ -163,7 +175,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                chunk_s: float = 4.0, min_gap_s: float = 20.0, lr: float = 1e-3, temp: float = 0.1,
                dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
-               device: str = "cpu", log=_log) -> dict:
+               device: str = "cpu", group_local: bool = False, log=_log) -> dict:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -176,6 +188,9 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 200)
                                               * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
     refs = [_refs(s, level) for s in train]
+    # group_local: a group stem is a positive only with itself in the same chunk; its other chunk is ignored,
+    # not pushed away, and other sources stay negatives. Real timbres without teaching "kick == hats".
+    is_group = [_group_refs(s, level) if group_local else None for s in train]
     pairs = validation_pairs(valid, level, min_gap)
     best, since, start, hist = -1.0, 0, time.time(), out / "history.jsonl"
     hist.unlink(missing_ok=True)
@@ -187,7 +202,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     losses: list[float] = []
     reason = "steps"
     for step in range(1, steps + 1):
-        zs, labels = [], []
+        zs, labels, fine = [], [], []
         for si in rng.choice(len(train), min(songs_per_step, len(train)), replace=False):
             song = train[si]
             by_chunk: dict[int, list] = {}
@@ -198,9 +213,15 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                 zs.append(head(torch.from_numpy(song.tokens[t0: t0 + chunk]).to(device), rows))
                 labels.append(torch.from_numpy(np.concatenate([np.full(len(rw), int(si) * 1000 + r)
                                                                for r, rw in items])).to(device))
+                fine.append(torch.from_numpy(np.concatenate([
+                    np.full(len(rw), (int(si) * 1000 + r) * 2 + (t0 == min(by_chunk))
+                            if is_group[si] is not None and is_group[si][r] else (int(si) * 1000 + r) * 2)
+                    for r, rw in items])).to(device))
         if len(zs) < 2:
             continue
-        loss = supcon(torch.cat(zs), torch.cat(labels), temp)
+        lab, fin = torch.cat(labels), torch.cat(fine)
+        ignore = (lab[:, None] == lab[None]) & (fin[:, None] != fin[None]) if group_local else None
+        loss = supcon(torch.cat(zs), fin if group_local else lab, temp, ignore)
         if not torch.isfinite(loss):
             reason = f"non-finite loss at step {step}"
             log(reason)
@@ -240,7 +261,7 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             t_step = time.time()
     torch.save({"cfg": head.cfg, "state": {k: v.cpu() for k, v in head.state_dict().items()}, "step": step},
                out / "last.pt")
-    summary = {"stopped": reason, "best_far_auc": best, "raw": raw, "level": level, "seed": seed}
+    summary = {"group_local": group_local, "stopped": reason, "best_far_auc": best, "raw": raw, "level": level, "seed": seed}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 
