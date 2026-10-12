@@ -16,6 +16,14 @@ been uploaded (results included), so a lost connection loses nothing.
 
 The job runs in its own process session. If the agent itself restarts (crash, reboot of the service), it
 finds the job in ``.agent/current.json``: still alive, it is watched again; gone, it is reported lost.
+
+The machine's owner controls the agent through ``.agent/control.json`` (written by the Windows tray icon,
+``pod/agent/windows/tray.ps1``): ``paused`` freezes the running job (SIGSTOP to its process group: the GPU
+is free at once, its memory stays allocated) and takes no new job until resumed; ``quota_gb`` caps the
+work folder, his cache. Over the cap a running job is stopped and only ``clean`` jobs start: what to delete
+is decided on our side, from the per-folder sizes in the heartbeat. For the tray, the agent keeps
+``.agent/status.json`` (its state, every tick) and ``.agent/stats.json`` (seconds of job time per hour,
+paused time excluded).
 """
 
 from __future__ import annotations
@@ -58,6 +66,13 @@ class _Pid:
             return -1  # gone; its exit code is unknown
 
 
+def _signal_group(proc, sig) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except OSError:
+        pass
+
+
 def _kill(proc) -> None:
     """SIGTERM to the job's whole process group, SIGKILL 30 s later if it is still there."""
     if hasattr(os, "killpg"):
@@ -65,6 +80,7 @@ def _kill(proc) -> None:
             pg = os.getpgid(proc.pid)
         except OSError:
             return
+        _signal_group(proc, signal.SIGCONT)  # a frozen job only acts on SIGTERM once it runs again
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(pg, sig)
@@ -82,7 +98,7 @@ class Agent:
     def __init__(self, store, workdir: str | Path, repo: str | Path, name: str | None = None,
                  bin_dir: str | Path | None = None, gpu=gpu_stats, tick: float = 10.0, sync_every: float = 30.0,
                  free_util: int = 10, free_mem_mib: int = 1500, free_samples: int = 3, free_gap_s: float = 5.0,
-                 log=print):
+                 quota_gb: float = 50.0, disk_every: float = 60.0, log=print):
         self.store, self.workdir, self.repo = store, Path(workdir), Path(repo)
         self.name = name or socket.gethostname()
         self.bin_dir = Path(bin_dir or Path(sys.executable).parent)
@@ -93,6 +109,10 @@ class Agent:
         (self.workdir / "logs").mkdir(exist_ok=True)
         self.online = True
         self.restart = False
+        self.quota_gb, self.disk_every = quota_gb, disk_every
+        self._disk: tuple[float, int, dict[str, int]] = (-1e18, 0, {})  # (measured at, bytes, top entries)
+        self._work: dict[str, float] = {}  # job seconds per epoch hour, not yet added to stats.json
+        self._job_start: float | None = None
 
     # --------------------------------------------------------------------------------------- store access
 
@@ -111,8 +131,13 @@ class Agent:
 
     def heartbeat(self, state: str, job: str | None = None) -> None:
         g = self.gpu()
+        used, top = self.disk()
+        self._local(state, job)
         self._try(self.store.put, f"agents/{self.name}.json", json.dumps(
-            {"time": time.time(), "state": state, "job": job, "gpu": g, "version": self._version()}).encode())
+            {"time": time.time(), "state": state, "job": job, "gpu": g, "version": self._version(),
+             "paused": self.control()["paused"],
+             "disk": {"used_gb": round(used / 1e9, 2), "quota_gb": self.quota(),
+                      "top_gb": {k: round(v / 1e9, 2) for k, v in top.items()}}}).encode())
 
     def _version(self) -> str:
         try:
@@ -120,6 +145,64 @@ class Agent:
                                   text=True, timeout=10).stdout.strip()
         except Exception:
             return "?"
+
+    # ------------------------------------------------------------------------ owner control, local state
+
+    def control(self) -> dict:
+        """The owner's settings from the tray; a missing or half-written file means the defaults."""
+        try:  # utf-8-sig: Windows tools may write a BOM
+            c = json.loads((self.state_dir / "control.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            c = {}
+        return {"paused": bool(c.get("paused", False)), "quota_gb": float(c.get("quota_gb") or self.quota_gb)}
+
+    def quota(self) -> float:
+        return self.control()["quota_gb"]
+
+    def disk(self, force: bool = False) -> tuple[int, dict[str, int]]:
+        """Bytes in the work folder and its 15 largest top-level entries, measured at most every
+        ``disk_every`` seconds (walking a Windows drive from WSL is slow)."""
+        if force or time.time() - self._disk[0] >= self.disk_every:
+            sizes = {e.name: _size(e) for e in os.scandir(self.workdir)}
+            top = dict(sorted(sizes.items(), key=lambda kv: -kv[1])[:15])
+            self._disk = (time.time(), sum(sizes.values()), top)
+        return self._disk[1], self._disk[2]
+
+    def cache_full(self, force: bool = False) -> bool:
+        return self.disk(force)[0] > self.quota() * 1e9
+
+    def _local(self, state: str, job: str | None = None, job_start: float | None = None) -> None:
+        _write_json(self.state_dir / "status.json", {
+            "time": time.time(), "state": state, "job": job,
+            "job_start": job_start or (self._job_start if job else None), "name": self.name,
+            "online": self.online, "used_bytes": self.disk()[0], "quota_gb": self.quota()})
+
+    def _count_work(self, seconds: float, flush: bool = False) -> None:
+        """Add job time to the current hour; ``flush`` writes the pending hours to stats.json."""
+        if seconds > 0:
+            hour = str(int(time.time() // 3600))
+            self._work[hour] = self._work.get(hour, 0.0) + seconds
+        if flush and self._work:
+            path = self.state_dir / "stats.json"
+            try:
+                st = json.loads(path.read_text())
+            except (OSError, ValueError):
+                st = {}
+            hours = st.setdefault("hours", {})
+            for h, s in self._work.items():
+                hours[h] = round(hours.get(h, 0.0) + s, 1)
+            _write_json(path, st)
+            self._work = {}
+
+    def _sleep(self, seconds: float) -> None:
+        """Sleep, but wake as soon as the owner changes something in the tray."""
+        path = self.state_dir / "control.json"
+        stamp = lambda: path.stat().st_mtime if path.exists() else 0.0
+        before, end = stamp(), time.time() + seconds
+        while time.time() < end:
+            time.sleep(min(2.0, max(0.0, end - time.time())))
+            if stamp() != before:
+                return
 
     # ---------------------------------------------------------------------------------------------- loop
 
@@ -135,16 +218,20 @@ class Agent:
                 self.log("updated: exiting so the service restarts the agent on the new code")
                 return
             if not ran:
-                time.sleep(idle_poll)
+                self._sleep(idle_poll)
 
     def step(self) -> bool:
         """One pass; True if a job ran (look again at once), False if idle or waiting."""
         self._resume()
         self._flush()
+        if self.control()["paused"]:
+            self.heartbeat("paused")
+            return False
         try:
             pending = self.store.list("queue/pending/")
         except (StoreError, OSError):
             self.online = False
+            self._local("offline")
             return False
         if not pending:
             self.heartbeat("idle")
@@ -161,7 +248,10 @@ class Agent:
                                                                  "time": time.time()}).encode())
             self.store.delete(key)
             return True
-        if job.gpu and not self.gpu_free():
+        if job.kind != "clean" and self.cache_full(force=True):
+            self.heartbeat("waiting: cache full (clean jobs only)", job.id)
+            return False
+        if job.gpu and job.kind != "clean" and not self.gpu_free():
             self.heartbeat("waiting: GPU busy", job.id)
             return False
         self.store.put(f"queue/running/{job.id}.json", job.to_json())
@@ -204,17 +294,41 @@ class Agent:
             self.restart = True  # new code is installed: run_forever exits, the service starts it again
 
     def watch(self, job: Job, proc, logf: Path, start: float) -> tuple[int, str]:
-        idle_since, last_sync = None, 0.0
+        """Watch a job until it ends or must stop. The owner's pauses count for none of the limits: the
+        stall and GPU-idle clocks restart at each resume, the time cap counts active time only."""
+        idle_since, last_sync, last, paused_s, frozen, resumed = None, 0.0, time.time(), 0.0, False, start
+        self._job_start = start
+        if hasattr(signal, "SIGCONT"):  # a job found frozen after an agent restart: the loop refreezes it if paused
+            _signal_group(proc, signal.SIGCONT)
         while True:
             code = proc.poll()
             if code is not None:
+                self._count_work(0.0, flush=True)
                 return code, "ok" if code == 0 else f"exit code {code}"
             now = time.time()
+            dt, last = min(now - last, 60.0), now  # capped: time the PC spent asleep is not job time
+            want = self.control()["paused"] and hasattr(signal, "SIGSTOP")
+            if want != frozen:
+                _signal_group(proc, signal.SIGSTOP if want else signal.SIGCONT)
+                frozen, resumed, idle_since, last_sync = want, now, None, 0.0
+                msg = "paused by the machine's owner" if frozen else "resumed"
+                self.log(f"{job.id}: {msg}")
+                with logf.open("a") as f:
+                    f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {msg}\n")
+            if frozen:
+                paused_s += dt
+            else:
+                self._count_work(dt)
+            self._local("paused" if frozen else "running", job.id, start)
             stop = None
-            if now - max(logf.stat().st_mtime, start) > job.stall_minutes * 60:
+            if frozen:
+                pass
+            elif now - max(logf.stat().st_mtime, resumed) > job.stall_minutes * 60:
                 stop = f"no log output for {job.stall_minutes:g} min"
-            elif now - start > job.max_minutes * 60:
+            elif now - start - paused_s > job.max_minutes * 60:
                 stop = f"time cap {job.max_minutes:g} min"
+            elif job.kind != "clean" and self.cache_full():
+                stop = f"cache full ({self.disk()[0] / 1e9:.1f} GB, limit {self.quota():g} GB)"
             elif job.gpu:
                 g = self.gpu()
                 if g is not None and g[0] == 0:
@@ -225,13 +339,15 @@ class Agent:
                     idle_since = None
             if stop is None and now - last_sync >= self.sync_every:
                 last_sync = now
-                self._sync(job, logf, start, "running")
+                self._count_work(0.0, flush=True)
+                self._sync(job, logf, start, "paused" if frozen else "running")
                 try:
                     if self.store.get(f"cancel/{job.id}") is not None:
                         stop = "cancelled"
                 except (StoreError, OSError):
                     self.online = False
             if stop:
+                self._count_work(0.0, flush=True)
                 with logf.open("a") as f:
                     f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {stop}, stopping\n")
                 self.log(f"{job.id}: {stop}")
@@ -246,8 +362,8 @@ class Agent:
               "last_line": lines[-1][-300:] if lines else "", "agent": self.name, **(extra or {})}
         ok = self._try(self.store.put, f"logs/{job.id}.log", data)
         ok = ok and self._try(self.store.put, f"status/{job.id}.json", json.dumps(st).encode())
-        if state == "running":
-            self.heartbeat("running", job.id)
+        if state in ("running", "paused"):
+            self.heartbeat(state, job.id)
         return ok
 
     # ------------------------------------------------------------------------- local state, offline-safe
@@ -305,3 +421,19 @@ class Agent:
             self._finish(job, code, reason, d["start"])
         else:
             self._finish(job, -1, "lost: the agent restarted and the job had ended (exit code unknown)", d["start"])
+
+
+def _size(entry: os.DirEntry) -> int:
+    """Bytes under a directory entry, symlinks not followed."""
+    try:
+        if entry.is_dir(follow_symlinks=False):
+            return sum(_size(e) for e in os.scandir(entry.path))
+        return entry.stat(follow_symlinks=False).st_size
+    except OSError:
+        return 0
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, path)

@@ -112,6 +112,13 @@ endpoint `https://f098c4b3a591f78c07382e384992dbd5.r2.cloudflarestorage.com`, re
 the AWS profile `priism-r2`). Jobs are allowlisted JSON (`src/priism/lab/agent/jobs.py`), never scripts; a
 GPU job starts only when the GPU is free. From the laptop: `priism-lab jobs submit|status|log|cancel|pull`
 with `PRIISM_STORE=s3://priism-jobs/queue`. R2's free tier is 10 GB: pull results, then delete them.
+On the friend's PC, `pod/agent/windows/install.ps1` sets everything up (WSL systemd, keys, `install.sh`) and
+installs `tray.ps1`, a notification-area icon started at logon. The icon keeps WSL open, lets him pause
+(freezes the running job with SIGSTOP; its VRAM stays allocated) and resume, shows the hours worked
+(24 h / 7 d / 30 d / all), and keeps the PC awake while a job runs. The agent's work folder is his cache,
+on a Windows drive he picks, capped (default 50 GB). Over the cap the running job stops and only `clean`
+jobs start (`jobs submit clean <paths> --cpu`). `jobs status` shows the per-folder sizes, so we decide
+what to delete. Tray and agent talk only through `<cache>/.agent/{control,status,stats}.json`.
 
 ### Lab philosophy: never leave a long run unwatched
 

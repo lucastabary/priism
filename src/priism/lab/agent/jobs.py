@@ -4,6 +4,8 @@ A job is declarative JSON, never a script: a ``kind`` from the allowlist plus st
 builds the command itself and runs it without a shell, inside its work folder. Whoever can write to the
 queue can therefore only run priism commands with relative paths, not arbitrary code on the machine
 (the ``update`` kind does run code: the priism repository's own, at a branch of its ``origin``).
+``clean`` deletes paths inside the work folder, the owner's size-capped cache: the agent reports its
+per-folder sizes in its heartbeat, and we decide here what goes.
 
 Store layout: ``queue/{pending,running,done,failed}/<id>.json`` (the spec, then its outcome),
 ``logs/<id>.log``, ``status/<id>.json`` (heartbeat, state, last line), ``cancel/<id>`` (a marker the
@@ -23,9 +25,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 # priism-lab subcommands a remote job may run.
 LAB_COMMANDS = {"gen", "cache-features", "registry-eval", "train-id", "eval-sep", "eval-stems"}
 SCRIPTS = {"phase1": ("scripts/registry_phase1.sh", {"probe", "full"})}
-KINDS = {"priism-lab", "update", *SCRIPTS}
+KINDS = {"priism-lab", "update", "clean", *SCRIPTS}
 _ENV_KEY = re.compile(r"^PRIISM_[A-Z0-9_]+$")
 _ENV_VAL = re.compile(r"^[\w.:,=-]{0,200}$")
+PROTECTED = {".agent"}  # the agent's own state (control, stats, unsynced outcomes): never cleaned
 _BRANCH = re.compile(r"^[\w][\w./-]{0,100}$")
 
 
@@ -80,6 +83,13 @@ def validate(job: Job) -> None:
         raise JobRejected(f"{job.kind} takes one of {sorted(SCRIPTS[job.kind][1])}")
     if job.kind == "update" and (len(job.args) != 1 or not _BRANCH.match(job.args[0]) or ".." in job.args[0]):
         raise JobRejected("update takes one branch name")
+    if job.kind == "clean":
+        for a in job.args:
+            parts = [p for p in PurePosixPath(a.replace("\\", "/")).parts if p != "."]
+            if not parts or parts[0] in PROTECTED:
+                raise JobRejected(f"clean cannot delete {a!r} (the work folder itself or {sorted(PROTECTED)})")
+        if not job.args:
+            raise JobRejected("clean takes the paths to delete")
 
 
 def commands(job: Job, repo: Path, bin_dir: Path) -> list[list[str]]:
@@ -91,6 +101,8 @@ def commands(job: Job, repo: Path, bin_dir: Path) -> list[list[str]]:
         return [[exe("priism-lab"), *job.args]]
     if job.kind in SCRIPTS:
         return [["bash", str(repo / SCRIPTS[job.kind][0]), *job.args]]
+    if job.kind == "clean":
+        return [[exe("python"), "-m", "priism.lab.agent.clean", *job.args]]
     branch = job.args[0]
     return [["git", "-C", str(repo), "fetch", "origin", branch],
             ["git", "-C", str(repo), "checkout", "--detach", f"origin/{branch}"],

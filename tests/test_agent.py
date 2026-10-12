@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -117,3 +118,71 @@ def test_offline_job_finishes_and_syncs_later(tmp_path):
     assert json.loads(store.get("status/off.json"))["state"] == "done"
     assert store.get("results/off/results/a") == b"1"
     assert not (agent.state_dir / "finished" / "off.json").exists()
+
+
+def control(agent, **kw):
+    (agent.state_dir / "control.json").write_text("\ufeff" + json.dumps(kw), encoding="utf-8")  # BOM, as Windows
+
+
+def test_paused_takes_no_job(tmp_path):
+    store, agent = make_agent(tmp_path)
+    jid = jobs.submit(store, Job("phase1", ["probe"], gpu=False))
+    control(agent, paused=True)
+    assert not agent.step()
+    assert store.get(f"queue/pending/{jid}.json") is not None
+    assert json.loads(store.get("agents/pc.json"))["paused"]
+    assert json.loads((agent.state_dir / "status.json").read_text())["state"] == "paused"
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGSTOP"), reason="SIGSTOP is POSIX only")
+def test_pause_freezes_the_job_and_limits_ignore_it(tmp_path):
+    import threading
+    import time
+
+    store, agent = make_agent(tmp_path)
+    job = Job("phase1", ["probe"], gpu=False, id="p1", stall_minutes=0.01)  # 0.6 s without output = stall
+    control(agent, paused=True)
+    threading.Timer(2.0, lambda: control(agent, paused=False)).start()  # paused 2 s, longer than the stall limit
+    code = "import time\nfor i in range(20):\n    print(i, flush=True); time.sleep(0.05)"
+    st = run(agent, store, job, code)
+    assert st["state"] == "done", st
+    log = jobs.log(store, "p1")
+    assert "paused by the machine's owner" in log and "resumed" in log
+    worked = sum(json.loads((agent.state_dir / "stats.json").read_text())["hours"].values())
+    assert 0 < worked < 1.9  # job time only, the 2 s pause excluded
+
+
+def test_stats_count_job_time(tmp_path):
+    store, agent = make_agent(tmp_path)
+    run(agent, store, Job("phase1", ["probe"], gpu=False, id="s1"), "import time; print('x', flush=True); time.sleep(0.5)")
+    worked = sum(json.loads((agent.state_dir / "stats.json").read_text())["hours"].values())
+    assert 0.3 < worked < 2
+
+
+def test_cache_full_only_clean_runs(tmp_path, monkeypatch):
+    store, agent = make_agent(tmp_path)
+    (agent.workdir / "data").mkdir()
+    (agent.workdir / "data" / "big.bin").write_bytes(b"x" * 2000)
+    control(agent, quota_gb=1e-6)  # 1000 bytes
+    jid = jobs.submit(store, Job("phase1", ["probe"], gpu=False))
+    assert not agent.step()
+    assert store.get(f"queue/pending/{jid}.json") is not None
+    hb = json.loads(store.get("agents/pc.json"))
+    assert hb["state"].startswith("waiting: cache full") and "data" in hb["disk"]["top_gb"]
+    jobs.cancel(store, jid)
+
+    job = Job("clean", ["data/big.bin"], id="c1")
+    assert jobs.commands(job, tmp_path, Path(PY).parent)[0][1:3] == ["-m", "priism.lab.agent.clean"]
+    jobs.submit(store, job)
+    monkeypatch.setattr("priism.lab.agent.agent.commands", lambda j, *_: [[PY, "-m", "priism.lab.agent.clean", *j.args]])
+    assert agent.step()  # the cache is full, but a clean job still starts
+    assert json.loads(store.get("status/c1.json"))["state"] == "done"
+    assert not (agent.workdir / "data" / "big.bin").exists()
+    assert not agent.cache_full(force=True)
+
+
+def test_clean_refuses_outside_and_agent_state(tmp_path):
+    for bad in [[], ["."], ["./"], [".agent"], [".agent/control.json"], ["../x"], ["/etc"], ["C:\\x"]]:
+        with pytest.raises(JobRejected):
+            validate(Job("clean", bad))
+    validate(Job("clean", ["cache/synth-train", "data/ni-download"]))

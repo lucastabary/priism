@@ -404,7 +404,7 @@ def _store(args: argparse.Namespace):
 def _agent(args: argparse.Namespace) -> None:
     from .agent.agent import Agent
 
-    Agent(_store(args), args.workdir, args.repo, name=args.name).run_forever(args.poll)
+    Agent(_store(args), args.workdir, args.repo, name=args.name, quota_gb=args.quota_gb).run_forever(args.poll)
 
 
 def _jobs(args: argparse.Namespace) -> None:
@@ -424,7 +424,11 @@ def _jobs(args: argparse.Namespace) -> None:
         st = jobs.status(store)
         for name, a in st["agents"].items():
             print(f"agent {name}: {a.get('state')} (job {a.get('job')}), seen {a['age_s'] / 60:.1f} min ago, "
-                  f"gpu {a.get('gpu')}, version {a.get('version')}")
+                  f"gpu {a.get('gpu')}, version {a.get('version')}{', PAUSED by its owner' if a.get('paused') else ''}")
+            if a.get("disk"):
+                d = a["disk"]
+                top = ", ".join(f"{k} {v:g}" for k, v in d.get("top_gb", {}).items())
+                print(f"  cache {d.get('used_gb')} / {d.get('quota_gb')} GB: {top}")
         for j in st["jobs"]:
             age = f", updated {(time.time() - j['time']) / 60:.1f} min ago" if j.get("time") else ""
             print(f"{j['state']:8} {j['id']}  {j.get('reason') or ''}{age}  {j.get('last_line') or ''}")
@@ -812,12 +816,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--repo", required=True, help="priism checkout the jobs use (scripts, update)")
     p.add_argument("--name", help="agent name (default: host name)")
     p.add_argument("--poll", type=float, default=60.0, help="seconds between looks at an empty queue")
+    p.add_argument("--quota-gb", type=float, default=50.0,
+                   help="size cap of the work folder (the owner's tray setting in .agent/control.json wins)")
     p.set_defaults(func=_agent)
 
     p = sub.add_parser("jobs", help="remote job queue: submit, status, log, cancel, pull")
     store_args(p)
     p.add_argument("action", choices=["submit", "status", "log", "cancel", "pull"])
-    p.add_argument("id", nargs="?", help="job id (log, cancel, pull) or kind (submit: priism-lab, phase1, update)")
+    p.add_argument("id", nargs="?", help="job id (log, cancel, pull) or kind (submit: priism-lab, phase1, update, clean)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="submit: the job's arguments")
     p.add_argument("--cpu", action="store_true", help="submit: no GPU needed (starts even if the GPU is busy)")
     p.add_argument("--max-minutes", type=float, default=240.0)
