@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -27,12 +28,15 @@ from scipy.signal import resample_poly
 from .stemloops import _tile_loop, master_and_meta, write_song
 
 API = "https://freesound.org/apiv2/search/"
-# Category -> Freesound tag searched together with "loop". Unpitched categories ignore keys.
-CATEGORIES = {"drums": "drums", "percussion": "percussion", "bass": "bass", "synth": "synth", "pad": "pad",
-              "lead": "lead", "chords": "chords", "arp": "arpeggio"}
+# Category -> Freesound tags, each searched together with "loop". Unpitched categories ignore keys.
+CATEGORIES = {"drums": ["drums"], "percussion": ["percussion"], "bass": ["bass"], "synth": ["synth"],
+              "pad": ["pad", "ambient-pad"], "lead": ["lead"], "chords": ["chords", "chord"],
+              "arp": ["arpeggio", "arp"], "keys": ["piano", "keys", "rhodes"], "guitar": ["guitar"],
+              "stab": ["stab"], "melody": ["melody"]}
 UNPITCHED = {"drums", "percussion"}
 # Level of each category relative to the drums, in dB (before jitter), as LEVEL_DB in song.py.
-LEVEL_DB = {"drums": 0, "percussion": -8, "bass": -2, "synth": -8, "pad": -10, "lead": -9, "chords": -8, "arp": -12}
+LEVEL_DB = {"drums": 0, "percussion": -8, "bass": -2, "synth": -8, "pad": -10, "lead": -9, "chords": -8, "arp": -12,
+            "keys": -9, "guitar": -8, "stab": -9, "melody": -9}
 FIELDS = "id,name,username,license,tags,duration,bpm,tonality,tonality_confidence,previews"
 NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 _FLAT = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
@@ -56,8 +60,18 @@ def _get(url: str, key: str) -> dict:
 
 
 def search(category: str, key: str, limit: int, bpm_range: tuple[int, int] = (70, 180)) -> list[dict]:
-    """CC0 loops of one category with a tempo, best rated first (one API call per 150 results)."""
-    flt = (f'license:"Creative Commons 0" tag:loop tag:{CATEGORIES[category]} '
+    """CC0 loops of one category with a tempo, best rated first (one API call per 150 results), over each of
+    the category's tags in turn."""
+    out = []
+    for tag in CATEGORIES[category]:
+        out += _search_tag(tag, category, key, limit - len(out), bpm_range)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _search_tag(tag: str, category: str, key: str, limit: int, bpm_range: tuple[int, int]) -> list[dict]:
+    flt = (f'license:"Creative Commons 0" tag:loop tag:{tag} '
            f"duration:[1 TO 30] bpm:[{bpm_range[0]} TO {bpm_range[1]}]")
     out, page = [], 1
     while len(out) < limit:
@@ -72,7 +86,8 @@ def search(category: str, key: str, limit: int, bpm_range: tuple[int, int] = (70
     return out[:limit]
 
 
-def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, dry_run: bool = False) -> list[dict]:
+def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, dry_run: bool = False,
+          categories: list[str] | None = None) -> list[dict]:
     """List CC0 loops per category, keep at most ``max_per_user`` per uploader (more kits, fewer copies of
     one), and download their HQ Ogg previews to ``out_dir/audio`` with ``out_dir/index.jsonl``. ``dry_run``
     lists and prints the expected download size without fetching any audio."""
@@ -82,9 +97,16 @@ def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, 
                          "(an API key from https://freesound.org/apiv2/apply)")
     out_dir = Path(out_dir)
     seen, per_user, rows = set(), {}, []
-    for cat in CATEGORIES:
+    have = set()
+    if (out_dir / "index.jsonl").exists():  # a second fetch adds to the folder: skip what it already holds
+        for line in (out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            have.add(r["id"])
+            per_user[r["username"]] = per_user.get(r["username"], 0) + 1
+    for cat in categories or list(CATEGORIES):
         for r in search(cat, key, per_category * 3):
-            if r["id"] in seen or per_user.get(r["username"], 0) >= max_per_user or not r.get("bpm"):
+            if (r["id"] in seen or r["id"] in have or per_user.get(r["username"], 0) >= max_per_user
+                    or not r.get("bpm")):
                 continue
             seen.add(r["id"])
             per_user[r["username"]] = per_user.get(r["username"], 0) + 1
@@ -135,17 +157,45 @@ def _compatible(a: tuple[int, str], b: tuple[int, str]) -> bool:
     return False
 
 
+_BPM_RX = re.compile(r"(\d{2,3})\s*[-_ ]?\s*bpm", re.IGNORECASE)
+LOOP_BARS = (1, 2, 4, 8, 16)
+
+
+def loop_tempo(r: dict) -> tuple[int, int, str] | None:
+    """(bpm, bars, source) of one loop, or None. Freesound's analysed tempo is often off by a few bpm or by
+    an octave, so in order: a tempo written in the name or tags ("124 bpm"), where the file may run up to one
+    bar past a whole number of bars (a tail, trimmed when arranging); then the analysed tempo, then its
+    double or half, which must give whole bars within 3 %."""
+    dur = r["duration"]
+    m = _BPM_RX.search(r.get("name", "")) or next((x for x in map(_BPM_RX.search, r.get("tags", [])) if x), None)
+    if m and 60 <= int(m.group(1)) <= 200:
+        bpm = int(m.group(1))
+        bars = dur * bpm / 240.0
+        fits = [k for k in LOOP_BARS if k * 0.97 <= bars < k + 1]
+        if fits:
+            return bpm, max(fits), "name"
+    for f, src in ((1.0, "analysis"), (2.0, "analysis x2"), (0.5, "analysis /2")):
+        bpm = int(round(r["bpm"] * f))
+        if not 60 <= bpm <= 200:
+            continue
+        bars = dur * bpm / 240.0
+        k = min(LOOP_BARS, key=lambda b: abs(b - bars))
+        if abs(bars - k) <= 0.03 * k:
+            return bpm, k, src
+    return None
+
+
 def load_index(folder: str | Path, min_key_confidence: float = 0.5) -> list[dict]:
-    """Usable loops of a ``fetch`` folder: a whole number of bars (1, 2, 4 or 8, within 3 %) at their tempo,
+    """Usable loops of a ``fetch`` folder: a tempo at which they hold a whole number of bars (``loop_tempo``),
     and, for pitched categories, a key detected with at least ``min_key_confidence``."""
     rows = []
     for line in (Path(folder) / "index.jsonl").read_text(encoding="utf-8").splitlines():
         r = json.loads(line)
-        bars = r["duration"] * r["bpm"] / 240.0
-        k = min((1, 2, 4, 8), key=lambda b: abs(b - bars))
-        if abs(bars - k) > 0.03 * k:
+        t = loop_tempo(r)
+        if t is None:
             continue
-        r["loop_bars"] = k
+        r["analysed_bpm"] = r["bpm"]
+        r["bpm"], r["loop_bars"], r["bpm_source"] = t
         r["key"] = None if r["category"] in UNPITCHED else _key(r.get("tonality"))
         if r["category"] not in UNPITCHED and (r["key"] is None
                                                or (r.get("tonality_confidence") or 0) < min_key_confidence):
@@ -215,7 +265,8 @@ def arrange(loops: list[dict], sr: int, seed: int, duration_s: float = 75.0,
         sources.append({"id": k, "kind": r["category"], "family": r["category"], "twin_of": None,
                         "merge_group": None, "entry_bar": entry, "bars": list(range(entry, n_bars)),
                         "loop_bars": r["loop_bars"], "freesound_id": r["id"], "username": r["username"],
-                        "license": r["license"], "source_bpm": r["bpm"], "tonality": r.get("tonality"),
+                        "license": r["license"], "source_bpm": r["bpm"], "bpm_source": r.get("bpm_source"),
+                        "tonality": r.get("tonality"),
                         "gain_db": round(gain_db, 2), "timeline": []})
     return master_and_meta(tracks, sources, sr, bar, n_bars, loop, step, rng, genre="freesound_loops",
                            generator="priism.lab.gen.fsloops",

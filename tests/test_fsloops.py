@@ -48,3 +48,13 @@ def test_arrange_from_loops(tmp_path):
             assert not np.any(t[: s["entry_bar"] * bar])
     folder = fsloops.generate(tmp_path, tmp_path / "out", count=1, duration_s=20, sample_rate=sr)[0]
     assert json.loads((tmp_path / "out" / "song_fs000000" / "meta.json").read_text())["genre"] == "freesound_loops"
+
+
+def test_loop_tempo():
+    r = {"name": "Lofi Drum Loop 70 BPM.wav", "tags": [], "duration": 13.71, "bpm": 76}
+    assert fsloops.loop_tempo(r) == (70, 4, "name")
+    r = {"name": "drums 120 bpm", "tags": [], "duration": 17.05, "bpm": 118}  # 8 bars and a tail
+    assert fsloops.loop_tempo(r) == (120, 8, "name")
+    r = {"name": "beat", "tags": [], "duration": 1.6, "bpm": 75}  # analysis an octave low: 150 bpm, 1 bar
+    assert fsloops.loop_tempo(r) == (150, 1, "analysis x2")
+    assert fsloops.loop_tempo({"name": "x", "tags": [], "duration": 5.3, "bpm": 100}) is None
