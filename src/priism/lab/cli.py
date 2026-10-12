@@ -316,8 +316,9 @@ def _registry_eval(args: argparse.Namespace) -> None:
     from .registry.evaluate import METHODS, compare, markdown
     from .registry.run import select
 
-    tune = [s for spec in args.tune for s in select(args.cache, spec)]
-    test = [s for spec in args.test for s in select(args.cache, spec)]
+    # Lazy: the workers reload each song from its path; the main process holds only names and labels.
+    tune = [s for spec in args.tune for s in select(args.cache, spec, lazy=True)]
+    test = [s for spec in args.test for s in select(args.cache, spec, lazy=True)]
     chunk = max(1, round(args.chunk / test[0].frame_s))
     jobs = args.jobs or max(1, (os.cpu_count() or 2) - 2)
     results = []

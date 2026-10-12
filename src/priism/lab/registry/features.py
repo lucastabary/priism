@@ -213,14 +213,19 @@ class Cached:
         return np.array([lab["instrument"] for lab in self.labels])
 
 
-def load_cache(path: str | Path) -> Cached:
+def load_cache(path: str | Path, lazy: bool = False) -> Cached:
+    """``lazy``: labels and frame rate only (no arrays decompressed), for a process that only hands paths to
+    workers; the arrays are then loaded by ``load_cache(song.path)`` where needed."""
     d = np.load(path)
+    if lazy:
+        empty = np.zeros((0, 0, 0), np.float16)
+        return Cached(Path(path).stem, empty, empty, json.loads(str(d["labels"])), float(d["frame_s"]), str(path))
     return Cached(Path(path).stem, d["tokens"].astype(np.float16), d["energy"].astype(np.float16),
                   json.loads(str(d["labels"])), float(d["frame_s"]), str(path))
 
 
-def load_set(folder: str | Path) -> list[Cached]:
-    return [load_cache(p) for p in sorted(Path(folder).glob("*.npz")) if not p.name.endswith(".tmp.npz")]
+def load_set(folder: str | Path, lazy: bool = False) -> list[Cached]:
+    return [load_cache(p, lazy) for p in sorted(Path(folder).glob("*.npz")) if not p.name.endswith(".tmp.npz")]
 
 
 # ------------------------------------------------------------------------------------------- song readers

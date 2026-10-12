@@ -84,13 +84,13 @@ def build_cache(trunk, sets: dict[str, tuple[str, Path]], out: str | Path, fit_s
     return info
 
 
-def select(cache: str | Path, spec: str) -> list[Cached]:
+def select(cache: str | Path, spec: str, lazy: bool = False) -> list[Cached]:
     """``set`` or ``set%dev`` / ``set%test``: the two halves of a set, split by a hash of the song name
     (stable whatever is added later), so thresholds can be tuned on one half of real songs and scored on
     the other. ``set%train`` / ``set%dev2`` split the dev half again (about 2/3 and 1/3, another hash), to
     train on real songs while ``%test`` stays exactly the half that phase 1 was scored on."""
     name, _, part = spec.partition("%")
-    songs = load_set(Path(cache) / name)
+    songs = load_set(Path(cache) / name, lazy)
     # A song's split key is its group_key when it has one (MoisesDB: the artist), so an artist never sits on
     # both sides of a split; otherwise its name.
     key = lambda s: (s.labels[0].get("group_key") if s.labels else None) or s.name
