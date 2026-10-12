@@ -7,7 +7,10 @@
 #   the agent reads every few seconds (pause freezes the running job at once, resume continues it);
 # - shows the agent's state (<cache>\.agent\status.json) and how long it worked in the last 24 h, 7 days,
 #   30 days and in all (<cache>\.agent\stats.json: job seconds per hour, pauses excluded);
-# - keeps the PC from going to sleep while a job runs (not while paused or idle).
+# - keeps the PC from going to sleep while a job runs (not while paused or idle);
+# - updates itself: the agent publishes its checkout's tray.ps1 in <cache>\.agent\ (so an `update` job
+#   reaches the tray too); when it differs from the running code and parses, it replaces this file and the
+#   tray restarts.
 # Everything goes through files in the cache folder: no network, no admin rights.
 #
 # Config: config.json next to this script, {"cache": "D:\\priism-cache", "distro": "Ubuntu", "quota_gb": 50}.
@@ -18,14 +21,16 @@ Add-Type -Namespace Priism -Name Power -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
 '@
 
-$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$SelfPath = $MyInvocation.MyCommand.Path
+$SelfBytes = [IO.File]::ReadAllBytes($SelfPath)  # the code running now, compared with what the agent publishes
+$Here = Split-Path -Parent $SelfPath
 $Config = [IO.File]::ReadAllText((Join-Path $Here 'config.json')) | ConvertFrom-Json
 $StateDir = Join-Path $Config.cache '.agent'
 $ControlPath = Join-Path $StateDir 'control.json'
 
-$created = $false
-$Mutex = New-Object System.Threading.Mutex($true, 'Local\priism-agent-tray', [ref]$created)
-if (-not $created) { exit 0 }  # already running
+$Mutex = New-Object System.Threading.Mutex($false, 'Local\priism-agent-tray')
+try { $owned = $Mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+if (-not $owned) { exit 0 }  # another tray is running
 
 # ------------------------------------------------------------------------------------------ files
 
@@ -76,7 +81,10 @@ function Get-Work {
 
 # ------------------------------------------------------------------------------------------ WSL
 
-$script:Keep = $null
+# Adopt the keep-alive of a previous tray (restart after a self-update) rather than piling up another one.
+$script:Keep = Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" |
+    Where-Object { $_.CommandLine -like '*sleep infinity*' } | Select-Object -First 1 |
+    ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
 function Ensure-Wsl {
     # A wsl.exe that never ends keeps the distro, and so systemd and the agent, running.
     if ($script:Keep -and -not $script:Keep.HasExited) { return }
@@ -190,6 +198,23 @@ function Update-Tray {
     [void][Priism.Power]::SetThreadExecutionState($(if ($running) { [uint32]'0x80000001' } else { [uint32]'0x80000000' }))
 }
 
+function Update-Self {
+    $new = Join-Path $StateDir 'tray.ps1'
+    if (-not (Test-Path -LiteralPath $new)) { return }
+    $bytes = [IO.File]::ReadAllBytes($new)
+    if ([Convert]::ToBase64String($bytes) -eq [Convert]::ToBase64String($SelfBytes)) { return }
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($new, [ref]$null, [ref]$errors)
+    if ($errors.Count -gt 0) { return }  # a broken script never replaces a working tray
+    [IO.File]::WriteAllBytes($SelfPath, $bytes)
+    $Timer.Stop()
+    $Tray.Visible = $false
+    $Mutex.ReleaseMutex()
+    Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$SelfPath`""
+    [System.Windows.Forms.Application]::Exit()
+}
+
 # ------------------------------------------------------------------------------------------ actions
 
 $ItemPause.add_Click({
@@ -241,7 +266,12 @@ $Tray.add_MouseClick({ param($sender, $e)
 
 $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = 5000
-$Timer.add_Tick({ try { Update-Tray } catch { } })
+$script:Ticks = 0
+$Timer.add_Tick({
+    try { Update-Tray } catch { }
+    $script:Ticks++
+    if ($script:Ticks % 12 -eq 0) { try { Update-Self } catch { } }  # every minute
+})
 $Timer.Start()
 try { Update-Tray } catch { }
 [System.Windows.Forms.Application]::Run()

@@ -196,6 +196,37 @@ class Agent:
             _write_json(path, st)
             self._work = {}
 
+    def publish_tray(self) -> None:
+        """Hand this checkout's tray script to the Windows tray, which replaces itself when it changes: an
+        ``update`` job (new code, agent restart) thus updates the tray too."""
+        src = self.repo / "pod" / "agent" / "windows" / "tray.ps1"
+        if not src.exists():
+            return
+        data = src.read_bytes()
+        dst = self.state_dir / "tray.ps1"
+        if not dst.exists() or dst.read_bytes() != data:
+            tmp = dst.with_name("tray.ps1.tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, dst)
+            self.log("tray script published for the owner's tray")
+        self._legacy_tray(data)
+
+    def _legacy_tray(self, data: bytes) -> None:
+        """Trays installed before self-update never look at .agent/tray.ps1: overwrite their file in
+        %LOCALAPPDATA% through WSL interop (taken at the owner's next logon). Best effort: no interop, no copy."""
+        if not Path("/mnt/c").exists():
+            return
+        try:
+            win = subprocess.run(["cmd.exe", "/c", "echo %LOCALAPPDATA%"], capture_output=True, text=True,
+                                 timeout=15, cwd="/mnt/c").stdout.strip()
+            local = subprocess.run(["wslpath", "-a", win], capture_output=True, text=True, timeout=15).stdout.strip()
+            target = Path(local) / "priism-agent" / "tray.ps1"
+            if target.exists() and target.read_bytes() != data:
+                target.write_bytes(data)
+                self.log(f"tray script updated in {win}\\priism-agent (applies at next logon)")
+        except Exception as e:
+            self.log(f"legacy tray not updated ({e!r})")
+
     def _sleep(self, seconds: float) -> None:
         """Sleep, but wake as soon as the owner changes something in the tray."""
         path = self.state_dir / "control.json"
@@ -210,6 +241,7 @@ class Agent:
 
     def run_forever(self, idle_poll: float = 60.0) -> None:
         self.log(f"agent {self.name} on {self.workdir}")
+        self.publish_tray()
         while True:
             try:
                 ran = self.step()

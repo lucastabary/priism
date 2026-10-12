@@ -192,3 +192,15 @@ def test_clean_refuses_outside_and_agent_state(tmp_path):
         with pytest.raises(JobRejected):
             validate(Job("clean", bad))
     validate(Job("clean", ["cache/synth-train", "data/ni-download"]))
+
+
+def test_tray_script_published_for_the_owner(tmp_path):
+    store, agent = make_agent(tmp_path)
+    src = tmp_path / "pod" / "agent" / "windows" / "tray.ps1"  # make_agent: repo = tmp_path
+    src.parent.mkdir(parents=True)
+    src.write_text("# v1")
+    agent.publish_tray()
+    assert (agent.state_dir / "tray.ps1").read_text() == "# v1"
+    src.write_text("# v2")
+    agent.publish_tray()
+    assert (agent.state_dir / "tray.ps1").read_text() == "# v2"
