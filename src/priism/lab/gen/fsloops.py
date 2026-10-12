@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly
+from scipy.signal import resample, resample_poly
 
 from .stemloops import _tile_loop, master_and_meta, write_song
 
@@ -158,7 +158,7 @@ def _compatible(a: tuple[int, str], b: tuple[int, str]) -> bool:
 
 
 _BPM_RX = re.compile(r"(\d{2,3})\s*[-_ ]?\s*bpm", re.IGNORECASE)
-LOOP_BARS = (1, 2, 4, 8, 16)
+LOOP_BARS = (1, 2, 4, 8)
 
 
 def loop_tempo(r: dict) -> tuple[int, int, str] | None:
@@ -214,25 +214,40 @@ def _read(path: str, sr: int) -> np.ndarray:
     return x
 
 
+NEAR_TEMPO = 0.03  # unpitched loops may come from a tempo this close (resampled; a 3 % pitch shift on drums)
+
+
+def _pool(loops: list[dict], bpm: int) -> list[dict]:
+    """Loops usable at ``bpm``: any loop at exactly that tempo, and unpitched ones within NEAR_TEMPO."""
+    return [r for r in loops if int(r["bpm"]) == bpm
+            or (r["category"] in UNPITCHED and abs(r["bpm"] - bpm) <= NEAR_TEMPO * bpm)]
+
+
 def arrange(loops: list[dict], sr: int, seed: int, duration_s: float = 75.0,
             n_range: tuple[int, int] = (3, 6)) -> tuple[np.ndarray, list[np.ndarray], dict]:
     """(mix (n, 2), tracks [(n, 2)], meta) of one strict-loop song from Freesound loops: one tempo, one key
     for the pitched parts, each part from a different uploader, entering one at a time."""
     rng = np.random.default_rng(seed)
-    by_bpm: dict = {}
-    for r in loops:
-        by_bpm.setdefault(int(r["bpm"]), []).append(r)
-    tempos = [b for b, rs in by_bpm.items() if len({r["username"] for r in rs}) >= 2
-              and len({r["category"] for r in rs}) >= 2]
-    if not tempos:
+    pools = {b: _pool(loops, b) for b in sorted({int(r["bpm"]) for r in loops})}
+    pools = {b: rs for b, rs in pools.items() if len({r["username"] for r in rs}) >= 2
+             and len({r["category"] for r in rs}) >= 2}
+    if not pools:
         raise ValueError("no tempo with loops from two uploaders and two categories")
-    bpm = int(rng.choice(tempos))
-    pool = [by_bpm[bpm][i] for i in rng.permutation(len(by_bpm[bpm]))]
+    # Tempi drawn in proportion to how many loops they offer: busy tempi (120, 128...) make fuller songs.
+    tempos = list(pools)
+    w = np.array([len(pools[b]) for b in tempos], float)
+    bpm = int(rng.choice(tempos, p=w / w.sum()))
+    pool = [pools[bpm][i] for i in rng.permutation(len(pools[bpm]))]
     want = int(rng.integers(n_range[0], n_range[1] + 1))
     picked, users, key = [], set(), None
-    for r in pool:  # the first pitched loop sets the key; one loop per uploader
-        if r["username"] in users or sum(p["category"] == r["category"] for p in picked) >= 2:
+    # Pitched parts first (the first one sets the key), then at most one drum and one percussion loop, so
+    # songs are not all drums: near-tempo drum loops far outnumber the pitched ones at any tempo.
+    for r in sorted(pool, key=lambda r: r["category"] in UNPITCHED):
+        if r["username"] in users or sum(p["category"] == r["category"] for p in picked) >= (
+                1 if r["category"] in UNPITCHED else 2):
             continue
+        if r["category"] not in UNPITCHED and len(picked) >= want - 1:
+            continue  # keep room for the rhythm section
         if r["key"] is not None:
             if key is not None and not _compatible(key, r["key"]):
                 continue
@@ -255,8 +270,11 @@ def arrange(loops: list[dict], sr: int, seed: int, duration_s: float = 75.0,
     tracks, sources = [], []
     for k, r in enumerate(picked):
         x = _read(r["file"], sr)
-        period = r["loop_bars"] * bar  # the file is one loop: trim or pad it to whole bars at the song tempo
-        x = np.pad(x, ((0, 0), (0, max(0, period - x.shape[1]))))[:, :period]
+        period = r["loop_bars"] * bar
+        own = int(round(r["loop_bars"] * 240.0 * sr / r["bpm"]))  # the loop at its own tempo, tail trimmed
+        x = np.pad(x, ((0, 0), (0, max(0, own - x.shape[1]))))[:, :own]
+        if own != period:  # a drum loop from a nearby tempo: one loop is periodic, so FFT resampling is exact
+            x = resample(x, period, axis=1).astype(np.float32)
         entry = min(k * step, last)
         y = _tile_loop(x, 0, period, entry * bar, n, 0).T  # no seam fade: loop files are made to repeat
         rms = np.sqrt(np.mean(x ** 2)) + 1e-12
