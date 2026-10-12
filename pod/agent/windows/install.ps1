@@ -10,7 +10,8 @@
 # inside Ubuntu). The script asks for the cache folder (where jobs keep data, models and results), its size
 # limit, and the two keys Lucas sends.
 #
-# -LocalRepo <priism checkout>: install from that checkout instead of GitHub (testing).
+# -LocalRepo <folder>: take install.sh and tray.ps1 from that folder (a priism checkout, or a USB drive with
+# pod\agent\...) instead of GitHub. install.sh still clones the priism code from GitHub.
 # -Uninstall: stop and remove the agent service and the tray icon; the cache folder stays (delete it by hand).
 param(
     [string]$Distro = 'Ubuntu',
@@ -151,7 +152,10 @@ if ($LASTEXITCODE -eq 0) {
 
 Step 'Installing the agent in Ubuntu (PyTorch with CUDA: a few GB, can take 10 minutes)'
 if ($LocalRepo) {
-    $script = ((Wsl --exec wslpath -a (Join-Path $LocalRepo 'pod\agent\install.sh')) | Select-Object -First 1).Trim()
+    # Copied to C: first: WSL may not see a USB drive plugged in after it started.
+    $local = Join-Path $App 'install.sh'
+    Copy-Item -Force (Join-Path $LocalRepo 'pod\agent\install.sh') $local
+    $script = ((Wsl --exec wslpath -a $local) | Select-Object -First 1).Trim()
 } else {
     $script = '/tmp/priism-agent-install.sh'
     Wsl --exec curl -fsSL "$Raw/install.sh" -o $script | Out-Null
