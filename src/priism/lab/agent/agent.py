@@ -1,8 +1,8 @@
 """The agent loop on the GPU machine (``priism-lab agent``): one job at a time, watched, synced.
 
 Each pass: heartbeat, finish syncing any job that ended while offline, then take the oldest pending job.
-A GPU job starts only when the GPU is free (low utilisation and memory over a few samples): the machine
-is someone's PC, and his own use comes first.
+A job starts whatever the GPU is doing: the owner decides, with the tray's pause, when his own use comes
+first (``wait_for_free_gpu`` brings back the old rule, a GPU job waiting for low utilisation and memory).
 
 While a job runs, every ``tick`` seconds the agent checks, following the lab rule that no long run is left
 unwatched (same checks as ``pod/guard.py``):
@@ -97,12 +97,14 @@ def _kill(proc) -> None:
 class Agent:
     def __init__(self, store, workdir: str | Path, repo: str | Path, name: str | None = None,
                  bin_dir: str | Path | None = None, gpu=gpu_stats, tick: float = 10.0, sync_every: float = 30.0,
+                 wait_for_free_gpu: bool = False,
                  free_util: int = 10, free_mem_mib: int = 1500, free_samples: int = 3, free_gap_s: float = 5.0,
                  quota_gb: float = 50.0, disk_every: float = 60.0, log=print):
         self.store, self.workdir, self.repo = store, Path(workdir), Path(repo)
         self.name = name or socket.gethostname()
         self.bin_dir = Path(bin_dir or Path(sys.executable).parent)
         self.gpu, self.tick, self.sync_every, self.log = gpu, tick, sync_every, log
+        self.wait_for_free_gpu = wait_for_free_gpu
         self.free = (free_util, free_mem_mib, free_samples, free_gap_s)
         self.state_dir = self.workdir / ".agent"
         (self.state_dir / "finished").mkdir(parents=True, exist_ok=True)
@@ -251,7 +253,7 @@ class Agent:
         if job.kind != "clean" and self.cache_full(force=True):
             self.heartbeat("waiting: cache full (clean jobs only)", job.id)
             return False
-        if job.gpu and job.kind != "clean" and not self.gpu_free():
+        if self.wait_for_free_gpu and job.gpu and job.kind != "clean" and not self.gpu_free():
             self.heartbeat("waiting: GPU busy", job.id)
             return False
         self.store.put(f"queue/running/{job.id}.json", job.to_json())

@@ -48,8 +48,14 @@ def test_rejected_job_goes_to_failed(tmp_path):
     assert "rejected" in json.loads(store.get("status/x.json"))["reason"]
 
 
-def test_gpu_busy_waits(tmp_path):
+def test_gpu_busy_starts_anyway_unless_asked_to_wait(tmp_path, monkeypatch):
     store, agent = make_agent(tmp_path, gpu=lambda: (95, 9000))
+    jid = jobs.submit(store, Job("phase1", ["probe"], gpu=False))  # gpu=False: no GPU-idle stop in the test
+    monkeypatch.setattr("priism.lab.agent.agent.commands", lambda j, *_: [[PY, "-c", "print('ran')"]])
+    assert agent.step()  # the owner's GPU use does not hold the job back; only his pause does
+    assert store.get(f"queue/done/{jid}.json") is not None
+
+    agent.wait_for_free_gpu = True
     jid = jobs.submit(store, Job("phase1", ["probe"]))
     assert not agent.step()
     assert store.get(f"queue/pending/{jid}.json") is not None  # still waiting
