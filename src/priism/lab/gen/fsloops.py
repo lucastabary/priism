@@ -87,7 +87,7 @@ def _search_tag(tag: str, category: str, key: str, limit: int, bpm_range: tuple[
 
 
 def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, dry_run: bool = False,
-          categories: list[str] | None = None) -> list[dict]:
+          categories: list[str] | None = None, also: list[str | Path] | None = None) -> list[dict]:
     """List CC0 loops per category, keep at most ``max_per_user`` per uploader (more kits, fewer copies of
     one), and download their HQ Ogg previews to ``out_dir/audio`` with ``out_dir/index.jsonl``. ``dry_run``
     lists and prints the expected download size without fetching any audio."""
@@ -98,8 +98,12 @@ def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, 
     out_dir = Path(out_dir)
     seen, per_user, rows = set(), {}, []
     have = set()
-    if (out_dir / "index.jsonl").exists():  # a second fetch adds to the folder: skip what it already holds
-        for line in (out_dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
+    # A second fetch adds to the folder, or to a new one while ``also`` lists earlier ones (e.g. while those are
+    # being copied elsewhere): skip the loops they already hold, and count their uploaders.
+    for f in [out_dir, *map(Path, also or [])]:
+        if not (f / "index.jsonl").exists():
+            continue
+        for line in (f / "index.jsonl").read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
             have.add(r["id"])
             per_user[r["username"]] = per_user.get(r["username"], 0) + 1
@@ -291,10 +295,11 @@ def arrange(loops: list[dict], sr: int, seed: int, duration_s: float = 75.0,
                            key=f"{NOTES[key[0]]} {key[1]}" if key else None)
 
 
-def generate(index_dir: str | Path, out_dir: str | Path, count: int, seed: int = 0, duration_s: float = 75.0,
+def generate(index_dir: str | Path | list, out_dir: str | Path, count: int, seed: int = 0, duration_s: float = 75.0,
              sample_rate: int = 44100) -> list[str]:
-    """``count`` arranged songs (``song_fs<seed>``) from the loops of a ``fetch`` folder."""
-    loops = load_index(index_dir)
+    """``count`` arranged songs (``song_fs<seed>``) from the loops of one or several ``fetch`` folders."""
+    dirs = index_dir if isinstance(index_dir, list) else [index_dir]
+    loops = [r for d in dirs for r in load_index(d)]
     print(f"{len(loops)} usable loops", flush=True)
     out = []
     for i in range(count):

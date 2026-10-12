@@ -32,7 +32,7 @@ def _freesound_fetch(args: argparse.Namespace) -> None:
     from .gen.fsloops import fetch
 
     fetch(args.out, per_category=args.per_category, max_per_user=args.max_per_user, dry_run=args.dry_run,
-          categories=args.categories)
+          categories=args.categories, also=args.also)
 
 
 def _gen_fsloops(args: argparse.Namespace) -> None:
@@ -466,10 +466,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-per-user", type=int, default=10, help="at most this many loops per uploader")
     p.add_argument("--dry-run", action="store_true", help="list only and print the download size")
     p.add_argument("--categories", nargs="*", help="only these categories (drums, bass, pad, keys...); default all")
+    p.add_argument("--also", nargs="*", help="earlier fetch folders: their loops are not fetched again")
     p.set_defaults(func=_freesound_fetch)
 
     p = sub.add_parser("gen-fsloops", help="strict-loop build-ups from downloaded Freesound loops")
-    p.add_argument("--index", required=True, help="folder written by freesound-fetch")
+    p.add_argument("--index", required=True, nargs="+", help="folder(s) written by freesound-fetch")
     p.add_argument("--out", required=True, help="output folder (gen layout)")
     p.add_argument("--count", type=int, default=100)
     p.add_argument("--seed", type=int, default=0)
