@@ -441,6 +441,11 @@ def _jobs(args: argparse.Namespace) -> None:
         for name, a in st["agents"].items():
             print(f"agent {name}: {a.get('state')} (job {a.get('job')}), seen {a['age_s'] / 60:.1f} min ago, "
                   f"gpu {a.get('gpu')}, version {a.get('version')}{', PAUSED by its owner' if a.get('paused') else ''}")
+            if a.get("hardware"):
+                h = a["hardware"]
+                gpus = ", ".join(f"{g['name']} {g['vram_mib'] / 1024:.0f} GB" for g in h.get("gpus", [])) or "no GPU"
+                print(f"  {gpus}; {h.get('cpus')} CPUs; {h.get('ram_gb')} GB RAM; torch {h.get('torch')}; "
+                      f"{h.get('disk_free_gb')} GB free on the work drive")
             if a.get("disk"):
                 d = a["disk"]
                 top = ", ".join(f"{k} {v:g}" for k, v in d.get("top_gb", {}).items())

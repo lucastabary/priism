@@ -204,3 +204,11 @@ def test_tray_script_published_for_the_owner(tmp_path):
     src.write_text("# v2")
     agent.publish_tray()
     assert (agent.state_dir / "tray.ps1").read_text() == "# v2"
+
+
+def test_heartbeat_reports_hardware(tmp_path):
+    store, agent = make_agent(tmp_path)
+    agent.heartbeat("idle")
+    hw = json.loads(store.get("agents/pc.json"))["hardware"]
+    assert hw["cpus"] >= 1 and hw["disk_free_gb"] > 0 and isinstance(hw["gpus"], list)
+    validate(Job("priism-lab", ["registry-encoders", "--cache", "cache"]))

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -137,9 +138,50 @@ class Agent:
         self._local(state, job)
         self._try(self.store.put, f"agents/{self.name}.json", json.dumps(
             {"time": time.time(), "state": state, "job": job, "gpu": g, "version": self._version(),
+             "hardware": self.hardware(),
              "paused": self.control()["paused"],
              "disk": {"used_gb": round(used / 1e9, 2), "quota_gb": self.quota(),
                       "top_gb": {k: round(v / 1e9, 2) for k, v in top.items()}}}).encode())
+
+    def hardware(self) -> dict:
+        """What jobs can be sized on (measured once; free disk every time): GPUs, CPUs this process may use
+        (affinity, capped by a cgroup quota), RAM as this OS sees it (under WSL: the WSL limit)."""
+        if not hasattr(self, "_hw"):
+            hw: dict = {"gpus": [], "cpus": os.cpu_count()}
+            try:
+                out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                                      "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                                     timeout=30).stdout
+                hw["gpus"] = [{"name": n.strip(), "vram_mib": int(m), "driver": d.strip()}
+                              for n, m, d in (line.split(",") for line in out.strip().splitlines())]
+            except Exception:
+                pass
+            if hasattr(os, "sched_getaffinity"):
+                hw["cpus"] = len(os.sched_getaffinity(0))
+            try:  # cgroup v2 quota, "max 100000" when unlimited
+                quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+                if quota != "max":
+                    hw["cpus"] = min(hw["cpus"], max(1, int(int(quota) / int(period))))
+            except (OSError, ValueError):
+                pass
+            try:
+                kb = next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines()
+                          if line.startswith("MemTotal:"))
+                hw["ram_gb"] = round(kb / 1e6, 1)
+            except (OSError, StopIteration, ValueError):
+                pass
+            try:  # from the package metadata: importing torch would cost the agent hundreds of MB for good
+                from importlib.metadata import version
+
+                hw["torch"] = version("torch")
+            except Exception:
+                pass
+            self._hw = hw
+        try:
+            free = shutil.disk_usage(self.workdir).free
+        except OSError:
+            free = None
+        return {**self._hw, "disk_free_gb": round(free / 1e9, 1) if free is not None else None}
 
     def _version(self) -> str:
         try:
