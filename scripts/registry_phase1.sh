@@ -17,7 +17,12 @@
 set -euo pipefail
 STAGE=${1:?usage: registry_phase1.sh probe|gen|cache|full|eval}
 PRIISM=${PRIISM:?set PRIISM to a checkout of the priism repo (branch lab/registry)}
-WORKERS=${WORKERS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}
+# Generation workers: PRIISM_WORKERS (allowed through the R2 agent) or WORKERS, else cores - 2, capped by RAM
+# (~1.5 GB per worker at peak: a 12 GB WSL machine must not run 10).
+ram_gb=$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo 2>/dev/null || echo 16)
+WORKERS=${WORKERS:-${PRIISM_WORKERS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}}
+WORKERS=$(( WORKERS * 3 / 2 > ram_gb - 3 ? (ram_gb - 3) * 2 / 3 : WORKERS ))
+WORKERS=$(( WORKERS < 1 ? 1 : WORKERS ))
 N_TRAIN=${N_TRAIN:-200}
 N_VALID=${N_VALID:-50}
 MODELS=${MODELS:-models} MSST=${MSST:-msst} DATA=${DATA:-data} CACHE=${CACHE:-cache}
