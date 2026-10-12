@@ -14,6 +14,7 @@ The sources are stem groups, not single instruments (a drum loop is kick + hats 
 from __future__ import annotations
 
 import json
+import re
 import zlib
 from pathlib import Path
 
@@ -25,7 +26,10 @@ from .song import GAIN_HOP_S, _json_default, _master_gains, entry_quality
 
 # A stem loops when two consecutive copies of the window match by at least this SDR on magnitude
 # spectrograms (both pairs of a three-copy window; see ``loop_windows``).
-LOOP_SDR_DB = 8.0
+LOOP_SDR_DB = 6.0  # 8 dB in the first set (data/stemloops-train, 11 of 21 songs); each stem's score is in meta
+# Stems whose name (NI metadata) marks them as unpitched: they follow no chords, so each may loop from its own
+# best window of the song instead of the shared one (same tempo, same loop length).
+UNPITCHED = re.compile(r"^\s*(drums?|perc\w*|kicks?|beats?|tops?)\s*$", re.IGNORECASE)
 # A stem counts as playing in the window when its RMS is at most this far below its peak.
 ACTIVE_DB = -40.0
 SCORE_DECIM = 4  # loop scores are computed at sample_rate / SCORE_DECIM
@@ -123,18 +127,71 @@ def _tile_loop(x: np.ndarray, start: int, period: int, entry: int, n: int, fade:
     return out
 
 
+def stem_names(path: str | Path) -> list[str] | None:
+    """Stem names from a NI .stem.mp4 (the JSON of its ``stem`` box: "Drums", "Bass", "Synths"...)."""
+    raw = Path(path).read_bytes()
+    i = raw.find(b'stem{"')
+    if i < 0:
+        return None
+    try:
+        d, _ = json.JSONDecoder().raw_decode(raw[i + 4: i + 65536].decode("utf-8", "replace"))
+        return [str(x.get("name", "")).strip() for x in d["stems"]]
+    except (ValueError, KeyError):
+        return None
+
+
+def plans(windows: list[dict], free: set[int], top: int = 5) -> list[dict]:
+    """Candidate arrangements, best first: a shared window for the pitched stems that loop in it, plus, for
+    every unpitched stem (``free``), its own best windows of the same loop length. A plan needs two looping
+    stems in all."""
+    own: dict = {}
+    for w in windows:
+        for j in free:
+            v = w["sdr_db"][j]
+            if v is not None and v >= LOOP_SDR_DB:
+                own.setdefault((w["loop_bars"], j), []).append(w)
+    for k in own:
+        own[k] = sorted(own[k], key=lambda w: -w["sdr_db"][k[1]])[:3]
+    out = []
+    for w in windows:
+        pitched = [j for j, v in enumerate(w["sdr_db"]) if j not in free and v is not None and v >= LOOP_SDR_DB]
+        drums = {j: own[w["loop_bars"], j] for j in free if (w["loop_bars"], j) in own}
+        if len(pitched) + len(drums) >= 2:
+            score = float(np.mean([w["sdr_db"][j] for j in pitched])) if pitched else 0.0
+            out.append({"window": w, "pitched": pitched, "unpitched": drums, "n": len(pitched) + len(drums),
+                        "score": score})
+    out.sort(key=lambda p: (-p["n"], -p["score"], p["window"]["loop_bars"]))
+    # Plans with no pitched stem differ only by an unused window: keep one per loop length.
+    seen, uniq = set(), []
+    for p in out:
+        key = (p["window"]["loop_bars"], "none") if not p["pitched"] else id(p)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq[:top]
+
+
 def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, windows: list[dict] | None = None,
-            bar: int | None = None, top: int = 5) -> tuple[np.ndarray, list[np.ndarray], dict]:
+            bar: int | None = None, top: int = 5, names: list[str] | None = None) -> tuple[np.ndarray, list[np.ndarray], dict]:
     """(mix (n, 2), tracks [(n, 2)], meta) of one strict-loop song from one NI song's stems (4, 2, S).
-    ``seed`` picks the window among the ``top`` best, the entry order, the step and the master settings."""
+    ``seed`` picks the plan among the ``top`` best (and each unpitched stem's window among its 3 best), the
+    entry order, the step and the master settings. ``names`` (``stem_names``) tells which stems are unpitched."""
     rng = np.random.default_rng(seed)
     bar = bar or bar_period(stems.sum(0).mean(0), sr)
     windows = windows if windows is not None else loop_windows(stems, bar)
-    cands = [w for w in windows if w["looping"] >= 2][:top]
+    free = {j for j, nm in enumerate(names or []) if UNPITCHED.match(nm)}
+    cands = plans(windows, free, top)
     if not cands:
         raise ValueError("no window where two stems or more loop")
-    w = cands[int(rng.integers(len(cands)))]
-    ids = [j for j, v in enumerate(w["sdr_db"]) if v is not None and v >= LOOP_SDR_DB]
+    plan = cands[int(rng.integers(len(cands)))]
+    w = plan["window"]
+    starts = {j: w["start"] for j in plan["pitched"]}
+    for j, ws in plan["unpitched"].items():
+        starts[j] = ws[int(rng.integers(len(ws)))]["start"]
+    sdr = {j: (w["sdr_db"][j] if j in plan["pitched"] else
+               next(x for x in windows if x["start"] == starts[j] and x["loop_bars"] == w["loop_bars"])["sdr_db"][j])
+           for j in starts}
+    ids = sorted(starts)
     loop = w["loop_bars"]
     period = loop * bar
     n_bars = max(4 * loop, int(round(duration_s * sr / bar / loop)) * loop)
@@ -150,10 +207,12 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
     tracks, sources = [], []
     for k, j in enumerate(order):
         entry = min(k * step, last)
-        tracks.append(_tile_loop(stems[j], w["start"], period, entry * bar, n, fade).T)
-        sources.append({"id": k, "kind": "stem_group", "family": "stem_group", "stem": j, "twin_of": None,
-                        "merge_group": None, "entry_bar": entry, "bars": list(range(entry, n_bars)),
-                        "loop_sdr_db": round(float(w["sdr_db"][j]), 2), "timeline": []})
+        tracks.append(_tile_loop(stems[j], starts[j], period, entry * bar, n, fade).T)
+        sources.append({"id": k, "kind": "stem_group", "family": "stem_group", "stem": j,
+                        "stem_name": names[j] if names else None, "twin_of": None, "merge_group": None,
+                        "entry_bar": entry, "bars": list(range(entry, n_bars)), "loop_sdr_db": round(float(sdr[j]), 2),
+                        "window_start_s": round(starts[j] / sr, 3), "own_window": j in plan["unpitched"],
+                        "timeline": []})
 
     # Master stage as in ``song.render_song``: one gain curve on the sum, applied to every track.
     mix = np.sum(tracks, axis=0)
@@ -172,7 +231,7 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
             "genre": "stem_loops", "master": master, "sources": sources, "generator": "priism.lab.gen.stemloops",
             "buildup": {"strict": True, "loop_bars": loop, "step_bars": step, "bar_samples": bar,
                         "end_bar": min(n_bars, len(order) * step), "entries": sorted({s["entry_bar"] for s in sources}),
-                        "window_start_s": round(w["start"] / sr, 3),
+                        "window_start_s": round(w["start"] / sr, 3) if plan["pitched"] else None,
                         "master_gain_per_bar": [round(float(np.mean(g[b * bar:(b + 1) * bar])), 5)
                                                 for b in range(n_bars)]},
             "_master_gain": g[: len(g) // hop * hop].reshape(-1, hop).mean(axis=1).astype(np.float32)}
@@ -217,12 +276,13 @@ def generate(data: str | Path, out_dir: str | Path, per_song: int = 4, seed: int
         _, stems = read_stem_mp4(p, sample_rate)
         bar = bar_period(stems.sum(0).mean(0), sample_rate)
         windows = loop_windows(stems, bar)
-        if not windows or windows[0]["looping"] < 2:
+        names = stem_names(p)
+        if not plans(windows, {j for j, nm in enumerate(names or []) if UNPITCHED.match(nm)}):
             print(f"skip {name}: fewer than two looping stems", flush=True)
             continue
         for k in todo:
             mix, tracks, meta = arrange(stems, sample_rate, seed + 1000 * k + zlib.crc32(name.encode()) % 997,
-                                        duration_s, windows, bar)
+                                        duration_s, windows, bar, names=names)
             meta.update(ni_song=name, variant=k)
             out.append(str(write_song(mix, tracks, meta, Path(out_dir) / f"{name}__loop{k}")))
             print(f"song {len(out)}: {out[-1]} ({len(tracks)} stems, loop {meta['buildup']['loop_bars']} bar)",

@@ -59,3 +59,21 @@ def test_entry_quality_on_exact_loops():
     # Recomputed from the mix alone, the drift is the same (it never needs the stems).
     again = entry_quality(mix, meta["buildup"])
     assert [r["drift_db"] for r in again] == [r["drift_db"] for r in rows]
+
+
+def test_unpitched_stems_take_their_own_window():
+    sr, bar, n_bars = 8000, 16000, 24
+    rng = np.random.default_rng(1)
+    stems = _fake_stems(sr, bar, n_bars, rng)
+    half = n_bars // 2 * bar
+    stems[0, :, half:] = rng.normal(0, 0.1, (2, stems.shape[2] - half))  # drums loop in the first half only
+    stems[1, :, :half] = rng.normal(0, 0.1, (2, half))  # the tone loops in the second half only
+    stems[2] = 0.0
+    names = ["Drums", "Bass", "Synths", "Vox"]
+    windows = stemloops.loop_windows(stems, bar, loops=(1,))
+    assert not stemloops.plans(windows, set())  # one shared window never holds two looping stems
+    mix, tracks, meta = stemloops.arrange(stems, sr, seed=0, duration_s=20, windows=windows, bar=bar, names=names)
+    by = {s["stem_name"]: s for s in meta["sources"]}
+    assert set(by) == {"Drums", "Bass"} and by["Drums"]["own_window"] and not by["Bass"]["own_window"]
+    assert by["Drums"]["window_start_s"] * sr < half <= by["Bass"]["window_start_s"] * sr
+    assert stemloops.UNPITCHED.match("Perc") and not stemloops.UNPITCHED.match("808")
