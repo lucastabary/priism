@@ -169,3 +169,42 @@ def markdown(result: dict) -> str:
                 lines.append(f"| {name} | {c['n']} | {c['mean_diff']:.3f} [{c['ci95'][0]:.3f}, {c['ci95'][1]:.3f}] "
                              f"| {c['d_z']:.2f} | {c.get('wilcoxon_p_holm', c['wilcoxon_p']):.3g} |")
     return "\n".join(lines)
+
+
+MERGE_CUTS = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+
+
+def _song_merge(args) -> tuple[str, dict]:
+    """One song: the method at its tuned threshold, then co-activation merges (every cut, and oracle n)."""
+    from .track import merge_coactive
+
+    path, chunk, method, param = args
+    song = load_cache(path)
+    _, audible = ownership(song.energy)
+    lab, _ = run_method(method, song.tokens, audible, chunk, param)
+    out = {"none": score(lab, song.energy, chunk)}
+    for c in MERGE_CUTS:
+        out[str(c)] = score(merge_coactive(lab, threshold=c), song.energy, chunk)
+    out["oracle_n"] = score(merge_coactive(lab, n=song.energy.shape[0]), song.energy, chunk)
+    return song.name, out
+
+
+def merge_compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, params: dict[str, float],
+                  jobs: int = 1, log=_log) -> dict:
+    """Co-activation merge on top of each method's tuned labels: merge cut tuned on ``tune_songs`` (V-measure),
+    scored on ``test_songs``, next to no merge and the oracle-n merge (an upper bound, n = true stem count)."""
+    out = {}
+    for method, param in params.items():
+        if method == "one":
+            continue
+        tasks = [(s.path, chunk, method, param) for s in tune_songs + test_songs]
+        with ProcessPoolExecutor(jobs) as ex:
+            rows = dict(ex.map(_song_merge, tasks))
+        cut = max(MERGE_CUTS, key=lambda c: np.mean([rows[s.name][str(c)]["v_measure"] for s in tune_songs]))
+        test = {k: [rows[s.name][k]["v_measure"] for s in test_songs] for k in ("none", str(cut), "oracle_n")}
+        out[method] = {"param": param, "merge_cut": cut, "songs": [s.name for s in test_songs],
+                       "v_none": test["none"], "v_merged": test[str(cut)], "v_oracle_n": test["oracle_n"],
+                       "clusters_merged": [rows[s.name][str(cut)]["n_clusters"] for s in test_songs]}
+        log(f"{method}: V none {np.mean(test['none']):.3f}, merged (cut {cut}) {np.mean(test[str(cut)]):.3f}, "
+            f"oracle-n {np.mean(test['oracle_n']):.3f}")
+    return out

@@ -170,3 +170,33 @@ def online_registry(emb: np.ndarray, active: np.ndarray, chunk: int, tau: float,
     if two_pass and len(reg):
         out[active] = (x[active] @ reg.T).argmax(1)
     return out, births, reg
+
+
+def merge_coactive(labels: np.ndarray, bin_frames: int = 21, threshold: float | None = None, n: int | None = None
+                   ) -> np.ndarray:
+    """Merge clusters that play together over the song (temporal co-activation), for scoring against grouped
+    references: a head trained on fine synthetic identity splits a "Drums" stem into kick / hats / snare,
+    which are always active together. Each cluster's activity is its share of tokens per bin of
+    ``bin_frames`` frames (~1 s); clusters are merged by average linkage on 1 - correlation of those curves,
+    cut at ``threshold`` or into ``n`` groups (n = the number of references is an oracle: an upper bound)."""
+    K = int(labels.max()) + 1 if (labels >= 0).any() else 0
+    if K < 2:
+        return labels.copy()
+    T = labels.shape[0]
+    n_bins = -(-T // bin_frames)
+    act = np.zeros((K, n_bins))
+    for b in range(n_bins):
+        lab = labels[b * bin_frames:(b + 1) * bin_frames]
+        lab = lab[lab >= 0]
+        if lab.size:
+            act[:, b] = np.bincount(lab, minlength=K) / lab.size
+    live = act.std(1) > 0
+    groups = np.arange(K)
+    if live.sum() >= 2:
+        z = linkage(act[live], method="average", metric="correlation")
+        g = fcluster(z, n, criterion="maxclust") if n else fcluster(z, threshold, criterion="distance")
+        groups[live] = K + g  # merged ids; constant (always / never active) clusters keep their own
+    _, groups = np.unique(groups, return_inverse=True)
+    out = labels.copy()
+    out[labels >= 0] = groups[labels[labels >= 0]]
+    return out
