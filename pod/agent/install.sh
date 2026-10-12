@@ -22,7 +22,8 @@ export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}  # systemctl --use
 case $WORKDIR in *'"'*|*'\'*) echo "WORKDIR must not contain quotes or backslashes: $WORKDIR"; exit 1;; esac
 
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: install the NVIDIA driver (Windows side for WSL)"; exit 1; }
-for pkg in git ffmpeg unzip curl python3-venv; do
+# build-essential, python3-dev: some lab dependencies (MSST: diffq, pesq) build C extensions.
+for pkg in git ffmpeg unzip curl python3-venv build-essential python3-dev; do
   dpkg -s "$pkg" >/dev/null 2>&1 || sudo apt-get install -y -q "$pkg"
 done
 

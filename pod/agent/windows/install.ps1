@@ -88,8 +88,9 @@ if grep -q '^\[boot\]' $f; then sed -i '/^systemd *=/d; /^\[boot\]/a systemd=tru
     if ($pid1 -ne 'systemd') { Fail "systemd did not start in $Distro (PID 1 is $pid1). Run 'wsl --update' and try again." }
 }
 
-Step 'Installing system packages in Ubuntu (git, ffmpeg, python venv)'
-WslSh -Root 'apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q git ffmpeg unzip curl python3-venv >/dev/null' | Out-Null
+Step 'Installing system packages in Ubuntu (git, ffmpeg, python venv, C compiler)'
+# build-essential, python3-dev: some lab dependencies (MSST: diffq, pesq) build C extensions.
+WslSh -Root 'apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q git ffmpeg unzip curl python3-venv build-essential python3-dev >/dev/null' | Out-Null
 # Linger: the user's services run without a login shell (WSL is kept open by the tray, not by a terminal).
 Wsl -u root --exec loginctl enable-linger $user | Out-Null
 

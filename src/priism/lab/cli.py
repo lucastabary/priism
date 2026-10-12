@@ -413,6 +413,9 @@ def _jobs(args: argparse.Namespace) -> None:
 
     from .agent import jobs
 
+    # Remote logs hold any character (pip's box drawing...); a Windows console encoding must not crash on them.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     store = _store(args)
     if args.action == "submit":
         # Submit options go before the kind; everything after the kind is the job's own arguments (which
