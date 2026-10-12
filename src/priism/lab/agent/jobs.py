@@ -107,7 +107,8 @@ def commands(job: Job, repo: Path, bin_dir: Path) -> list[list[str]]:
     branch = job.args[0]
     return [["git", "-C", str(repo), "fetch", "origin", branch],
             ["git", "-C", str(repo), "checkout", "--detach", f"origin/{branch}"],
-            [exe("python"), "-m", "pip", "install", "-q", "-e", f"{repo}[lab]"]]
+            [exe("python"), "-m", "pip", "install", "-q", "-e", f"{repo}[lab,fast]"],  # fast: numba (generator)
+            [exe("python"), "-c", "import numba, torch; print('numba', numba.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"]]
 
 
 # ------------------------------------------------------------------------------------------- client side
