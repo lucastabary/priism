@@ -95,6 +95,20 @@ def _kill(proc) -> None:
         proc.terminate()
 
 
+def _log_grew(logf: Path, known: int) -> tuple[int, bool]:
+    """(length, grew) of a log the child appends to through its own file descriptor. The length comes from
+    reading past the known end, never from ``stat``: on the work folder of a WSL2 agent (a Windows drive,
+    9P) ``st_mtime``/``st_size`` stay frozen at the first write while the child keeps writing, which made
+    the stall guard kill healthy jobs exactly ``stall_minutes`` after they started."""
+    try:
+        with logf.open("rb") as f:
+            f.seek(known)
+            new = len(f.read())
+    except OSError:
+        return known, False
+    return known + new, new > 0
+
+
 class Agent:
     def __init__(self, store, workdir: str | Path, repo: str | Path, name: str | None = None,
                  bin_dir: str | Path | None = None, gpu=gpu_stats, tick: float = 10.0, sync_every: float = 30.0,
@@ -373,6 +387,7 @@ class Agent:
         """Watch a job until it ends or must stop. The owner's pauses count for none of the limits: the
         stall and GPU-idle clocks restart at each resume, the time cap counts active time only."""
         idle_since, last_sync, last, paused_s, frozen, resumed = None, 0.0, time.time(), 0.0, False, start
+        log_len, log_grew = 0, start  # the log's real length and when it last grew: see _log_grew
         self._job_start = start
         if hasattr(signal, "SIGCONT"):  # a job found frozen after an agent restart: the loop refreezes it if paused
             _signal_group(proc, signal.SIGCONT)
@@ -397,9 +412,12 @@ class Agent:
                 self._count_work(dt)
             self._local("paused" if frozen else "running", job.id, start)
             stop = None
+            log_len, grew = _log_grew(logf, log_len)
+            if grew:
+                log_grew = now
             if frozen:
                 pass
-            elif now - max(logf.stat().st_mtime, resumed) > job.stall_minutes * 60:
+            elif now - max(log_grew, resumed) > job.stall_minutes * 60:
                 stop = f"no log output for {job.stall_minutes:g} min"
             elif now - start - paused_s > job.max_minutes * 60:
                 stop = f"time cap {job.max_minutes:g} min"
