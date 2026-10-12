@@ -38,6 +38,17 @@ NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 _FLAT = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
 
 
+# The key may also live in this file (outside any repo), which running processes see without a restart.
+KEY_FILE = Path.home() / ".config" / "priism" / "freesound.key"
+
+
+def api_key() -> str | None:
+    key = os.environ.get("FREESOUND_API_KEY")
+    if not key and KEY_FILE.exists():
+        key = KEY_FILE.read_text(encoding="utf-8-sig").strip()
+    return key or None
+
+
 def _get(url: str, key: str) -> dict:
     req = urllib.request.Request(url, headers={"Authorization": f"Token {key}"})
     with urllib.request.urlopen(req, timeout=60) as r:
@@ -65,9 +76,10 @@ def fetch(out_dir: str | Path, per_category: int = 300, max_per_user: int = 10, 
     """List CC0 loops per category, keep at most ``max_per_user`` per uploader (more kits, fewer copies of
     one), and download their HQ Ogg previews to ``out_dir/audio`` with ``out_dir/index.jsonl``. ``dry_run``
     lists and prints the expected download size without fetching any audio."""
-    key = os.environ.get("FREESOUND_API_KEY")
+    key = api_key()
     if not key:
-        raise SystemExit("set FREESOUND_API_KEY (an API key from https://freesound.org/apiv2/apply)")
+        raise SystemExit(f"set FREESOUND_API_KEY or write the key to {KEY_FILE} "
+                         "(an API key from https://freesound.org/apiv2/apply)")
     out_dir = Path(out_dir)
     seen, per_user, rows = set(), {}, []
     for cat in CATEGORIES:
