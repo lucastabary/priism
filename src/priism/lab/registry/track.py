@@ -60,12 +60,13 @@ def kmeanspp(x: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def cluster(x: np.ndarray, rng: np.random.Generator, threshold: float | None = None, n: int | None = None,
-            micro: int = 128) -> tuple[np.ndarray, np.ndarray]:
+            micro: int = 128, kmeans=None) -> tuple[np.ndarray, np.ndarray]:
     """Unit rows (N, d) -> (centroids (K, d), assignment (N,)): micro k-means, then average linkage on the
-    micro centroids cut at cosine distance ``threshold`` (or into ``n`` clusters)."""
+    micro centroids cut at cosine distance ``threshold`` (or into ``n`` clusters). ``kmeans``: a drop-in
+    for ``spherical_kmeans`` (the GPU one, ``track_gpu``)."""
     if len(x) == 0:
         return np.zeros((0, x.shape[1])), np.zeros(0, int)
-    mc, ma = spherical_kmeans(x, min(micro, max(1, len(x) // 8)), rng)
+    mc, ma = (kmeans or spherical_kmeans)(x, min(micro, max(1, len(x) // 8)), rng)
     if len(mc) == 1:
         return mc, np.zeros(len(x), int)
     z = linkage(mc, method="average", metric="cosine")
@@ -235,7 +236,7 @@ def whole_song_sweep(emb: np.ndarray, active: np.ndarray, thresholds, seed: int 
 
 
 def online_registry(emb: np.ndarray, active: np.ndarray, chunk: int, tau: float, min_mass: float = 0.03,
-                    ema: float = 0.1, two_pass: bool = True, seed: int = 0
+                    ema: float = 0.1, two_pass: bool = True, seed: int = 0, kmeans=None
                     ) -> tuple[np.ndarray, list[tuple[int, int]], np.ndarray]:
     """-> (labels (T, Nb), births [(frame, id)], registry centroids (K, d)).
 
@@ -260,7 +261,7 @@ def online_registry(emb: np.ndarray, active: np.ndarray, chunk: int, tau: float,
             lab[known] = best[known]
         rest = np.where(lab < 0)[0]
         if len(rest) >= min_mass * len(xc):
-            cent, sub = cluster(xc[rest], rng, 1 - tau)
+            cent, sub = cluster(xc[rest], rng, 1 - tau, kmeans=kmeans)
             for j in range(len(cent)):
                 members = rest[sub == j]
                 if len(members) >= min_mass * len(xc):
@@ -277,6 +278,15 @@ def online_registry(emb: np.ndarray, active: np.ndarray, chunk: int, tau: float,
     if two_pass and len(reg):
         out[active] = (x[active] @ reg.T).argmax(1)
     return out, births, reg
+
+
+def second_pass(emb: np.ndarray, active: np.ndarray, labels: np.ndarray, reg: np.ndarray) -> np.ndarray:
+    """``online_registry(two_pass=True)``'s labels from a ``two_pass=False`` run (its labels and registry):
+    the first pass does not depend on ``two_pass``, so one run serves both methods."""
+    out = labels.copy()
+    if len(reg):
+        out[active] = (normalise(emb)[active] @ reg.T).argmax(1)
+    return out
 
 
 def merge_coactive(labels: np.ndarray, bin_frames: int = 21, threshold: float | None = None, n: int | None = None

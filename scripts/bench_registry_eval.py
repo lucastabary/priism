@@ -124,6 +124,7 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--skip-old", action="store_true", help="no reference run (it is the slow one)")
     args = ap.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)  # readable while it runs, even redirected
 
     methods = tuple(args.methods.split(","))
     tune = select(args.cache, args.tune, lazy=True)[: args.n_tune]

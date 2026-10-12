@@ -22,8 +22,8 @@ import numpy as np
 
 from .features import Cached, load_cache
 from .metrics import ownership, paired_compare, score
-from .track import (online_registry, per_chunk, per_chunk_linked, per_chunk_linked_sweep, per_chunk_sweep, whole_song,
-                    whole_song_sweep)
+from .track import (online_registry, per_chunk, per_chunk_linked, per_chunk_linked_sweep, per_chunk_sweep,
+                    second_pass, whole_song, whole_song_sweep)
 
 
 def _log(*a) -> None:  # flushed: a redirected log shows progress as it happens
@@ -76,11 +76,12 @@ def _embedder(head: str | None):
 
 
 def method_sweep(name: str, emb: np.ndarray, audible: np.ndarray, chunk: int, params, seed: int = 0,
-                 device: str = "cpu") -> dict[float, tuple[np.ndarray, list | None]]:
+                 device: str = "cpu", memo: dict | None = None) -> dict[float, tuple[np.ndarray, list | None]]:
     """{param: ``run_method(name, emb, audible, chunk, param, seed)``} for every param, sharing the work that
     does not depend on it (``track.*_sweep``: identical labels). The online registries depend on tau from
-    their first chunk on, so they run once per tau. ``device`` "cuda": the micro k-means and the final
-    assignment on the GPU (``track_gpu``; same algorithm, float32 rounding of another library)."""
+    their first chunk on, so they run once per tau, but ``online`` and ``online_two_pass`` share that run
+    (through ``memo``, one dict per song). ``device`` "cuda": the micro k-means and the final assignment on
+    the GPU (``track_gpu``; same algorithm, float32 rounding of another library)."""
     kw = {}
     if device != "cpu":
         from .track_gpu import gpu_ops
@@ -94,6 +95,16 @@ def method_sweep(name: str, emb: np.ndarray, audible: np.ndarray, chunk: int, pa
                 per_chunk_linked_sweep(emb, audible, chunk, params, seed, kmeans=kw.get("kmeans")).items()}
     if name == "whole_song":
         return {g: (lab, None) for g, lab in whole_song_sweep(emb, audible, params, seed, **kw).items()}
+    if name in ("online", "online_two_pass"):
+        memo = {} if memo is None else memo
+        out = {}
+        for g in params:
+            if ("online", g, seed) not in memo:
+                memo[("online", g, seed)] = online_registry(emb, audible, chunk, g, two_pass=False, seed=seed,
+                                                            kmeans=kw.get("kmeans"))
+            lab, births, reg = memo[("online", g, seed)]
+            out[g] = (second_pass(emb, audible, lab, reg) if name == "online_two_pass" else lab, births)
+        return out
     return {g: run_method(name, emb, audible, chunk, g, seed) for g in params}
 
 
@@ -110,9 +121,9 @@ def _song_grid(args) -> tuple[str, dict]:
     groups = song.instruments if level == "instrument" else None
     energy = song.energy  # float16 -> float32 expansion once, not once per cell
     owned = ownership(energy, groups)
-    out = {}
+    out, memo = {}, {}
     for m, gs in params:
-        for g, (lab, births) in method_sweep(m, emb, owned[1], chunk, gs, device=device).items():
+        for g, (lab, births) in method_sweep(m, emb, owned[1], chunk, gs, device=device, memo=memo).items():
             out[(m, g)] = score(lab, energy, chunk, groups, births=births, owned=owned)
     return song.name, out
 

@@ -7,8 +7,8 @@ import pytest
 from test_registry import _cached_toys, toy_song
 
 from priism.lab.registry.evaluate import compare
-from priism.lab.registry.track import (per_chunk, per_chunk_linked, per_chunk_linked_sweep, per_chunk_sweep,
-                                       whole_song, whole_song_sweep)
+from priism.lab.registry.track import (online_registry, per_chunk, per_chunk_linked, per_chunk_linked_sweep,
+                                       per_chunk_sweep, second_pass, whole_song, whole_song_sweep)
 
 CUTS = [0.1, 0.3, 0.5, 0.7, 0.9, 0.95]
 
@@ -47,6 +47,18 @@ def test_torch_ops_agree_with_numpy(song):
     for c in CUTS:
         assert (cpu[c] == gpu[c]).mean() > 0.99
         assert (chunks[c] == per_chunk(emb, active, 20, c)).mean() > 0.99
+    lab, births, _ = online_registry(emb, active, 20, 0.5, kmeans=ops["kmeans"])
+    ref, ref_births, _ = online_registry(emb, active, 20, 0.5)
+    assert (lab == ref).mean() > 0.99 and len(births) == len(ref_births)
+
+
+def test_second_pass_matches_two_pass_run(song):
+    emb, active = song
+    for tau in (0.3, 0.6, 0.9):
+        one, births, reg = online_registry(emb, active, 20, tau, two_pass=False)
+        two, births2, _ = online_registry(emb, active, 20, tau, two_pass=True)
+        np.testing.assert_array_equal(second_pass(emb, active, one, reg), two)
+        assert births == births2
 
 
 def test_whole_song_sweep_handles_silence(song):
