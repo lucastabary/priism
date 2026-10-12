@@ -344,6 +344,18 @@ def _registry_domain(args: argparse.Namespace) -> None:
         print(json.dumps(probe(a, b, n=args.tokens, band=band)), flush=True)
 
 
+def _registry_dims(args: argparse.Namespace) -> None:
+    import os
+
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    from .registry.dims_probe import run
+    from .registry.features import MsstTrunk
+
+    run(MsstTrunk(args.msst_config, args.msst_ckpt, args.msst_path, args.device), args.data, args.out, args.tmp,
+        args.fit_songs, jobs=args.jobs)
+
+
 def _train_id(args: argparse.Namespace) -> None:
     from .registry.head import train_head
     from .registry.run import select
@@ -720,6 +732,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--b", nargs="+", required=True, help="second sets (e.g. ni)")
     p.add_argument("--tokens", type=int, default=1500, help="audible tokens sampled per song")
     p.set_defaults(func=_registry_domain)
+
+    p = sub.add_parser("registry-dims", help="raw-token tracking at 32/64/128/256 PCA dims on a multitrack set (no training)")
+    p.add_argument("--data", required=True, help="multitrack folder (MoisesDB)")
+    p.add_argument("--out", required=True, help="JSON lines, one per song x dims x cut (resumes)")
+    p.add_argument("--tmp", required=True, help="folder for short-lived per-song token files")
+    p.add_argument("--fit-songs", type=int, default=16)
+    p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--msst-config", required=True)
+    p.add_argument("--msst-ckpt", required=True)
+    p.add_argument("--msst-path", required=True)
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_registry_dims)
 
     p = sub.add_parser("train-id", help="train the identity head on cached songs (phase 2, CPU is enough)")
     p.add_argument("--cache", required=True)
