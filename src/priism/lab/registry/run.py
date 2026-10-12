@@ -21,8 +21,9 @@ def list_songs(kind: str, folder: str | Path) -> list[Path]:
         return sorted(p.parent for p in folder.glob("*/meta.json"))
     if kind == "ni":
         return sorted(folder.glob("*.stem.mp4"))
-    if kind == "multitrack":
-        return sorted(p for p in folder.iterdir() if p.is_dir())
+    if kind == "multitrack":  # MoisesDB song folders hold a data.json and sit two levels down
+        found = sorted(p.parent for p in folder.rglob("data.json"))
+        return found or sorted(p for p in folder.iterdir() if p.is_dir())
     raise ValueError(f"unknown set kind {kind!r} (synth, ni, multitrack)")
 
 
@@ -90,7 +91,10 @@ def select(cache: str | Path, spec: str) -> list[Cached]:
     train on real songs while ``%test`` stays exactly the half that phase 1 was scored on."""
     name, _, part = spec.partition("%")
     songs = load_set(Path(cache) / name)
-    return [s for s in songs if in_part(s.name, part)] if part else songs
+    # A song's split key is its group_key when it has one (MoisesDB: the artist), so an artist never sits on
+    # both sides of a split; otherwise its name.
+    key = lambda s: (s.labels[0].get("group_key") if s.labels else None) or s.name
+    return [s for s in songs if in_part(key(s), part)] if part else songs
 
 
 def in_part(song: str, part: str) -> bool:

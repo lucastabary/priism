@@ -112,13 +112,15 @@ def pool_time(x: np.ndarray, pool: int, axis: int = 0, reduce: str = "mean") -> 
 
 def band_energy(trunk: Trunk, wav: np.ndarray) -> np.ndarray:
     """(C, S) -> (T, Nb) power of one signal in each trunk band and frame (same STFT frames as the trunk)."""
-    x = torch.from_numpy(np.ascontiguousarray(wav, np.float32))
-    spec = torch.stft(x, trunk.n_fft, trunk.hop, window=torch.hann_window(trunk.n_fft), center=True,
+    dev = getattr(trunk, "device", "cpu")  # on the GPU with a GPU trunk: songs with many tracks stay fast
+    x = torch.from_numpy(np.ascontiguousarray(wav, np.float32)).to(dev)
+    spec = torch.stft(x, trunk.n_fft, trunk.hop, window=torch.hann_window(trunk.n_fft, device=dev), center=True,
                       return_complex=True)
-    p = spec.abs().pow(2).sum(0)  # (F, T), channels summed
-    c = torch.cat([torch.zeros(1, p.shape[1]), p.cumsum(0)])
-    lo, hi = torch.from_numpy(trunk.band_bins[:, 0]), torch.from_numpy(trunk.band_bins[:, 1])
-    return (c[hi.clamp(max=p.shape[0])] - c[lo.clamp(max=p.shape[0])]).T.numpy()
+    p = spec.abs().pow(2).sum(0).double()  # (F, T), channels summed; float64 cumsum keeps quiet bands exact
+    c = torch.cat([torch.zeros(1, p.shape[1], dtype=p.dtype, device=dev), p.cumsum(0)])
+    lo = torch.from_numpy(trunk.band_bins[:, 0]).to(dev).clamp(max=p.shape[0])
+    hi = torch.from_numpy(trunk.band_bins[:, 1]).to(dev).clamp(max=p.shape[0])
+    return (c[hi] - c[lo]).T.float().cpu().numpy()
 
 
 class Projection:
@@ -242,15 +244,28 @@ def read_ni(path: str | Path, sr: int) -> Song:
 
 def read_multitrack(folder: str | Path, sr: int) -> Song:
     """A multitrack folder with one audio file per track, possibly in one subfolder per stem type
-    (MoisesDB: ``<song>/<stem>/<track>.wav``). Every file is its own source and its own instrument; the
-    subfolder name is kept as ``kind``. Layout to check against the real download before trusting it."""
+    (MoisesDB: ``<song>/<stem>/<track id>.flac`` plus ``data.json``). Every file is its own source and its own
+    instrument (fine level). With a MoisesDB ``data.json``, each label gets the track type as ``kind`` (e.g.
+    bass_guitar, cymbals), the stem name as ``stem`` (drums, guitar...), ``has_bleed``, and ``group_key`` =
+    the artist, so splits keep an artist on one side; otherwise ``kind`` is the subfolder name."""
+    import json
+
     folder = Path(folder)
     files = sorted(p for p in folder.rglob("*") if p.suffix.lower() in (".wav", ".flac")
                    and p.stem.lower() not in ("mix", "mixture"))
+    meta = json.loads((folder / "data.json").read_text()) if (folder / "data.json").exists() else {}
+    tracks = {t["id"]: (st.get("stemName"), t) for st in meta.get("stems", []) for t in st.get("tracks", [])}
     srcs = [_read(p, sr) for p in files]
     n = min(s.shape[1] for s in srcs)
     sources = np.stack([s[:, :n] for s in srcs])
-    labels = [{"name": str(p.relative_to(folder).with_suffix("")).replace("\\", "/"),
+    labels = []
+    for j, p in enumerate(files):
+        lab = {"name": str(p.relative_to(folder).with_suffix("")).replace("\\", "/"),
                "kind": p.parent.name if p.parent != folder else p.stem, "instrument": j, "entry_s": None}
-              for j, p in enumerate(files)]
+        if p.stem in tracks:
+            stem, t = tracks[p.stem]
+            lab.update(kind=t.get("trackType", lab["kind"]), stem=stem, has_bleed=bool(t.get("has_bleed")))
+        if meta:
+            lab.update(group_key=meta.get("artist") or folder.name, genre=meta.get("genre"))
+        labels.append(lab)
     return Song(folder.name, sources.sum(0), sources, labels)
