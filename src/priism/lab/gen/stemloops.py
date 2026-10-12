@@ -140,10 +140,12 @@ def stem_names(path: str | Path) -> list[str] | None:
         return None
 
 
-def plans(windows: list[dict], free: set[int], top: int = 5) -> list[dict]:
+def plans(windows: list[dict], free: set[int], top: int = 5, pitched_db: float | None = None) -> list[dict]:
     """Candidate arrangements, best first: a shared window for the pitched stems that loop in it, plus, for
     every unpitched stem (``free``), its own best windows of the same loop length. A plan needs two looping
-    stems in all."""
+    stems in all. ``pitched_db`` (default LOOP_SDR_DB) may loosen the threshold for pitched stems only: they
+    loop less exactly than drums (played parts, chord changes) and are the scarce ones."""
+    pdb = LOOP_SDR_DB if pitched_db is None else pitched_db
     own: dict = {}
     for w in windows:
         for j in free:
@@ -154,7 +156,7 @@ def plans(windows: list[dict], free: set[int], top: int = 5) -> list[dict]:
         own[k] = sorted(own[k], key=lambda w: -w["sdr_db"][k[1]])[:3]
     out = []
     for w in windows:
-        pitched = [j for j, v in enumerate(w["sdr_db"]) if j not in free and v is not None and v >= LOOP_SDR_DB]
+        pitched = [j for j, v in enumerate(w["sdr_db"]) if j not in free and v is not None and v >= pdb]
         drums = {j: own[w["loop_bars"], j] for j in free if (w["loop_bars"], j) in own}
         if len(pitched) + len(drums) >= 2:
             score = float(np.mean([w["sdr_db"][j] for j in pitched])) if pitched else 0.0
@@ -173,7 +175,7 @@ def plans(windows: list[dict], free: set[int], top: int = 5) -> list[dict]:
 
 def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, windows: list[dict] | None = None,
             bar: int | None = None, top: int = 5, names: list[str] | None = None, kinds: list[str] | None = None,
-            extra: list[dict] | None = None, max_sources: int | None = None,
+            extra: list[dict] | None = None, max_sources: int | None = None, pitched_db: float | None = None,
             genre: str = "stem_loops") -> tuple[np.ndarray, list[np.ndarray], dict]:
     """(mix (n, 2), tracks [(n, 2)], meta) of one strict-loop song from one NI song's stems (4, 2, S).
     ``seed`` picks the plan among the ``top`` best (and each unpitched stem's window among its 3 best), the
@@ -184,7 +186,7 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
     bar = bar or bar_period(stems.sum(0).mean(0), sr)
     windows = windows if windows is not None else loop_windows(stems, bar)
     free = {j for j, nm in enumerate(names or []) if UNPITCHED.match(nm)}
-    cands = plans(windows, free, top)
+    cands = plans(windows, free, top, pitched_db)
     if not cands:
         raise ValueError("no window where two stems or more loop")
     plan = cands[int(rng.integers(len(cands)))]
@@ -309,7 +311,8 @@ def generate(data: str | Path, out_dir: str | Path, per_song: int = 4, seed: int
 
 def generate_multitrack(data: str | Path, out_dir: str | Path, per_song: int = 4, seed: int = 0,
                         duration_s: float = 75.0, sample_rate: int = 44100, part: str = "train",
-                        max_sources: int = 8, max_bars: int | None = 160) -> list[str]:
+                        max_sources: int = 8, max_bars: int | None = 160,
+                        pitched_db: float | None = None) -> list[str]:
     """Strict-loop songs from the multitrack songs (MoisesDB) of ``part`` under ``data``: every track is its own
     instrument (kind = its track type, e.g. bass_guitar), drums and percussion stems loop from their own window,
     at most ``max_sources`` looping tracks per song. A song's split key is its artist (``registry.run.in_part``),
@@ -340,14 +343,14 @@ def generate_multitrack(data: str | Path, out_dir: str | Path, per_song: int = 4
         extra = [{"track": lab["name"], "has_bleed": bool(lab.get("has_bleed")), "artist": lab.get("group_key"),
                   "source_genre": lab.get("genre")} for lab in song.labels]
         windows = loop_windows(stems, bar)
-        if not plans(windows, {j for j, nm in enumerate(names) if UNPITCHED.match(nm)}):
+        if not plans(windows, {j for j, nm in enumerate(names) if UNPITCHED.match(nm)}, pitched_db=pitched_db):
             skipped += 1
             print(f"skip {name}: fewer than two looping tracks", flush=True)
             continue
         for k in todo:
             mix, tracks, m = arrange(stems, sample_rate, seed + 1000 * k + zlib.crc32(name.encode()) % 997,
                                      duration_s, windows, bar, names=names, kinds=kinds, extra=extra,
-                                     max_sources=max_sources, genre="multitrack_loops")
+                                     max_sources=max_sources, pitched_db=pitched_db, genre="multitrack_loops")
             m.update(source_song=name, source_title=meta.get("song"), variant=k)
             out.append(str(write_song(mix, tracks, m, Path(out_dir) / f"{name}__loop{k}")))
             print(f"song {len(out)}: {out[-1]} ({len(tracks)} tracks, loop {m['buildup']['loop_bars']} bar)",

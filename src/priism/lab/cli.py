@@ -49,7 +49,7 @@ def _gen_stemloops(args: argparse.Namespace) -> None:
     if args.multitrack:
         folders = generate_multitrack(args.data, args.out, per_song=args.per_song, seed=args.seed,
                                       duration_s=args.duration, sample_rate=args.sample_rate,
-                                      max_sources=args.max_sources)
+                                      max_sources=args.max_sources, pitched_db=args.pitched_sdr)
     else:
         folders = generate(args.data, args.out, per_song=args.per_song, seed=args.seed, duration_s=args.duration,
                            sample_rate=args.sample_rate)
@@ -456,6 +456,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--multitrack", action="store_true",
                    help="--data holds multitrack song folders (MoisesDB: data.json + one FLAC per track)")
     p.add_argument("--max-sources", type=int, default=8, help="multitrack: looping tracks per song at most")
+    p.add_argument("--pitched-sdr", type=float, help="multitrack: loop threshold (dB) for pitched tracks only "
+                   "(default: the drums' 6 dB); each track's score stays in meta for weighting")
     p.set_defaults(func=_gen_stemloops)
 
     p = sub.add_parser("freesound-fetch", help="download CC0 loop previews from Freesound (FREESOUND_API_KEY)")
