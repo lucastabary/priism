@@ -9,8 +9,9 @@ What stays on the CPU, and why:
 - the average linkage on the (at most 256) micro centroids and its cuts: a few milliseconds in scipy;
 - the online registries: a chunk-by-chunk loop of small operations, launch-bound on a GPU.
 
-Equivalence: float32 like the CPU path, TF32 off, but another library's summation order (and atomic,
-unordered sums in ``index_add_``), so dot products differ from numpy's in the last bits (~1e-7). An argmax
+Equivalence: float32 like the CPU path, TF32 off, but another library's summation order (cluster sums
+as a one-hot matmul, deterministic run to run), so dot products and sums differ from numpy's in the last
+bits (~1e-7 relative). An argmax
 flips only where two centroids are tied to that precision; a flip during the k-means can move it to a
 nearby local optimum, so labels are not guaranteed bit-identical: the benchmark
 (``scripts/bench_registry_eval.py``) reports how often songs differ, and the metrics' differences.
@@ -42,9 +43,13 @@ def spherical_kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int
     dev = torch_device(device)
     xt = torch.from_numpy(np.ascontiguousarray(x, np.float32)).to(dev)
     c = torch.from_numpy(c0).to(dev)
+    rows = torch.arange(len(xt), device=dev)
     for _ in range(iters):
         a = (xt @ c.T).argmax(1)  # first maximum on ties, as numpy
-        new = torch.zeros_like(c).index_add_(0, a, xt)
+        # Cluster sums as a one-hot matmul, not index_add_: CUDA's atomic adds would make runs differ.
+        onehot = torch.zeros(len(c), len(xt), device=dev)
+        onehot[a, rows] = 1.0
+        new = onehot @ xt
         keep = torch.bincount(a, minlength=len(c)) > 0
         c = _norm(new[keep])
     a = (xt @ c.T).argmax(1)
