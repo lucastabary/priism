@@ -55,6 +55,17 @@ BUILDUP_P = float(os.environ.get("PRIISM_BUILDUP_P", "0"))
 # filters, drive, pan. Effects that never change over a song let an identity vector learn them as part of
 # the timbre; changing them is the weak supervision that keeps them out of it. Own generator, default 0.
 FX_AUTO_P = float(os.environ.get("PRIISM_FX_AUTO_P", "0"))
+# Share of songs arranged as a strict-loop build-up (Lucas, 2026-10-12): every source loops one identical
+# 1- or 2-bar pattern from its entry to the end, sources enter one group at a time on loop boundaries, and
+# nothing else moves (no section activity, no filter sweep, no LFO effect, no fx automation). The bar length
+# is a whole number of samples, so a section minus the previous one (shifted by the entry step) is the new
+# source plus only what a real intro would add: the still-growing tails (releases, reverb, echo) of parts
+# that entered recently, and the master compressor, limiter and sidechain reacting to the entry. The master
+# gain curve is kept to measure that. Own generator, takes precedence over PRIISM_BUILDUP_P; with the
+# default 0 every song stays exactly as before.
+LOOP_STRICT_P = float(os.environ.get("PRIISM_LOOP_STRICT_P", "0"))
+# Hop of the master gain curve written next to strict-loop songs (master_gain.npz), in seconds.
+GAIN_HOP_S = 0.01
 _ACID_DRIFT = {"cutoff_hz": (80, 3000), "resonance": (0.0, 0.97), "env_mod_oct": (0.3, 6.0), "decay_s": (0.05, 2.0),
                "accent_amount": (0.1, 1.0), "gate_fraction": (0.3, 0.9)}
 _PATCH_DRIFT = {"cutoff": (100, 12000), "res": (0.0, 0.9), "env_oct": (0.0, 5.0), "f_decay": (0.02, 1.5),
@@ -249,6 +260,9 @@ def plan_song(seed: int, duration_s: float = 75.0, genre: str | None = None, n_s
     buildup = None
     if brng.random() < BUILDUP_P:
         buildup = _build_up(sources, n_bars, brng)
+    lrng = np.random.default_rng([seed, 0x100F])
+    if lrng.random() < LOOP_STRICT_P:
+        buildup = _strict_loops(sources, n_bars, lrng)
 
     return {"seed": seed, "genre": g.name, "bpm": bpm, "swing": float(rng.uniform(*g.swing)), "n_bars": n_bars,
             "harmony": harmony, "block_starts": block_starts, "energy": energy, "sources": sources,
@@ -271,6 +285,68 @@ def _build_up(sources: list[dict], n_bars: int, rng: np.random.Generator) -> dic
             s["entry_bar"] = entry
             s["bars"] = sorted(set(range(entry, max(end, entry + 2))) | {b for b in s["bars"] if b >= end})
     return {"step_bars": step, "end_bar": end}
+
+
+def _strict_loops(sources: list[dict], n_bars: int, rng: np.random.Generator) -> dict:
+    """Strict-loop build-up (edits ``bars`` in place, sets ``entry_bar``): one loop length for the whole song,
+    so every part follows the same chords, and entries on loop boundaries every ``step`` bars (a multiple of
+    the loop), so the parts already in replay exactly what they played one step earlier (dry). Each source plays
+    from its entry to the end. Merge groups enter together, as in ``_build_up``."""
+    groups: dict = {}
+    for s in sources:
+        groups.setdefault(s["merge_group"] if s["merge_group"] is not None else ("solo", s["id"]), []).append(s)
+    order = [list(groups.values())[i] for i in rng.permutation(len(groups))]
+    loop = int(rng.choice([1, 2], p=[0.3, 0.7]))
+    step = loop * int(rng.choice([1, 2], p=[0.3, 0.7]) if loop == 2 else rng.choice([1, 2], p=[0.2, 0.8]))
+    while step > loop and len(order) * step > n_bars - 2 * loop:
+        step -= loop
+    last = max(0, (n_bars - 2 * loop) // loop * loop)  # the last group still plays two loops
+    for k, group in enumerate(order):
+        entry = min(k * step, last)  # dense line-ups in short songs: the last ones enter together
+        for s in group:
+            s["entry_bar"] = entry
+            s["bars"] = list(range(entry, n_bars))
+    return {"strict": True, "loop_bars": loop, "step_bars": step, "end_bar": min(n_bars, len(order) * step),
+            "entries": sorted({s["entry_bar"] for s in sources})}
+
+
+def _tile(y: np.ndarray, entry: int, period: int, n: int) -> np.ndarray:
+    """Overlap-add copies of a rendered loop ``y`` (n,) every ``period`` samples from sample ``entry``. Tails
+    past the loop (releases) ring into the next copy, as when a loop is played: the track is exactly periodic
+    once the first copy's tail has died out, ``len(tail) // period`` copies after the entry."""
+    out = np.zeros(n)
+    for start in range(entry, n, period):
+        out[start:] += y[: n - start]
+    return out
+
+
+def entry_quality(mix: np.ndarray, buildup: dict, tracks: list[np.ndarray] | None = None,
+                  sources: list[dict] | None = None) -> list[dict]:
+    """How well "section k minus section k-1" (one entry step apart) recovers each entering part.
+
+    ``drift_db``: energy of the change between the last two loop copies before the entry (no part enters
+    there) over the energy of the difference; it needs a step of two loops or more, else None. Computable
+    on real songs, it predicts the difference's quality (Spearman -0.61 [-0.73, -0.48] against the true
+    SDR on 119 entries of 16 strict synth songs). ``diff_sdr_db``: that true SDR, when the tracks are known."""
+    bar, loop, step = buildup["bar_samples"], buildup["loop_bars"], buildup["step_bars"]
+    q, w = loop * bar, step * bar
+    out = []
+    for e in buildup["entries"][1:]:
+        a, p = e * bar, (e - step) * bar
+        if a + w > len(mix) or p < 0:
+            continue
+        d = mix[a: a + w] - mix[p: p + w]
+        row = {"bar": e, "drift_db": None, "diff_sdr_db": None}
+        if step >= 2 * loop:
+            x0, x1 = mix[a - 2 * q: a - q], mix[a - q: a]
+            row["drift_db"] = round(float(10 * np.log10(np.sum((x1 - x0) ** 2) / (np.sum(d[:q] ** 2) + 1e-12)
+                                                       + 1e-12)), 2)
+        if tracks is not None and sources is not None:
+            true = np.sum([t[a: a + w] for t, s in zip(tracks, sources) if s["entry_bar"] == e], axis=0)
+            row["diff_sdr_db"] = round(float(10 * np.log10((np.sum(true ** 2) + 1e-12)
+                                                          / (np.sum((d - true) ** 2) + 1e-12))), 2)
+        out.append(row)
+    return out
 
 
 def _vary_fx(fx: dict, kind: str, rng: np.random.Generator) -> dict:
@@ -482,13 +558,34 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
     """(mix (n, 2), tracks [(n, 2)], metadata). ``sum(tracks) == mix`` up to float rounding."""
     plan = plan_song(seed, duration_s, genre, n_sources)
     sr = sample_rate
+    strict = bool(plan["buildup"] and plan["buildup"].get("strict"))
+    if strict:  # a whole number of samples per bar, so loop copies land on the same sample grid
+        bar_n = int(round(4 * 60.0 / plan["bpm"] * sr))
+        plan["bpm"] = 4 * 60.0 * sr / bar_n
+        plan["buildup"]["bar_samples"] = bar_n
     n = int(round(plan["n_bars"] * 4 * 60.0 / plan["bpm"] * sr))
     rng = np.random.default_rng(seed + 7)
 
     twin_state: dict = {}
     dry, kick_dry = {}, None
     for s in sorted(plan["sources"], key=lambda s: s["twin_of"] is not None):  # originals before their twins
-        y, info = _render_source(s, plan, twin_state, n, sr)
+        if strict:  # render one loop, then copy it from the entry to the end
+            loop = plan["buildup"]["loop_bars"]
+            # A part can rest through a whole short loop (a melody's first bar, a crash): redraw its notes
+            # from another seed rather than add a silent "source".
+            for attempt in range(6):
+                y, info = _render_source({**s, "bars": list(range(loop)), "seed": s["seed"] + 7919 * attempt},
+                                         plan, twin_state, n, sr)
+                if np.max(np.abs(y)) > 1e-6:
+                    break
+            s["loop_seed_offset"] = attempt
+            y = _tile(y, s["entry_bar"] * bar_n, loop * bar_n, n)
+            t0, period = s["entry_bar"] * bar_n / sr, loop * bar_n / sr
+            info["timeline"] = [[a + t0 + r * period, b + t0 + r * period, *rest]
+                                for r in range(int(np.ceil((n / sr - t0) / period)))
+                                for a, b, *rest in info.get("timeline", []) if a + t0 + r * period < n / sr]
+        else:
+            y, info = _render_source(s, plan, twin_state, n, sr)
         # What the source plays, for the factor heads (model/factors.py): one [start s, end s, MIDI pitch
         # (-1 = unpitched), velocity, onset (0 = slid into, no new attack)] per note or hit, dry timing.
         s["timeline"] = [[round(float(a), 4), round(float(b), 4), round(float(p), 2), round(float(v), 3), int(o)]
@@ -518,8 +615,12 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             fx["pb"] = sample_pb_fx(s["kind"], plan["genre"], s["seed"])
         if bus:
             _bus_source(fx, s, bus)
+        if strict:  # nothing that moves on its own clock: no sweep, no free-running chorus or phaser LFO
+            fx["sweep_oct"] = 0.0
+            if fx.get("pb"):
+                fx["pb"] = {k: v for k, v in fx["pb"].items() if k not in ("chorus", "phaser")}
         arng = np.random.default_rng([s["seed"], 0xFA])
-        if arng.random() < FX_AUTO_P:
+        if arng.random() < FX_AUTO_P and not strict:
             # One effect chain per setting, each fed the dry part only during its own sections: tails (echo,
             # reverb) ring on across a change, as with automated sends, and the chains still sum to the track.
             variants = [fx] + [_vary_fx(fx, s["kind"], arng) for _ in range(int(arng.integers(1, 3)))]
@@ -567,6 +668,15 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
     meta.update(sample_rate=sr, duration_s=n / sr, master=master, generator="priism.lab.gen v2 step 1")
     if bus:
         meta["bus_fx"] = bus
+    if strict:
+        # Master gain (compressor, loudness, limiter; the safety scalar folded in), which reacts to each entry:
+        # the full curve at GAIN_HOP_S goes to master_gain.npz (write_song), the per-bar mean stays in meta.
+        g = g * (0.999 / peak if peak > 0.999 else 1.0)
+        hop = int(round(GAIN_HOP_S * sr))
+        meta["_master_gain"] = g[: len(g) // hop * hop].reshape(-1, hop).mean(axis=1).astype(np.float32)
+        meta["buildup"]["master_gain_per_bar"] = [round(float(np.mean(g[b * bar_n:(b + 1) * bar_n])), 5)
+                                                  for b in range(plan["n_bars"])]
+        meta["buildup"]["entry_quality"] = entry_quality(mix, meta["buildup"], tracks, meta["sources"])
     for s, t in zip(meta["sources"], tracks):
         s["rms_db"] = float(20 * np.log10(np.sqrt(np.mean(t**2)) + 1e-12))
     return mix, tracks, meta
@@ -590,6 +700,10 @@ def write_song(seed: int, out_dir: str | Path, duration_s: float = 75.0, sample_
         return folder
     mix, tracks, meta = render_song(seed, duration_s, sample_rate, genre, n_sources)
     (folder / "sources").mkdir(parents=True, exist_ok=True)
+    gain = meta.pop("_master_gain", None)
+    if gain is not None:
+        np.savez_compressed(folder / "master_gain.npz", gain=gain, hop_s=GAIN_HOP_S)
+        meta["buildup"]["master_gain_file"] = "master_gain.npz"
     sf.write(folder / "mix.flac", mix, sample_rate, subtype="PCM_24")
     for s, t in zip(meta["sources"], tracks):
         s["file"] = f"sources/{s['id']:02d}_{s['kind']}.flac"
