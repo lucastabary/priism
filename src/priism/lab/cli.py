@@ -356,6 +356,22 @@ def _registry_dims(args: argparse.Namespace) -> None:
         args.fit_songs, jobs=args.jobs)
 
 
+def _registry_encoders(args: argparse.Namespace) -> None:
+    import os
+
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    from .registry.encoder_probe import SWProbe, run, summarize
+
+    if args.summarize:
+        print(summarize(args.out))
+        return
+    limit = dict(kv.split("=") for kv in args.limit) if args.limit else None
+    run(SWProbe(args.msst_config, args.msst_ckpt, args.msst_path, args.device, mid=args.mid), args.data, args.out,
+        args.tmp, args.fit_songs, jobs=args.jobs, limit={k: int(v) for k, v in limit.items()} if limit else None)
+    print(summarize(args.out))
+
+
 def _train_id(args: argparse.Namespace) -> None:
     from .registry.head import train_head
     from .registry.run import select
@@ -744,6 +760,21 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-path", required=True)
     p.add_argument("--device", default="cuda")
     p.set_defaults(func=_registry_dims)
+
+    p = sub.add_parser("registry-encoders", help="raw-token tracking for SW layers / PCA sizes / masks / band power (no training)")
+    p.add_argument("--data", help="multitrack folder (MoisesDB)")
+    p.add_argument("--out", required=True, help="JSON lines, one per song x variant x cut (resumes)")
+    p.add_argument("--tmp", help="folder for short-lived per-song feature files")
+    p.add_argument("--fit-songs", type=int, default=12)
+    p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--mid", type=int, default=6, help="intermediate block (1-based)")
+    p.add_argument("--limit", nargs="*", help="smoke test: part=count, e.g. dev2=2 test=0")
+    p.add_argument("--summarize", action="store_true", help="only print the summary of --out")
+    p.add_argument("--msst-config")
+    p.add_argument("--msst-ckpt")
+    p.add_argument("--msst-path")
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_registry_encoders)
 
     p = sub.add_parser("train-id", help="train the identity head on cached songs (phase 2, CPU is enough)")
     p.add_argument("--cache", required=True)
