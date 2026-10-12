@@ -77,3 +77,33 @@ def test_unpitched_stems_take_their_own_window():
     assert set(by) == {"Drums", "Bass"} and by["Drums"]["own_window"] and not by["Bass"]["own_window"]
     assert by["Drums"]["window_start_s"] * sr < half <= by["Bass"]["window_start_s"] * sr
     assert stemloops.UNPITCHED.match("Perc") and not stemloops.UNPITCHED.match("808")
+
+
+def test_multitrack_loops_train_artists_only(tmp_path):
+    import json
+
+    import soundfile as sf
+
+    from priism.lab.registry.run import in_part
+
+    sr, bar = 8000, 16000
+    artists = [a for a in (f"artist{i}" for i in range(40)) if in_part(a, "train")][:1] + \
+              [a for a in (f"artist{i}" for i in range(40)) if in_part(a, "test")][:1]
+    for n, artist in enumerate(artists):
+        song = tmp_path / "db" / f"song{n}"
+        stems = _fake_stems(sr, bar, 24, np.random.default_rng(n))
+        layout = [("drums", "kick_drum"), ("bass", "synth_bass"), ("other_keys", "synth_lead"), ("vocals", "lead_male_singer")]
+        meta = {"artist": artist, "genre": "electronic", "song": f"s{n}", "stems": []}
+        for j, (stem, ttype) in enumerate(layout):
+            (song / stem).mkdir(parents=True)
+            sf.write(song / stem / f"t{j}.flac", stems[j].T, sr)
+            meta["stems"].append({"id": f"st{j}", "stemName": stem,
+                                  "tracks": [{"id": f"t{j}", "trackType": ttype, "has_bleed": False}]})
+        (song / "data.json").write_text(json.dumps(meta))
+    out = stemloops.generate_multitrack(tmp_path / "db", tmp_path / "out", per_song=1, duration_s=20,
+                                        sample_rate=sr)
+    assert [p.split("\\")[-1].split("/")[-1] for p in out] == ["song0__loop0"]  # the test artist is never read
+    m = json.loads((tmp_path / "out" / "song0__loop0" / "meta.json").read_text())
+    kinds = {s["kind"] for s in m["sources"]}
+    assert kinds <= {"kick_drum", "synth_bass", "synth_lead"} and len(kinds) >= 2  # the noise "vocals" never loop
+    assert all(s["artist"] == artists[0] and "has_bleed" in s for s in m["sources"])

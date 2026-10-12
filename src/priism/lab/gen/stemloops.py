@@ -172,10 +172,14 @@ def plans(windows: list[dict], free: set[int], top: int = 5) -> list[dict]:
 
 
 def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, windows: list[dict] | None = None,
-            bar: int | None = None, top: int = 5, names: list[str] | None = None) -> tuple[np.ndarray, list[np.ndarray], dict]:
+            bar: int | None = None, top: int = 5, names: list[str] | None = None, kinds: list[str] | None = None,
+            extra: list[dict] | None = None, max_sources: int | None = None,
+            genre: str = "stem_loops") -> tuple[np.ndarray, list[np.ndarray], dict]:
     """(mix (n, 2), tracks [(n, 2)], meta) of one strict-loop song from one NI song's stems (4, 2, S).
     ``seed`` picks the plan among the ``top`` best (and each unpitched stem's window among its 3 best), the
-    entry order, the step and the master settings. ``names`` (``stem_names``) tells which stems are unpitched."""
+    entry order, the step and the master settings. ``names`` (``stem_names``) tells which stems are unpitched.
+    For multitracks (MoisesDB) each track is one instrument: ``kinds`` gives its kind (else "stem_group"),
+    ``extra`` per-track fields for the meta, and ``max_sources`` caps how many looping tracks enter."""
     rng = np.random.default_rng(seed)
     bar = bar or bar_period(stems.sum(0).mean(0), sr)
     windows = windows if windows is not None else loop_windows(stems, bar)
@@ -192,6 +196,8 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
                next(x for x in windows if x["start"] == starts[j] and x["loop_bars"] == w["loop_bars"])["sdr_db"][j])
            for j in starts}
     ids = sorted(starts)
+    if max_sources and len(ids) > max_sources:
+        ids = sorted(int(i) for i in rng.choice(ids, size=max_sources, replace=False))
     loop = w["loop_bars"]
     period = loop * bar
     n_bars = max(4 * loop, int(round(duration_s * sr / bar / loop)) * loop)
@@ -208,13 +214,14 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
     for k, j in enumerate(order):
         entry = min(k * step, last)
         tracks.append(_tile_loop(stems[j], starts[j], period, entry * bar, n, fade).T)
-        sources.append({"id": k, "kind": "stem_group", "family": "stem_group", "stem": j,
+        kind = kinds[j] if kinds else "stem_group"
+        sources.append({"id": k, "kind": kind, "family": names[j] if kinds and names else kind, "stem": j,
                         "stem_name": names[j] if names else None, "twin_of": None, "merge_group": None,
                         "entry_bar": entry, "bars": list(range(entry, n_bars)), "loop_sdr_db": round(float(sdr[j]), 2),
                         "window_start_s": round(starts[j] / sr, 3), "own_window": j in plan["unpitched"],
-                        "timeline": []})
+                        "timeline": [], **(extra[j] if extra else {})})
 
-    return master_and_meta(tracks, sources, sr, bar, n_bars, loop, step, rng, genre="stem_loops",
+    return master_and_meta(tracks, sources, sr, bar, n_bars, loop, step, rng, genre=genre,
                            generator="priism.lab.gen.stemloops",
                            window_start_s=round(w["start"] / sr, 3) if plan["pitched"] else None)
 
@@ -297,4 +304,53 @@ def generate(data: str | Path, out_dir: str | Path, per_song: int = 4, seed: int
             out.append(str(write_song(mix, tracks, meta, Path(out_dir) / f"{name}__loop{k}")))
             print(f"song {len(out)}: {out[-1]} ({len(tracks)} stems, loop {meta['buildup']['loop_bars']} bar)",
                   flush=True)
+    return out
+
+
+def generate_multitrack(data: str | Path, out_dir: str | Path, per_song: int = 4, seed: int = 0,
+                        duration_s: float = 75.0, sample_rate: int = 44100, part: str = "train",
+                        max_sources: int = 8, max_bars: int | None = 160) -> list[str]:
+    """Strict-loop songs from the multitrack songs (MoisesDB) of ``part`` under ``data``: every track is its own
+    instrument (kind = its track type, e.g. bass_guitar), drums and percussion stems loop from their own window,
+    at most ``max_sources`` looping tracks per song. A song's split key is its artist (``registry.run.in_part``),
+    so no artist feeds both training loops and evaluation. Only the first ``max_bars`` bars at the detected
+    tempo are searched for loops, to bound the time spent on long songs."""
+    from ..registry.features import read_multitrack
+    from ..registry.run import in_part, list_songs
+
+    if part != "train":
+        raise ValueError("multitrack loops are cut from the train part only: the other parts score the models")
+    out, skipped = [], 0
+    for folder in list_songs("multitrack", data):
+        meta = json.loads((folder / "data.json").read_text()) if (folder / "data.json").exists() else {}
+        if not in_part(meta.get("artist") or folder.name, part):
+            continue
+        name = folder.name
+        todo = [k for k in range(per_song) if not (Path(out_dir) / f"{name}__loop{k}" / "meta.json").exists()]
+        if not todo:
+            out += [str(Path(out_dir) / f"{name}__loop{k}") for k in range(per_song)]
+            continue
+        song = read_multitrack(folder, sample_rate)
+        stems = song.sources
+        bar = bar_period(stems.sum(0).mean(0), sample_rate)
+        if max_bars:
+            stems = stems[:, :, : max_bars * bar]
+        names = [lab.get("stem") or lab["kind"] for lab in song.labels]
+        kinds = [lab["kind"] for lab in song.labels]
+        extra = [{"track": lab["name"], "has_bleed": bool(lab.get("has_bleed")), "artist": lab.get("group_key"),
+                  "source_genre": lab.get("genre")} for lab in song.labels]
+        windows = loop_windows(stems, bar)
+        if not plans(windows, {j for j, nm in enumerate(names) if UNPITCHED.match(nm)}):
+            skipped += 1
+            print(f"skip {name}: fewer than two looping tracks", flush=True)
+            continue
+        for k in todo:
+            mix, tracks, m = arrange(stems, sample_rate, seed + 1000 * k + zlib.crc32(name.encode()) % 997,
+                                     duration_s, windows, bar, names=names, kinds=kinds, extra=extra,
+                                     max_sources=max_sources, genre="multitrack_loops")
+            m.update(source_song=name, source_title=meta.get("song"), variant=k)
+            out.append(str(write_song(mix, tracks, m, Path(out_dir) / f"{name}__loop{k}")))
+            print(f"song {len(out)}: {out[-1]} ({len(tracks)} tracks, loop {m['buildup']['loop_bars']} bar)",
+                  flush=True)
+    print(f"{skipped} songs skipped", flush=True)
     return out

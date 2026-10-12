@@ -43,10 +43,15 @@ def _gen_fsloops(args: argparse.Namespace) -> None:
 
 
 def _gen_stemloops(args: argparse.Namespace) -> None:
-    from .gen.stemloops import generate
+    from .gen.stemloops import generate, generate_multitrack
 
-    folders = generate(args.data, args.out, per_song=args.per_song, seed=args.seed, duration_s=args.duration,
-                       sample_rate=args.sample_rate)
+    if args.multitrack:
+        folders = generate_multitrack(args.data, args.out, per_song=args.per_song, seed=args.seed,
+                                      duration_s=args.duration, sample_rate=args.sample_rate,
+                                      max_sources=args.max_sources)
+    else:
+        folders = generate(args.data, args.out, per_song=args.per_song, seed=args.seed, duration_s=args.duration,
+                           sample_rate=args.sample_rate)
     print(f"{len(folders)} songs written to {args.out}")
 
 
@@ -447,6 +452,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--duration", type=float, default=75.0, help="approximate seconds per song (whole loops)")
     p.add_argument("--sample-rate", type=int, default=44100)
+    p.add_argument("--multitrack", action="store_true",
+                   help="--data holds multitrack song folders (MoisesDB: data.json + one FLAC per track)")
+    p.add_argument("--max-sources", type=int, default=8, help="multitrack: looping tracks per song at most")
     p.set_defaults(func=_gen_stemloops)
 
     p = sub.add_parser("freesound-fetch", help="download CC0 loop previews from Freesound (FREESOUND_API_KEY)")
