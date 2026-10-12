@@ -68,7 +68,7 @@ class IdentityHead(nn.Module):
     @torch.no_grad()
     def embed(self, tokens: np.ndarray) -> np.ndarray:
         dev = self.band.device
-        return self(torch.from_numpy(tokens).to(dev)).float().cpu().numpy()
+        return self(torch.from_numpy(np.asarray(tokens, np.float32)).to(dev)).float().cpu().numpy()
 
 
 def _group_refs(song: Cached, level: str) -> np.ndarray:
@@ -86,7 +86,18 @@ def _refs(song: Cached, level: str) -> tuple[np.ndarray, np.ndarray]:
     return ownership(song.energy, groups)
 
 
-def sample_tokens(song: Cached, shares: np.ndarray, audible: np.ndarray, chunk: int, min_gap: int,
+def _chunk_refs(song: Cached, level: str, t0: int, t1: int, floor_db: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
+    """Shares and audibility of one time slice, as ``ownership`` gives for the whole song (same floor,
+    relative to the song's loudest token), without expanding the whole song."""
+    e = song.energy_at(t0, t1)
+    if level == "instrument":
+        g = song.instruments
+        e = np.stack([e[g == x].sum(0) for x in np.unique(g)])
+    total = e.sum(0)
+    return e / np.maximum(total, 1e-20), total > song.total_max * 10 ** (-floor_db / 10)
+
+
+def sample_tokens(song: Cached, level: str, chunk: int, min_gap: int,
                   per_ref: int, own: float, rng: np.random.Generator) -> list[tuple[int, int, np.ndarray]]:
     """Two chunks at least ``min_gap`` frames apart (or as far as the song allows) -> for each, the chunk
     start and, per clearly owned token, (reference, frame, band) rows: [(t0, ref, rows (n, 2))]."""
@@ -97,9 +108,9 @@ def sample_tokens(song: Cached, shares: np.ndarray, audible: np.ndarray, chunk: 
     b = int(rng.choice(far)) if far else int(rng.integers(hi))
     out = []
     for t0 in (a, b):
-        sh = shares[:, t0: t0 + chunk]
+        sh, aud = _chunk_refs(song, level, t0, t0 + chunk)
         top, arg = sh.max(0), sh.argmax(0)
-        ok = audible[t0: t0 + chunk] & (top >= own)
+        ok = aud & (top >= own)
         for r in np.unique(arg[ok]):
             rows = np.argwhere(ok & (arg == r))
             if len(rows) >= 4:
@@ -211,7 +222,6 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 200)
                                               * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
-    refs = [_refs(s, level) for s in train]
     # group_local: a group stem is a positive only with itself in the same chunk; its other chunk is ignored,
     # not pushed away, and other sources stay negatives. Real timbres without teaching "kick == hats".
     is_group = [_group_refs(s, level) if group_local else None for s in train]
@@ -233,11 +243,11 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
         for si in rng.choice(len(train), min(songs_per_step, len(train)), replace=False):
             song = train[si]
             by_chunk: dict[int, list] = {}
-            for t0, r, rows in sample_tokens(song, *refs[si], chunk, min_gap, per_ref, own, rng):
+            for t0, r, rows in sample_tokens(song, level, chunk, min_gap, per_ref, own, rng):
                 by_chunk.setdefault(t0, []).append((r, rows))
             for t0, items in by_chunk.items():  # one pass of the head per chunk, on the sampled tokens only
                 rows = torch.from_numpy(np.concatenate([rw for _, rw in items])).to(device)
-                zs.append(head(torch.from_numpy(song.tokens[t0: t0 + chunk]).to(device), rows))
+                zs.append(head(torch.from_numpy(song.tokens[t0: t0 + chunk].astype(np.float32)).to(device), rows))
                 labels.append(torch.from_numpy(np.concatenate([np.full(len(rw), int(si) * 1000 + r)
                                                                for r, rw in items])).to(device))
                 fine.append(torch.from_numpy(np.concatenate([

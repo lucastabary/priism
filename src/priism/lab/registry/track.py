@@ -27,6 +27,7 @@ from scipy.optimize import linear_sum_assignment
 
 
 def normalise(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, np.float32)  # cached tokens are float16
     return x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-8)
 
 

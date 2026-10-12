@@ -128,7 +128,7 @@ def _cached_toys(rng, n, **kw):
     for i in range(n):
         emb, energy = toy_song(rng, **kw)
         labels = [{"name": str(j), "instrument": j, "entry_s": 0.0} for j in range(energy.shape[0])]
-        out.append(feat.Cached(f"toy{i}", emb, energy, labels, 0.04))
+        out.append(feat.Cached(f"toy{i}", emb, np.log10(energy).astype(np.float16), labels, 0.04))
     return out
 
 

@@ -183,12 +183,29 @@ def write_cache(path: str | Path, cache: dict) -> None:
 
 @dataclass
 class Cached:
+    """One cached song, kept small in memory (a training run holds hundreds): tokens as stored (float16),
+    energy as stored (log10, float16). ``energy`` gives linear float32 power on demand, ``energy_at`` a time
+    slice of it, so a training step only expands the chunks it samples."""
     name: str
-    tokens: np.ndarray  # (T, Nb, k) float32
-    energy: np.ndarray  # (J, T, Nb) linear power, float32
+    tokens: np.ndarray  # (T, Nb, k) float16
+    log_energy: np.ndarray  # (J, T, Nb) log10 power, float16
     labels: list[dict]
     frame_s: float
     path: str = ""  # the .npz it came from (parallel evaluation reloads it in each worker)
+
+    @property
+    def energy(self) -> np.ndarray:  # (J, T, Nb) linear power, float32
+        return 10 ** self.log_energy.astype(np.float32)
+
+    def energy_at(self, t0: int, t1: int) -> np.ndarray:
+        return 10 ** self.log_energy[:, t0:t1].astype(np.float32)
+
+    @property
+    def total_max(self) -> float:
+        """Loudest token of the song (all sources summed): the reference of the audibility floor."""
+        if not hasattr(self, "_tmax"):
+            self._tmax = float(max(self.energy_at(t, t + 512).sum(0).max() for t in range(0, self.tokens.shape[0], 512)))
+        return self._tmax
 
     @property
     def instruments(self) -> np.ndarray:
@@ -198,7 +215,7 @@ class Cached:
 
 def load_cache(path: str | Path) -> Cached:
     d = np.load(path)
-    return Cached(Path(path).stem, d["tokens"].astype(np.float32), 10 ** d["energy"].astype(np.float32),
+    return Cached(Path(path).stem, d["tokens"].astype(np.float16), d["energy"].astype(np.float16),
                   json.loads(str(d["labels"])), float(d["frame_s"]), str(path))
 
 
