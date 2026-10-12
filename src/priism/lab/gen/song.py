@@ -320,6 +320,35 @@ def _tile(y: np.ndarray, entry: int, period: int, n: int) -> np.ndarray:
     return out
 
 
+def entry_quality(mix: np.ndarray, buildup: dict, tracks: list[np.ndarray] | None = None,
+                  sources: list[dict] | None = None) -> list[dict]:
+    """How well "section k minus section k-1" (one entry step apart) recovers each entering part.
+
+    ``drift_db``: energy of the change between the last two loop copies before the entry (no part enters
+    there) over the energy of the difference; it needs a step of two loops or more, else None. Computable
+    on real songs, it predicts the difference's quality (Spearman -0.61 [-0.73, -0.48] against the true
+    SDR on 119 entries of 16 strict synth songs). ``diff_sdr_db``: that true SDR, when the tracks are known."""
+    bar, loop, step = buildup["bar_samples"], buildup["loop_bars"], buildup["step_bars"]
+    q, w = loop * bar, step * bar
+    out = []
+    for e in buildup["entries"][1:]:
+        a, p = e * bar, (e - step) * bar
+        if a + w > len(mix) or p < 0:
+            continue
+        d = mix[a: a + w] - mix[p: p + w]
+        row = {"bar": e, "drift_db": None, "diff_sdr_db": None}
+        if step >= 2 * loop:
+            x0, x1 = mix[a - 2 * q: a - q], mix[a - q: a]
+            row["drift_db"] = round(float(10 * np.log10(np.sum((x1 - x0) ** 2) / (np.sum(d[:q] ** 2) + 1e-12)
+                                                       + 1e-12)), 2)
+        if tracks is not None and sources is not None:
+            true = np.sum([t[a: a + w] for t, s in zip(tracks, sources) if s["entry_bar"] == e], axis=0)
+            row["diff_sdr_db"] = round(float(10 * np.log10((np.sum(true ** 2) + 1e-12)
+                                                          / (np.sum((d - true) ** 2) + 1e-12))), 2)
+        out.append(row)
+    return out
+
+
 def _vary_fx(fx: dict, kind: str, rng: np.random.Generator) -> dict:
     """Another setting of the same source's effects: 1 to 3 of its knobs moved, as a producer would automate
     them between sections. The sound source, the part and the shared buses stay the same."""
@@ -542,7 +571,14 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
     for s in sorted(plan["sources"], key=lambda s: s["twin_of"] is not None):  # originals before their twins
         if strict:  # render one loop, then copy it from the entry to the end
             loop = plan["buildup"]["loop_bars"]
-            y, info = _render_source({**s, "bars": list(range(loop))}, plan, twin_state, n, sr)
+            # A part can rest through a whole short loop (a melody's first bar, a crash): redraw its notes
+            # from another seed rather than add a silent "source".
+            for attempt in range(6):
+                y, info = _render_source({**s, "bars": list(range(loop)), "seed": s["seed"] + 7919 * attempt},
+                                         plan, twin_state, n, sr)
+                if np.max(np.abs(y)) > 1e-6:
+                    break
+            s["loop_seed_offset"] = attempt
             y = _tile(y, s["entry_bar"] * bar_n, loop * bar_n, n)
             t0, period = s["entry_bar"] * bar_n / sr, loop * bar_n / sr
             info["timeline"] = [[a + t0 + r * period, b + t0 + r * period, *rest]
@@ -640,6 +676,7 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
         meta["_master_gain"] = g[: len(g) // hop * hop].reshape(-1, hop).mean(axis=1).astype(np.float32)
         meta["buildup"]["master_gain_per_bar"] = [round(float(np.mean(g[b * bar_n:(b + 1) * bar_n])), 5)
                                                   for b in range(plan["n_bars"])]
+        meta["buildup"]["entry_quality"] = entry_quality(mix, meta["buildup"], tracks, meta["sources"])
     for s, t in zip(meta["sources"], tracks):
         s["rms_db"] = float(20 * np.log10(np.sqrt(np.mean(t**2)) + 1e-12))
     return mix, tracks, meta

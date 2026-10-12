@@ -45,3 +45,17 @@ def test_arrange_loops_real_stems():
 def test_only_the_train_part():
     with pytest.raises(ValueError):
         stemloops.generate("nowhere", "nowhere", part="test")
+
+
+def test_entry_quality_on_exact_loops():
+    from priism.lab.gen.song import entry_quality
+
+    sr, bar = 8000, 16000
+    stems = _fake_stems(sr, bar, 24, np.random.default_rng(0))
+    mix, tracks, meta = stemloops.arrange(stems, sr, seed=3, duration_s=40, bar=bar)
+    rows = meta["buildup"]["entry_quality"]
+    assert [r["bar"] for r in rows] == meta["buildup"]["entries"][1:len(rows) + 1]
+    assert all(r["diff_sdr_db"] is not None for r in rows)
+    # Recomputed from the mix alone, the drift is the same (it never needs the stems).
+    again = entry_quality(mix, meta["buildup"])
+    assert [r["drift_db"] for r in again] == [r["drift_db"] for r in rows]

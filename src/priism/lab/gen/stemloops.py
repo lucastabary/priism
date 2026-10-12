@@ -21,7 +21,7 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 
-from .song import GAIN_HOP_S, _json_default, _master_gains
+from .song import GAIN_HOP_S, _json_default, _master_gains, entry_quality
 
 # A stem loops when two consecutive copies of the window match by at least this SDR on magnitude
 # spectrograms (both pairs of a three-copy window; see ``loop_windows``).
@@ -139,7 +139,9 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
     period = loop * bar
     n_bars = max(4 * loop, int(round(duration_s * sr / bar / loop)) * loop)
     order = [ids[i] for i in rng.permutation(len(ids))]
-    step = loop * int(rng.choice([1, 2], p=[0.3, 0.7]) if loop == 1 else 1)
+    # Steps of two loops half the time even for long loops: only those leave two copies with no entry
+    # before the next one, which the drift confidence of ``song.entry_quality`` needs.
+    step = loop * int(rng.choice([1, 2], p=[0.3, 0.7]) if loop == 1 else rng.choice([1, 2]))
     while step > loop and len(order) * step > n_bars - 2 * loop:
         step -= loop
     last = max(0, (n_bars - 2 * loop) // loop * loop)
@@ -174,6 +176,7 @@ def arrange(stems: np.ndarray, sr: int, seed: int, duration_s: float = 75.0, win
                         "master_gain_per_bar": [round(float(np.mean(g[b * bar:(b + 1) * bar])), 5)
                                                 for b in range(n_bars)]},
             "_master_gain": g[: len(g) // hop * hop].reshape(-1, hop).mean(axis=1).astype(np.float32)}
+    meta["buildup"]["entry_quality"] = entry_quality(mix, meta["buildup"], tracks, sources)
     for s, t in zip(sources, tracks):
         s["rms_db"] = float(20 * np.log10(np.sqrt(np.mean(t ** 2)) + 1e-12))
     return mix, tracks, meta
