@@ -38,7 +38,8 @@ if [ -z "${SKIP_SETUP:-}" ]; then
   [ -d "$MSST" ] || git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training.git "$MSST"
   # As pod/setup.sh: keep the installed torch, skip MSST's GUI and audio-device packages (they fail headless).
   grep -v -E '^(torch|torchaudio)([<>=~ ]|$)|wxpython|pyaudio|keyboard|sageattention' "$MSST/requirements.txt" > msst-req.txt
-  python -m pip install -q -r msst-req.txt
+  # setuptools<81: librosa (an MSST requirement) imports pkg_resources, absent from a fresh Python 3.12 venv.
+  python -m pip install -q -r msst-req.txt "setuptools<81"
 fi
 mkdir -p "$MODELS"
 BASE=https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs

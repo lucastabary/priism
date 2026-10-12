@@ -33,7 +33,7 @@ git -C "$ROOT/priism" fetch -q origin "$BRANCH"
 git -C "$ROOT/priism" checkout -q --detach "origin/$BRANCH"
 [ -d "$ROOT/venv" ] || python3 -m venv "$ROOT/venv"
 "$ROOT/venv/bin/pip" install -q --upgrade pip
-"$ROOT/venv/bin/pip" install -q torch torchaudio boto3
+"$ROOT/venv/bin/pip" install -q torch torchaudio boto3 "setuptools<81"  # setuptools: pkg_resources for librosa
 "$ROOT/venv/bin/pip" install -q -e "$ROOT/priism[lab]"
 "$ROOT/venv/bin/python" -c "import torch; assert torch.cuda.is_available(); print('CUDA OK:', torch.cuda.get_device_name(0))"
 
