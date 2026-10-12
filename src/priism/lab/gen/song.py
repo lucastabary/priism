@@ -16,7 +16,7 @@ import soundfile as sf
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import lfilter
 
-from . import drums, surge, tonal
+from . import drums, fxchain, surge, tonal
 from . import fx as fxmod
 from .fx import apply_fx, sample_fx, sample_pb_fx
 from .genres import DRUM_KINDS, GENRES
@@ -64,6 +64,12 @@ FX_AUTO_P = float(os.environ.get("PRIISM_FX_AUTO_P", "0"))
 # gain curve is kept to measure that. Own generator, takes precedence over PRIISM_BUILDUP_P; with the
 # default 0 every song stays exactly as before.
 LOOP_STRICT_P = float(os.environ.get("PRIISM_LOOP_STRICT_P", "0"))
+# Share of sources whose effects are a deep, varied chain (gen/fxchain.py: many effect types in random
+# orders, repeats, automation within sections, descriptors measured on the rendered track) instead of the
+# fixed chain of fx.py. Own generators; with the default 0 every song stays exactly as before. Strict-loop
+# songs never use them.
+FX_CHAIN_P = float(os.environ.get("PRIISM_FX_CHAIN_P", "0"))
+TWIN_SAME_CHAIN_P = 0.5  # twins keeping their original's exact chain: effects must not always tell twins apart
 # Hop of the master gain curve written next to strict-loop songs (master_gain.npz), in seconds.
 GAIN_HOP_S = 0.01
 _ACID_DRIFT = {"cutoff_hz": (80, 3000), "resonance": (0.0, 0.97), "env_mod_oct": (0.3, 6.0), "decay_s": (0.05, 2.0),
@@ -510,6 +516,50 @@ def _master_gains(mix: np.ndarray, sr: int, m: dict) -> np.ndarray:
     return g * lim
 
 
+def _sample_chains(plan: dict) -> dict:
+    """Effect chains of the sources drawn for deep chains (FX_CHAIN_P), originals before their twins: a twin
+    keeps its original's exact chain TWIN_SAME_CHAIN_P of the time. Each source may get 1 or 2 variants of its
+    chain for other sections. {source id: (variants, sections)}."""
+    out: dict = {}
+    for s in sorted(plan["sources"], key=lambda s: s["twin_of"] is not None):
+        if not np.random.default_rng([s["seed"], 0xFD]).random() < FX_CHAIN_P:
+            continue
+        r = np.random.default_rng([s["seed"], 0xFC])
+        if s["twin_of"] in out and r.random() < TWIN_SAME_CHAIN_P:
+            chain = out[s["twin_of"]][0][0]
+        else:
+            chain = fxchain.sample_chain(s["kind"], r, plan["n_bars"])
+        variants = [chain]
+        if r.random() < 0.5:
+            variants += [fxchain.vary_chain(chain, s["kind"], r, plan["n_bars"]) for _ in range(int(r.integers(1, 3)))]
+            sections = _fx_sections(plan["n_bars"], len(variants), r)
+        else:
+            sections = [(0, plan["n_bars"], 0)]
+        out[s["id"]] = (variants, sections)
+    return out
+
+
+def _render_chains(s: dict, spec: tuple, dry: np.ndarray, plan: dict, n: int, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """(track, direct path) of one source through its chain variants, each fed the dry part only during its
+    own sections (tails ring on across a change); writes fx_chains, chain and sections to ``s``."""
+    variants, sections = spec
+    bpm = plan["bpm"]
+    y, direct = np.zeros((n, 2)), np.zeros((n, 2))
+    for v, chain in enumerate(variants):
+        gate = _bar_mask([b for b0, b1, w in sections if w == v for b in range(b0, b1)], n, sr, bpm)
+        if np.any(gate):
+            y += fxchain.apply_chain(dry * gate, chain, sr, bpm)
+            direct += fxchain.apply_chain(dry * gate, chain, sr, bpm, space=False)
+    bar_s = 4 * 60.0 / bpm
+    level = float(np.max(np.abs(dry))) or 1.0
+    per = {v: {"rt60_s": fxchain._rt60(c, sr, bpm), "thd": fxchain._thd(c, sr, bpm, level)} for v, c in enumerate(variants)}
+    s["fx_chains"] = variants
+    s["chain"] = fxchain.chain_ids(variants[0])
+    s["sections"] = [{"start_s": round(b0 * bar_s, 4), "end_s": round(b1 * bar_s, 4), "chain_id": v, **per[v]}
+                     for b0, b1, v in sections]
+    return y, direct
+
+
 def sample_bus_fx(seed: int, genre: str) -> dict:
     """Shared effects of one song, from the song's own generator."""
     rng = np.random.default_rng([seed, 0xB5])
@@ -606,6 +656,7 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             duck = e / (np.max(e) + 1e-12)
 
     place = _twin_places(plan["sources"]) if TWIN_PLACE > 0 else {}
+    chains = {} if strict or FX_CHAIN_P <= 0 else _sample_chains(plan)
     tracks = []
     for s in plan["sources"]:
         fx = sample_fx(s["kind"], plan["genre"], rng)
@@ -620,7 +671,10 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             if fx.get("pb"):
                 fx["pb"] = {k: v for k, v in fx["pb"].items() if k not in ("chorus", "phaser")}
         arng = np.random.default_rng([s["seed"], 0xFA])
-        if arng.random() < FX_AUTO_P and not strict:
+        direct = None
+        if s["id"] in chains:
+            y, direct = _render_chains(s, chains[s["id"]], dry[s["id"]], plan, n, sr)
+        elif arng.random() < FX_AUTO_P and not strict:
             # One effect chain per setting, each fed the dry part only during its own sections: tails (echo,
             # reverb) ring on across a change, as with automated sends, and the chains still sum to the track.
             variants = [fx] + [_vary_fx(fx, s["kind"], arng) for _ in range(int(arng.integers(1, 3)))]
@@ -637,10 +691,17 @@ def render_song(seed: int, duration_s: float = 75.0, sample_rate: int = 44100, g
             y = apply_fx(dry[s["id"]], fx, sr, plan["bpm"], s["seed"] + 1)
         if fx["sidechain"] and duck is not None:
             y = y * (1.0 - fx["sidechain"] * duck)[:, None]
+            direct = None if direct is None else direct * (1.0 - fx["sidechain"] * duck)[:, None]
         rms = np.sqrt(np.mean(y[np.abs(y).max(axis=1) > 1e-4] ** 2)) if np.any(np.abs(y) > 1e-4) else 0.0
         gain_db = LEVEL_DB[s["kind"]] + float(rng.normal(0, 2.5)) - (10.0 if rng.random() < 0.12 else 0.0)
-        y = y * (10 ** (gain_db / 20) * 0.1 / rms) if rms > 0 else y
+        k = (10 ** (gain_db / 20) * 0.1 / rms) if rms > 0 else 1.0
+        y = y * k
         s["fx"], s["gain_db"] = fx, gain_db
+        if s["id"] in chains:  # descriptors per section, on the track after its effects and before the master
+            for sec in s["sections"]:
+                a, b = int(sec["start_s"] * sr), int(sec["end_s"] * sr)
+                has_space = any(nd.get("type") in fxchain.SPACE for nd in s["fx_chains"][sec["chain_id"]])
+                sec.update(fxchain.describe(y[a:b], direct[a:b] * k if has_space else None, sr))
         tracks.append(y)
 
     if bus:  # glue compressors: each group's gain curve, computed on the group's sum, applied to its members
