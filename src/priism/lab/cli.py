@@ -415,10 +415,22 @@ def _jobs(args: argparse.Namespace) -> None:
 
     store = _store(args)
     if args.action == "submit":
-        args.kind = args.id
-        env = dict(kv.split("=", 1) for kv in args.env)
-        job = jobs.Job(kind=args.kind, args=args.rest, gpu=not args.cpu, max_minutes=args.max_minutes,
-                       stall_minutes=args.stall_minutes, results=args.results, env=env)
+        # Submit options go before the kind; everything after the kind is the job's own arguments (which
+        # may hold options of their own), so they are parsed here rather than by the `jobs` parser.
+        sp = argparse.ArgumentParser(prog="priism-lab jobs submit",
+                                     usage="priism-lab jobs submit [options] KIND [job arguments...]")
+        sp.add_argument("--cpu", action="store_true", help="no GPU needed (starts even if the GPU is busy)")
+        sp.add_argument("--max-minutes", type=float, default=args.max_minutes)
+        sp.add_argument("--stall-minutes", type=float, default=args.stall_minutes)
+        sp.add_argument("--results", action="append", default=list(args.results),
+                        help="a folder uploaded when the job ends (repeat for several)")
+        sp.add_argument("--env", action="append", default=list(args.env), help="a PRIISM_*=value setting (repeat)")
+        sp.add_argument("kind")
+        sp.add_argument("job_args", nargs=argparse.REMAINDER)
+        o = sp.parse_args(([args.id] if args.id else []) + args.rest)
+        env = dict(kv.split("=", 1) for kv in o.env)
+        job = jobs.Job(kind=o.kind, args=o.job_args, gpu=not (o.cpu or args.cpu), max_minutes=o.max_minutes,
+                       stall_minutes=o.stall_minutes, results=o.results, env=env)
         print(jobs.submit(store, job))
     elif args.action == "status":
         st = jobs.status(store)
@@ -823,13 +835,13 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("jobs", help="remote job queue: submit, status, log, cancel, pull")
     store_args(p)
     p.add_argument("action", choices=["submit", "status", "log", "cancel", "pull"])
-    p.add_argument("id", nargs="?", help="job id (log, cancel, pull) or kind (submit: priism-lab, phase1, update, clean)")
+    p.add_argument("id", nargs="?", help="job id (log, cancel, pull); submit: [--cpu, --results DIR, --env K=V ...] KIND [job args]")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="submit: the job's arguments")
     p.add_argument("--cpu", action="store_true", help="submit: no GPU needed (starts even if the GPU is busy)")
     p.add_argument("--max-minutes", type=float, default=240.0)
     p.add_argument("--stall-minutes", type=float, default=20.0)
-    p.add_argument("--results", nargs="*", default=[], help="submit: folders uploaded when the job ends")
-    p.add_argument("--env", nargs="*", default=[], help="submit: PRIISM_*=value settings")
+    p.add_argument("--results", nargs="*", default=[], help=argparse.SUPPRESS)
+    p.add_argument("--env", nargs="*", default=[], help=argparse.SUPPRESS)
     p.add_argument("--tail", type=int, default=50)
     p.add_argument("--follow", action="store_true")
     p.add_argument("--dest", default=".")

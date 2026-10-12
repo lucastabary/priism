@@ -117,7 +117,7 @@ installs `tray.ps1`, a notification-area icon started at logon. The icon keeps W
 (freezes the running job with SIGSTOP; its VRAM stays allocated) and resume, shows the hours worked
 (24 h / 7 d / 30 d / all), and keeps the PC awake while a job runs. The agent's work folder is his cache,
 on a Windows drive he picks, capped (default 50 GB). Over the cap the running job stops and only `clean`
-jobs start (`jobs submit clean <paths> --cpu`). `jobs status` shows the per-folder sizes, so we decide
+jobs start (`jobs submit --cpu clean <paths>`; submit options go before the kind). `jobs status` shows the per-folder sizes, so we decide
 what to delete. Tray and agent talk only through `<cache>/.agent/{control,status,stats}.json`.
 
 ### Lab philosophy: never leave a long run unwatched
