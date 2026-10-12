@@ -33,17 +33,7 @@ def normalise(x: np.ndarray) -> np.ndarray:
 
 def spherical_kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 15) -> tuple[np.ndarray, np.ndarray]:
     """x (N, d) unit rows -> (centroids (k', d), assignment (N,)); empty clusters dropped."""
-    k = min(k, len(x))
-    # k-means++ seeding on cosine distance: spread-out starts, fewer bad local minima than random rows.
-    c = [x[rng.integers(len(x))]]
-    d = 1 - x @ c[0]
-    for _ in range(k - 1):
-        p = np.maximum(d, 0) ** 2
-        if p.sum() <= 0:
-            break
-        c.append(x[rng.choice(len(x), p=p / p.sum())])
-        d = np.minimum(d, 1 - x @ c[-1])
-    c = np.stack(c)
+    c = kmeanspp(x, k, rng)
     for _ in range(iters):
         a = (x @ c.T).argmax(1)
         new = np.zeros_like(c)
@@ -52,6 +42,21 @@ def spherical_kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int
         c = normalise(new[keep])
     a = (x @ c.T).argmax(1)
     return c, a
+
+
+def kmeanspp(x: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
+    """k-means++ seeding on cosine distance: spread-out starts, fewer bad local minima than random rows.
+    Its own function so the GPU k-means (``track_gpu``) starts from the very same centroids."""
+    k = min(k, len(x))
+    c = [x[rng.integers(len(x))]]
+    d = 1 - x @ c[0]
+    for _ in range(k - 1):
+        p = np.maximum(d, 0) ** 2
+        if p.sum() <= 0:
+            break
+        c.append(x[rng.choice(len(x), p=p / p.sum())])
+        d = np.minimum(d, 1 - x @ c[-1])
+    return np.stack(c)
 
 
 def cluster(x: np.ndarray, rng: np.random.Generator, threshold: float | None = None, n: int | None = None,
@@ -126,6 +131,107 @@ def whole_song(emb: np.ndarray, active: np.ndarray, threshold: float | None = No
     cent, _ = cluster(sub, rng, threshold, n, micro=micro)
     out[active] = (xa @ cent.T).argmax(1)
     return out
+
+
+# ------------------------------------------------------------------------------------- threshold sweeps
+#
+# A grid search scores the clusterings at many cuts. Everything before the cut (normalising, the token
+# subsample, the micro k-means, the linkage) does not depend on the threshold, and the random generator is
+# consumed only there, so it can be computed once and cut many times: the sweeps below return, for each
+# threshold, exactly (bit for bit) what the one-threshold functions above return, at the cost of about one
+# call. The functions above stay the reference (tests/test_registry_sweep.py checks the two agree).
+
+
+def cluster_tree(x: np.ndarray, rng: np.random.Generator, micro: int = 128, kmeans=None) -> tuple:
+    """``cluster`` up to its cut: (x, micro centroids, micro assignment, linkage or None if one micro cluster).
+    ``kmeans``: a drop-in for ``spherical_kmeans`` (the GPU one in ``track_gpu``); default the CPU one."""
+    mc, ma = (kmeans or spherical_kmeans)(x, min(micro, max(1, len(x) // 8)), rng)
+    z = linkage(mc, method="average", metric="cosine") if len(mc) > 1 else None
+    return x, mc, ma, z
+
+
+def cut_tree(tree: tuple, threshold: float | None = None, n: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """``cluster``'s result from its ``cluster_tree``, cut at ``threshold`` (or into ``n`` clusters)."""
+    x, mc, ma, z = tree
+    if z is None:
+        return mc, np.zeros(len(x), int)
+    g = fcluster(z, n, criterion="maxclust") - 1 if n else fcluster(z, threshold, criterion="distance") - 1
+    a = g[ma]
+    cent = normalise(np.stack([x[a == j].sum(0) for j in range(g.max() + 1)]))
+    return cent, a
+
+
+def _chunk_trees(emb: np.ndarray, active: np.ndarray, chunk: int, seed: int, kmeans=None) -> list:
+    """[(slice, active block, tree)] for every chunk with an audible token, rng consumed as in ``per_chunk``."""
+    x, rng = normalise(emb), np.random.default_rng(seed)
+    out = []
+    for t0 in range(0, len(x), chunk):
+        sl = slice(t0, t0 + chunk)
+        a = active[sl]
+        if a.any():
+            out.append((sl, a, cluster_tree(x[sl][a], rng, kmeans=kmeans)))
+    return out
+
+
+def per_chunk_sweep(emb: np.ndarray, active: np.ndarray, chunk: int, thresholds, seed: int = 0, kmeans=None
+                    ) -> dict[float, np.ndarray]:
+    """{threshold: ``per_chunk(emb, active, chunk, threshold, seed)``}, the chunk trees computed once."""
+    trees = _chunk_trees(emb, active, chunk, seed, kmeans)
+    res = {}
+    for thr in thresholds:
+        out, nxt = _labels_like(active), 0
+        for sl, a, tree in trees:
+            _, lab = cut_tree(tree, thr)
+            block = out[sl]
+            block[a] = lab + nxt
+            nxt += lab.max() + 1
+        res[thr] = out
+    return res
+
+
+def per_chunk_linked_sweep(emb: np.ndarray, active: np.ndarray, chunk: int, thresholds, seed: int = 0,
+                           link_min: float = 0.5, kmeans=None) -> dict[float, np.ndarray]:
+    """{threshold: ``per_chunk_linked(...)``}, the chunk trees computed once."""
+    trees = _chunk_trees(emb, active, chunk, seed, kmeans)
+    res = {}
+    for thr in thresholds:
+        out, nxt, prev = _labels_like(active), 0, None
+        for sl, a, tree in trees:
+            cent, lab = cut_tree(tree, thr)
+            ids = np.full(len(cent), -1)
+            if prev is not None:
+                sim = cent @ prev[0].T
+                rows, cols = linear_sum_assignment(-sim)
+                for i, j in zip(rows, cols):
+                    if sim[i, j] >= link_min:
+                        ids[i] = prev[1][j]
+            for i in np.where(ids < 0)[0]:
+                ids[i], nxt = nxt, nxt + 1
+            block = out[sl]
+            block[a] = ids[lab]
+            prev = (cent, ids)
+        res[thr] = out
+    return res
+
+
+def whole_song_sweep(emb: np.ndarray, active: np.ndarray, thresholds, seed: int = 0, max_tokens: int = 50000,
+                     micro: int = 256, kmeans=None, assign=None) -> dict[float, np.ndarray]:
+    """{threshold: ``whole_song(emb, active, threshold, seed=seed)``}: one subsample, k-means and linkage.
+    ``assign(xa, [cent])``: a drop-in for the final ``(xa @ cent.T).argmax(1)`` at every threshold (GPU)."""
+    x, rng = normalise(emb), np.random.default_rng(seed)
+    xa = x[active]
+    if len(xa) == 0:
+        return {thr: _labels_like(active) for thr in thresholds}
+    sub = xa[rng.choice(len(xa), min(len(xa), max_tokens), replace=False)]
+    tree = cluster_tree(sub, rng, micro, kmeans)
+    cents = [cut_tree(tree, thr)[0] for thr in thresholds]
+    labs = assign(xa, cents) if assign else [(xa @ c.T).argmax(1) for c in cents]
+    res = {}
+    for thr, lab in zip(thresholds, labs):
+        out = _labels_like(active)
+        out[active] = lab
+        res[thr] = out
+    return res
 
 
 def online_registry(emb: np.ndarray, active: np.ndarray, chunk: int, tau: float, min_mass: float = 0.03,

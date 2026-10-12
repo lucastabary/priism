@@ -321,9 +321,15 @@ def _registry_eval(args: argparse.Namespace) -> None:
     test = [s for spec in args.test for s in select(args.cache, spec, lazy=True)]
     chunk = max(1, round(args.chunk / test[0].frame_s))
     jobs = args.jobs or max(1, (os.cpu_count() or 2) - 2)
+    device = args.device
+    if device == "auto":
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     results = []
     for level in (["track", "instrument"] if args.level == "both" else [args.level]):
-        r = compare(tune, test, chunk, level, tuple(args.methods or METHODS), head=args.head, jobs=jobs)
+        r = compare(tune, test, chunk, level, tuple(args.methods or METHODS), head=args.head, jobs=jobs,
+                    full_grid=args.full_grid, device=device)
         print(markdown(r), flush=True)
         results.append(r)
     if args.out:
@@ -765,6 +771,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--chunk", type=float, default=4.0, help="seconds per chunk")
     p.add_argument("--out", help="JSON file with every per-song score")
     p.add_argument("--jobs", type=int, help="worker processes, one song each (default: CPU count - 2)")
+    p.add_argument("--full-grid", action="store_true",
+                   help="also score the test songs at every threshold (diagnostics; same results, ~10x slower)")
+    p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "auto"],
+                   help="k-means and assignments of the clusterings on the GPU (cuda; each worker holds a CUDA "
+                        "context) or the CPU (exact reference)")
     p.set_defaults(func=_registry_eval)
 
     p = sub.add_parser("registry-domain", help="linear probe: how easily cached song sets are told apart (domain gap)")

@@ -76,11 +76,13 @@ def _vmeasure(C: np.ndarray) -> tuple[float, float, float]:
 
 
 def score(labels: np.ndarray, energy: np.ndarray, chunk: int, groups: np.ndarray | None = None,
-          births: list[tuple[int, int]] | None = None, entry_tol: int | None = None, floor_db: float = 60.0
-          ) -> dict:
+          births: list[tuple[int, int]] | None = None, entry_tol: int | None = None, floor_db: float = 60.0,
+          owned: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
     """All metrics of one song. ``chunk``: frames per chunk; ``births``: (frame, cluster id) of every id the
-    method created, for the entry scores; ``entry_tol``: frames of slack for an entry (default one chunk)."""
-    shares, audible = ownership(energy, groups, floor_db)
+    method created, for the entry scores; ``entry_tol``: frames of slack for an entry (default one chunk).
+    ``owned``: ``ownership(energy, groups, floor_db)`` if already computed (a grid scores one song many
+    times; ``energy`` and ``groups`` are then unused)."""
+    shares, audible = owned if owned is not None else ownership(energy, groups, floor_db)
     C = contingency(labels, shares, audible)
     pur, comp = _pur_comp(C)
     hom, vcom, v = _vmeasure(C)

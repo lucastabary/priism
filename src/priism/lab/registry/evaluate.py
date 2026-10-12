@@ -6,20 +6,24 @@ any choice. Each test song gives one paired observation per method; methods are 
 method with a bootstrap CI over songs, the paired effect size d_z and a Wilcoxon test (Holm-corrected
 over the comparisons).
 
-Every song is scored once for every (method, threshold) of the grid, in parallel (one process per song,
-``jobs``): tuning then only reads the table, and the test songs' rows at the chosen thresholds are the
-results. Scoring a test song at thresholds it was not tuned for costs time, not validity.
+The tune songs are scored for every (method, threshold) of the grid, in parallel (one process per song,
+``jobs``); the test songs then only at each method's chosen threshold (``full_grid`` scores them at every
+threshold too, for diagnostics: same results, about ten times the cost). Per song, what does not depend on
+the threshold (the k-means and linkage of the clusterings, the references' ownership) is computed once
+and cut at every threshold (``track.*_sweep``), with labels identical to one run per threshold.
 """
 
 from __future__ import annotations
 
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
 from .features import Cached, load_cache
 from .metrics import ownership, paired_compare, score
-from .track import online_registry, per_chunk, per_chunk_linked, whole_song
+from .track import (online_registry, per_chunk, per_chunk_linked, per_chunk_linked_sweep, per_chunk_sweep, whole_song,
+                    whole_song_sweep)
 
 
 def _log(*a) -> None:  # flushed: a redirected log shows progress as it happens
@@ -71,21 +75,57 @@ def _embedder(head: str | None):
     return _HEADS[head].embed
 
 
+def method_sweep(name: str, emb: np.ndarray, audible: np.ndarray, chunk: int, params, seed: int = 0,
+                 device: str = "cpu") -> dict[float, tuple[np.ndarray, list | None]]:
+    """{param: ``run_method(name, emb, audible, chunk, param, seed)``} for every param, sharing the work that
+    does not depend on it (``track.*_sweep``: identical labels). The online registries depend on tau from
+    their first chunk on, so they run once per tau. ``device`` "cuda": the micro k-means and the final
+    assignment on the GPU (``track_gpu``; same algorithm, float32 rounding of another library)."""
+    kw = {}
+    if device != "cpu":
+        from .track_gpu import gpu_ops
+
+        kw = gpu_ops(device)
+    if name == "per_chunk":
+        return {g: (lab, None) for g, lab in
+                per_chunk_sweep(emb, audible, chunk, params, seed, kmeans=kw.get("kmeans")).items()}
+    if name == "per_chunk_linked":
+        return {g: (lab, None) for g, lab in
+                per_chunk_linked_sweep(emb, audible, chunk, params, seed, kmeans=kw.get("kmeans")).items()}
+    if name == "whole_song":
+        return {g: (lab, None) for g, lab in whole_song_sweep(emb, audible, params, seed, **kw).items()}
+    return {g: run_method(name, emb, audible, chunk, g, seed) for g in params}
+
+
 def _song_grid(args) -> tuple[str, dict]:
-    """One song, every (method, threshold): {(method, param): scores}. Runs in a worker process."""
-    song, head, chunk, level, methods = args
+    """One song, every (method, param) of ``params`` [(method, params)]: {(method, param): scores}. Runs in a
+    worker process. ``sweep`` False: the reference path, one ``run_method`` and ``ownership`` per cell."""
+    song, head, chunk, level, params, sweep, device = args
     if isinstance(song, str):
         song = load_cache(song)
     embed = _embedder(head)
     emb = embed(song.tokens)  # once per song, shared by every method
-    return song.name, {(m, g): song_scores(song, lambda _: emb, m, g, chunk, level) for m in methods for g in GRID[m]}
+    if not sweep:
+        return song.name, {(m, g): song_scores(song, lambda _: emb, m, g, chunk, level) for m, gs in params for g in gs}
+    groups = song.instruments if level == "instrument" else None
+    energy = song.energy  # float16 -> float32 expansion once, not once per cell
+    owned = ownership(energy, groups)
+    out = {}
+    for m, gs in params:
+        for g, (lab, births) in method_sweep(m, emb, owned[1], chunk, gs, device=device).items():
+            out[(m, g)] = score(lab, energy, chunk, groups, births=births, owned=owned)
+    return song.name, out
 
 
 def score_grid(songs: list[Cached], chunk: int, level: str, head: str | None = None, methods=METHODS,
-               jobs: int = 1, log=_log) -> dict[str, dict]:
-    """{song name: {(method, param): scores}} for every song; songs with a ``path`` are reloaded in the
-    workers instead of being pickled across."""
-    tasks = [(s.path or s, head, chunk, level, tuple(methods)) for s in songs]
+               jobs: int = 1, log=_log, params: dict | None = None, sweep: bool = True, device: str = "cpu"
+               ) -> dict[str, dict]:
+    """{song name: {(method, param): scores}} for every song, at ``params`` {method: [param]} (default the
+    whole ``GRID``); songs with a ``path`` are reloaded in the workers instead of being pickled across, so a
+    worker holds one song at a time."""
+    params = params or {m: GRID[m] for m in methods}
+    todo = tuple((m, tuple(params[m])) for m in methods)
+    tasks = [(s.path or s, head, chunk, level, todo, sweep, device) for s in songs]
     out = {}
     if jobs <= 1:
         for i, t in enumerate(tasks, 1):
@@ -93,7 +133,9 @@ def score_grid(songs: list[Cached], chunk: int, level: str, head: str | None = N
             out[name] = grid
             log(f"scored {i}/{len(tasks)}: {name}")
         return out
-    with ProcessPoolExecutor(jobs) as ex:
+    # CUDA cannot be used in a forked child of a process that touched it: GPU workers start fresh.
+    ctx = multiprocessing.get_context("spawn") if device != "cpu" else None
+    with ProcessPoolExecutor(jobs, mp_context=ctx) as ex:
         for i, (name, grid) in enumerate(ex.map(_song_grid, tasks), 1):
             out[name] = grid
             log(f"scored {i}/{len(tasks)}: {name}")
@@ -107,15 +149,20 @@ def _f(rows: list[dict]) -> float:
 
 def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, level: str = "track",
             methods=METHODS, reference: str = "online_two_pass", head: str | None = None, jobs: int = 1,
-            log=_log) -> dict:
-    """Tune each method on ``tune_songs``, score on ``test_songs`` -> per-song rows, means and paired tests."""
-    tune_grid = score_grid(tune_songs, chunk, level, head, methods, jobs, log)
-    test_grid = score_grid(test_songs, chunk, level, head, methods, jobs, log)
+            log=_log, full_grid: bool = False, sweep: bool = True, device: str = "cpu") -> dict:
+    """Tune each method on ``tune_songs``, score on ``test_songs`` -> per-song rows, means and paired tests.
+
+    ``full_grid``: also score the test songs at every threshold (diagnostics, the old behaviour; the results
+    are the same). Otherwise their ``grid`` entries hold only the chosen (method, param) cells.
+    ``sweep`` False: the per-threshold reference path (slow, for equivalence checks)."""
+    tune_grid = score_grid(tune_songs, chunk, level, head, methods, jobs, log, sweep=sweep, device=device)
     params, tuning = {}, {}
     for m in methods:
         res = {g: _f([tune_grid[s.name][(m, g)] for s in tune_songs]) for g in GRID[m]}
         params[m], tuning[m] = max(res, key=res.get), res
         log(f"tune {m} ({level}): " + ", ".join(f"{g}: {v:.3f}" for g, v in res.items()) + f" -> {params[m]}")
+    test_grid = score_grid(test_songs, chunk, level, head, methods, jobs, log,
+                           params=None if full_grid else {m: [params[m]] for m in methods}, sweep=sweep, device=device)
     rows = {m: [test_grid[s.name][(m, params[m])] for s in test_songs] for m in methods}
     keys = list(dict.fromkeys(k for m in methods for k, v in rows[m][0].items() if isinstance(v, (int, float))))
     summary = {m: {k: _mean_ci([r.get(k, np.nan) for r in rows[m]]) for k in keys} for m in methods}
@@ -131,7 +178,8 @@ def compare(tune_songs: list[Cached], test_songs: list[Cached], chunk: int, leve
                 pv.append((name, tests[name].get("wilcoxon_p", np.nan)))
         for name, p_holm in _holm(pv).items():
             tests[name]["wilcoxon_p_holm"] = p_holm
-    grid = {name: {f"{m}@{g}": r for (m, g), r in g_rows.items()} for name, g_rows in {**tune_grid, **test_grid}.items()}
+    both = {name: {**tune_grid.get(name, {}), **test_grid.get(name, {})} for name in {**tune_grid, **test_grid}}
+    grid = {name: {f"{m}@{g}": r for (m, g), r in g_rows.items()} for name, g_rows in both.items()}
     return {"level": level, "params": params, "tuning": tuning, "n_tune": len(tune_songs),
             "n_test": len(test_songs), "summary": summary, "tests": tests, "songs": [s.name for s in test_songs],
             "rows": rows, "grid": grid}
