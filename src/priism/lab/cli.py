@@ -350,10 +350,12 @@ def _train_id(args: argparse.Namespace) -> None:
 
     train = [s for spec in args.train for s in select(args.cache, spec)]
     valid = [s for spec in args.valid for s in select(args.cache, spec)]
+    bench = [s for spec in args.bench for s in select(args.cache, spec)] if args.bench else None
     summary = train_head(train, valid, args.out, level=args.level, steps=args.steps, lr=args.lr, dim=args.dim,
                          context=args.context, chunk_s=args.chunk, min_gap_s=args.min_gap,
                          eval_every=args.eval_every, plateau=args.plateau, device=args.device,
-                         group_local=args.group_local,
+                         group_local=args.group_local, bench=bench, bench_every=args.bench_every,
+                         bench_cut=args.bench_cut,
                          max_minutes=args.max_minutes, seed=args.seed)
     print(summary)
 
@@ -736,6 +738,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-minutes", type=float, default=120.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu", help="cpu or cuda")
+    p.add_argument("--bench", nargs="*", help="dev sets scored with whole-song V-measure during training (e.g. moises%%dev2)")
+    p.add_argument("--bench-every", type=int, default=4, help="evaluations between two benchmarks")
+    p.add_argument("--bench-cut", type=float, default=0.2, help="whole-song cut used by the benchmark")
     p.add_argument("--group-local", action="store_true",
                    help="group stems (NI, stem loops) are positives only within a chunk, never across time")
     p.set_defaults(func=_train_id)

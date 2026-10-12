@@ -154,11 +154,17 @@ def _auc(pos: np.ndarray, neg: np.ndarray) -> float:
     return float((ranks[: len(pos)].sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
+def _set_of(song: Cached) -> str:
+    """The cache set a song comes from (its folder: synth-valid, ni, moises...), for per-set scores."""
+    return Path(song.path).parent.name if song.path else "set"
+
+
 def validate(embed, songs: list[Cached], pairs) -> dict:
     """Threshold-free score of an embedding (the head's, or the raw tokens for the baseline): mean over songs
     of the AUC separating same-source from different-source token pairs, on all pairs and on far pairs
-    (``min_gap`` apart: the long-range identity this head is for). ``far_auc`` drives early stopping."""
-    a_all, a_far = [], []
+    (``min_gap`` apart: the long-range identity this head is for). ``far_auc`` drives early stopping;
+    ``far_auc_<set>`` gives it per cache set, so a gain on synthetic songs that costs real ones shows."""
+    a_all, a_far, per = [], [], {}
     for i, rows, labels, far in pairs:
         z = embed(songs[i].tokens)[rows[:, 0], rows[:, 1]]
         z = z / np.maximum(np.linalg.norm(z, axis=1, keepdims=True), 1e-8)
@@ -167,7 +173,24 @@ def validate(embed, songs: list[Cached], pairs) -> dict:
         iu = np.triu(np.ones_like(same), 1).astype(bool)
         a_all.append(_auc(sim[iu & same], sim[iu & ~same]))
         a_far.append(_auc(sim[iu & same & far], sim[iu & ~same & far]))
-    return {"auc": float(np.nanmean(a_all)), "far_auc": float(np.nanmean(a_far)), "songs": len(pairs)}
+        per.setdefault(_set_of(songs[i]), []).append(a_far[-1])
+    out = {"auc": float(np.nanmean(a_all)), "far_auc": float(np.nanmean(a_far)), "songs": len(pairs)}
+    out.update({f"far_auc_{k}": float(np.nanmean(v)) for k, v in per.items()})
+    return out
+
+
+def benchmark(embed, songs: list[Cached], cut: float, chunk: int) -> dict:
+    """The real test metric on held-out dev songs during training: whole-song clustering at a fixed cut,
+    track-level V-measure, mean per cache set (``bench_v_<set>``). No test song is ever used here."""
+    from .metrics import score
+    from .track import whole_song
+
+    per: dict = {}
+    for s in songs:
+        _, audible = ownership(s.energy)
+        lab = whole_song(embed(s.tokens), audible, cut)
+        per.setdefault(_set_of(s), []).append(score(lab, s.energy, chunk)["v_measure"])
+    return {f"bench_v_{k}": float(np.mean(v)) for k, v in per.items()}
 
 
 def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level: str = "instrument",
@@ -175,7 +198,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                chunk_s: float = 4.0, min_gap_s: float = 20.0, lr: float = 1e-3, temp: float = 0.1,
                dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
-               device: str = "cpu", group_local: bool = False, log=_log) -> dict:
+               device: str = "cpu", group_local: bool = False, bench: list[Cached] | None = None,
+               bench_every: int = 4, bench_cut: float = 0.2, log=_log) -> dict:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -195,6 +219,9 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     best, since, start, hist = -1.0, 0, time.time(), out / "history.jsonl"
     hist.unlink(missing_ok=True)
     raw = validate(lambda x: x, valid, pairs)  # phase 1 baseline: the cached tokens themselves
+    if bench:  # the raw tokens on the same benchmark, the line to stay above
+        raw.update(benchmark(lambda x: x, bench, bench_cut, chunk))
+    n_eval = 0
     log(json.dumps({"step": 0, "raw": raw}))
     with hist.open("a") as f:
         f.write(json.dumps({"step": 0, "raw": raw}) + "\n")
@@ -237,6 +264,9 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             head.eval()
             t_val = time.time()
             v = validate(head.embed, valid, pairs)
+            n_eval += 1
+            if bench and (n_eval % bench_every == 0 or step == steps):
+                v.update(benchmark(head.embed, bench, bench_cut, chunk))
             head.train()
             rec = {"step": step, "loss": float(np.mean(losses)), "minutes": (time.time() - start) / 60,
                    "sec_per_step": sec_step, "valid_sec": time.time() - t_val, **v}
