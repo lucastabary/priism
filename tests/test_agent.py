@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -80,6 +81,20 @@ def test_job_runs_logs_and_uploads_results(tmp_path):
     assert store.get(f"queue/done/{jid}.json") is not None and store.get(f"queue/running/{jid}.json") is None
     got = jobs.pull(store, jid, tmp_path / "pulled")
     assert [p.read_text() for p in got] == ["ok"]
+
+
+def test_results_file_ships_even_if_older_than_the_job(tmp_path):
+    store, agent = make_agent(tmp_path)
+    old = agent.workdir / "runs" / "best.pt"
+    old.parent.mkdir(parents=True)
+    old.write_text("weights")
+    os.utime(old, (1.0, 1.0))  # written long before this job, by an earlier one
+    (agent.workdir / "runs" / "stale.txt").write_text("x")
+    os.utime(agent.workdir / "runs" / "stale.txt", (1.0, 1.0))
+    st = run(agent, store, Job("phase1", ["probe"], gpu=False, id="ship", results=["runs/best.pt"]), "print('ok')")
+    assert st["state"] == "done"
+    assert store.get("results/ship/runs/best.pt") == b"weights"
+    assert store.get("results/ship/runs/stale.txt") is None
 
 
 def test_stall_and_cancel_stop_the_job(tmp_path):

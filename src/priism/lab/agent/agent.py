@@ -485,8 +485,12 @@ class Agent:
             if not ok:
                 return
             for folder in job.results:
-                for p in sorted((self.workdir / folder).rglob("*")) if (self.workdir / folder).exists() else []:
-                    if p.is_file() and p.stat().st_mtime >= rec["start"] - 5:
+                # A folder ships only what this job wrote (shared folders hold older runs); a file named
+                # explicitly ships whatever its age, so an earlier job's output (a checkpoint) can be fetched.
+                root = self.workdir / folder
+                paths = [root] if root.is_file() else sorted(root.rglob("*")) if root.exists() else []
+                for p in paths:
+                    if p.is_file() and (p == root or p.stat().st_mtime >= rec["start"] - 5):
                         key = f"results/{job.id}/{p.relative_to(self.workdir).as_posix()}"
                         if not self._try(self.store.upload_file, key, p):
                             return

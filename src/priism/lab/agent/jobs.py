@@ -46,7 +46,7 @@ class Job:
     max_minutes: float = 240.0
     stall_minutes: float = 20.0  # no new log line for this long: stopped (lab rule)
     gpu_idle_minutes: float = 15.0  # a GPU job whose GPU sits at 0 % this long: stopped
-    results: list[str] = field(default_factory=list)  # folders (relative) uploaded when the job ends
+    results: list[str] = field(default_factory=list)  # folders (what the job wrote) or files (relative), uploaded at the end
     env: dict[str, str] = field(default_factory=dict)
     created: float = 0.0
 
