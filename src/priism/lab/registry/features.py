@@ -48,7 +48,10 @@ class Trunk(Protocol):
 class MsstTrunk:
     """The BS-Roformer trunk up to its final norm (the separator's ``_features``), frozen, in bf16 on GPU."""
 
-    def __init__(self, config: str | Path, ckpt: str | Path, msst_path: str | Path, device: str = "cuda"):
+    def __init__(self, config: str | Path, ckpt: str | Path, msst_path: str | Path, device: str = "cuda",
+                 layers: str = "final"):
+        # "6,final": block 6 and final_norm concatenated (2 x 256 dims) before the PCA.
+        self.taps = tuple(t if t == "final" else int(t) for t in layers.split(","))
         from ..model.msst_core import MsstAttractorSeparator, load_msst_roformer
 
         import yaml
@@ -66,7 +69,7 @@ class MsstTrunk:
     @torch.no_grad()
     def __call__(self, wav: torch.Tensor) -> torch.Tensor:
         with torch.autocast("cuda", torch.bfloat16, enabled=self.device.startswith("cuda")):
-            h, _, _ = self.model._features(wav[None].to(self.device))
+            h, _, _ = self.model._features(wav[None].to(self.device), taps=self.taps)
         return h[0].float().cpu()
 
 

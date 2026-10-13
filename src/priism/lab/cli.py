@@ -295,7 +295,7 @@ def _cache_features(args: argparse.Namespace) -> None:
     from .registry.run import build_cache, parse_sets
 
     sets = parse_sets(args.set)
-    trunk = MsstTrunk(args.msst_config, args.msst_ckpt, args.msst_path, args.device)
+    trunk = MsstTrunk(args.msst_config, args.msst_ckpt, args.msst_path, args.device, layers=args.layers)
     info = build_cache(trunk, sets, args.out, args.fit_set or next(iter(sets)), args.fit_songs, args.dims,
                        args.pool, args.window, args.margin, args.limit)
     for name, s in info["sets"].items():
@@ -759,6 +759,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--msst-ckpt", required=True)
     p.add_argument("--msst-path", required=True, help="MSST repository (for its BSRoformer class)")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--layers", default="final",
+                   help="trunk layers, concatenated before the PCA: block numbers and/or final (e.g. 6,final)")
     p.set_defaults(func=_cache_features)
 
     p = sub.add_parser("registry-eval", help="compare source-tracking methods on cached songs (phase 1/2)")

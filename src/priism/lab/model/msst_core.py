@@ -203,9 +203,11 @@ class MsstAttractorSeparator(nn.Module):
         edges = torch.tensor([0] + sizes).cumsum(0).float() * sr / n_fft
         return torch.stack([edges[:-1], edges[1:]], 1)
 
-    def _features(self, raw: torch.Tensor, r: nn.Module | None = None):
+    def _features(self, raw: torch.Tensor, r: nn.Module | None = None, taps: tuple = ("final",)):
         """Same steps as BSRoformer.forward up to final_norm. raw (B, C, S) -> x (B, T, Nb, D), stft (B, F*C, T, 2).
-        ``r``: another core with the same layout (the frozen JEPA target encoder)."""
+        ``r``: another core with the same layout (the frozen JEPA target encoder). ``taps``: the layers returned,
+        concatenated on D, as block numbers (1-based, residual stream before final_norm) and/or "final"; the
+        registry probes found within-class identity in block 6, which final_norm discards."""
         from einops import pack, rearrange, unpack
 
         r = r if r is not None else self.r
@@ -215,7 +217,7 @@ class MsstAttractorSeparator(nn.Module):
         spec = torch.view_as_real(spec).reshape(B, C, *spec.shape[-2:], 2)
         stft_repr = rearrange(spec, "b s f t c -> b (f s) t c")
         x = r.band_split(rearrange(stft_repr, "b f t c -> b t (f c)"))
-        store = [None] * len(r.layers)
+        store, tapped = [None] * len(r.layers), {}
         for i, block in enumerate(r.layers):
             if len(block) == 3:
                 linear_t, time_t, freq_t = block
@@ -229,7 +231,12 @@ class MsstAttractorSeparator(nn.Module):
             x = self._ckpt(self._axial, x, time_t, freq_t)
             if r.skip_connection:
                 store[i] = x
-        return r.final_norm(x), stft_repr, window
+            if i + 1 in taps:
+                tapped[i + 1] = x
+        if tuple(taps) == ("final",):
+            return r.final_norm(x), stft_repr, window
+        tapped["final"] = r.final_norm(x)
+        return torch.cat([tapped[t] for t in taps], -1), stft_repr, window
 
     def target_latents(self, wav: torch.Tensor) -> torch.Tensor:
         """JEPA targets of clean sources (N, C, S) -> (N, T, Nb * 8)."""
