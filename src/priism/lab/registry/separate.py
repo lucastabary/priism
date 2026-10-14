@@ -255,6 +255,21 @@ def stem_cut_from_env(stems) -> dict[int, float]:
     return out
 
 
+def _confident_split(counts: np.ndarray, cent: np.ndarray) -> bool:
+    """Split a SW stem only when its two largest clusters are both substantial and far apart:
+    ``PRIISM_SPLIT="share=0.15,dist=0.3"`` (second cluster >= share of the owned tokens, cosine distance
+    between the two centroids >= dist). Unset: always split (the previous behaviour)."""
+    spec = os.environ.get("PRIISM_SPLIT", "").strip()
+    if not spec:
+        return True
+    p = {k: float(v) for k, _, v in (i.partition("=") for i in spec.split(",") if i)}
+    order = np.argsort(-counts)
+    a, b = order[0], order[1]
+    share = counts[b] / counts.sum()
+    dist = 1.0 - float(cent[a] @ cent[b])
+    return share >= p.get("share", 0.0) and dist >= p.get("dist", 0.0)
+
+
 def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5, floor_db: float = 60.0,
                      min_share: float = 0.02, temp: float = 0.0, min_tokens: int = 64, seed: int = 0,
                      stem_cut: dict[int, float] | None = None) -> dict[float, list[tuple[np.ndarray, list[dict]]]]:
@@ -283,6 +298,12 @@ def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5
             keep = [j for j in np.argsort(-counts) if counts[j] >= min_share * n_own] or [int(counts.argmax())]
             xa = x[owned[s]]
             cent = normalise(np.stack([xa[lab == j].sum(0) for j in keep]))
+            if len(keep) >= 2 and not _confident_split(counts[keep], cent):
+                # Not sure the stem holds several sources: keep it whole (splitting a one-source stem
+                # only costs, e.g. NI's coarse stems).
+                out[c].append((np.ones((1, *energy.shape[1:]), np.float32),
+                               [{"cluster": 0, "owned_tokens": n_own, "centroid": None}]))
+                continue
             out[c].append((_partition(x, cent, temp),
                            [{"cluster": i, "owned_tokens": int(counts[j]), "centroid": cent[i]}
                             for i, j in enumerate(keep)]))
