@@ -151,6 +151,10 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
     systems["sw"] = picked(S_sw, SI_sw, match(S_sw, False))
     systems["sw_1to1"] = picked(S_sw, SI_sw, match(S_sw, True))
     best_stem = S_sw.argmax(0)
+    # The oracles split each SW stem among the references it actually carries: the stem with the largest
+    # projection <ref, stem>. The best-SDR stem is a coin toss for quiet references (every SDR ~ 0 dB), which
+    # sent them to stems that do not hold them and made the "ceilings" score below the registry.
+    oracle_stem = d.argmax(0)
     n_out["sw"] = n
     secs = {"sw": an.seconds["sw"], "render_sw": time.time() - t}
 
@@ -192,7 +196,7 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
     from .decoder import oracle_bin_render
 
     outs = (y for s in range(len(an.stems)) for y in (
-        oracle_bin_render(model, an.spec[s], refs[best_stem == s], an.length) if (best_stem == s).any()
+        oracle_bin_render(model, an.spec[s], refs[oracle_stem == s], an.length) if (oracle_stem == s).any()
         else [model.istft(an.spec[s], an.length)]))
     d, e, n = stats(outs)
     S, SI = score_matrix(rr, d, e)
@@ -202,7 +206,7 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
     secs["oracle_bin"] = time.time() - t
 
     t = time.time()
-    ow = oracle_weights(ref_token_energy(model, refs, pool), best_stem, len(an.stems))
+    ow = oracle_weights(ref_token_energy(model, refs, pool), oracle_stem, len(an.stems))
     outs = (y for s in range(len(an.stems)) for y in render(model, an.spec[s], ow[s][0], pool, an.length, smooth))
     d, e, n = stats(outs)
     S, SI = score_matrix(rr, d, e)
