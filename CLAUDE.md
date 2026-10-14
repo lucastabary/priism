@@ -102,7 +102,9 @@ GPU), and the GPU may be a friend's PC over SSH rather than RunPod: GPU work mus
 commands, not only through the pod job queue.
 Code: `src/priism/lab/registry/` (features cache, tracking methods, metrics, identity head, evaluation),
 commands `priism-lab cache-features` (GPU, once per song), `registry-eval` and `train-id` (CPU is enough),
-`scripts/registry_phase1.sh probe|full` for a GPU machine, tests in `tests/test_registry.py`. Generator
+`scripts/registry_phase1.sh probe|full` for a GPU machine, tests in `tests/test_registry.py`. Fine decoder
+(bin masks per registry query on the frozen SW, `priism-lab train-decoder`, `--decoder` in `registry-separate[-eval]`):
+`src/priism/lab/registry/decoder.py`, `docs/registry-separate.md`, `tests/test_decoder.py`. Generator
 switches for it: `PRIISM_BUILDUP_P` (sources enter one at a time), `PRIISM_FX_AUTO_P` (effects change
 between sections); both default to 0, so other songs stay identical.
 
