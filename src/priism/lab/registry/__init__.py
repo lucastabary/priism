@@ -10,5 +10,7 @@ trained yet:
 - ``track``: ways to give every token a song-wide source id (per-chunk clustering, whole-song clustering,
   an online registry that grows when something new enters);
 - ``metrics``: how consistent those ids are over the song (purity, completeness, permutations, entries);
-- ``head``: the identity head trained on the cache (phase 2).
+- ``head``: the identity head trained on the cache (phase 2);
+- ``separate`` / ``separate_eval``: a prototype separator that splits each SW stem by the head's clusters
+  into audio, and its SDR evaluation against SW alone and an oracle split (``docs/registry-separate.md``).
 """

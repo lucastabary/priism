@@ -379,6 +379,35 @@ def _registry_encoders(args: argparse.Namespace) -> None:
     print(summarize(args.out))
 
 
+def _registry_model(args: argparse.Namespace):
+    """(SW stem model, PCA, identity head or None) shared by registry-separate and its evaluation."""
+    from .registry.features import Projection
+    from .registry.head import load_head
+    from .registry.separate import MsstStems
+
+    model = MsstStems(args.msst_config, args.msst_ckpt, args.msst_path, args.device, layers=args.layers)
+    head = load_head(args.head).to(args.device) if args.head else None
+    return model, Projection.load(args.proj), head
+
+
+def _registry_separate(args: argparse.Namespace) -> None:
+    from .registry.separate import separate_file
+
+    model, proj, head = _registry_model(args)
+    separate_file(model, args.input, args.out, proj, head, cut=args.cut, own=args.own, min_share=args.min_share,
+                  temp=args.temp, smooth=args.smooth, pool=args.pool, window_s=args.window, margin_s=args.margin,
+                  write_stems=args.write_stems, seed=args.seed)
+
+
+def _registry_separate_eval(args: argparse.Namespace) -> None:
+    from .registry.separate_eval import run
+
+    model, proj, head = _registry_model(args)
+    run(model, args.set, args.out, proj, head, songs=args.songs, limit=args.limit, cuts=tuple(args.cut),
+        own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
+        window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed)
+
+
 def _train_id(args: argparse.Namespace) -> None:
     from .registry.head import train_head
     from .registry.run import select
@@ -837,6 +866,49 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--group-local", action="store_true",
                    help="group stems (NI, stem loops) are positives only within a chunk, never across time")
     p.set_defaults(func=_train_id)
+
+    def registry_sep_args(p, many_cuts: bool):
+        p.add_argument("--proj", required=True, help="the cache's proj.npz (tokens projected exactly as cached)")
+        p.add_argument("--head", help="identity head best.pt (train-id); default: raw tokens")
+        if many_cuts:
+            p.add_argument("--cut", type=float, nargs="+", default=[0.3],
+                           help="whole-song cosine cut(s); several share one SW pass (tune on %%dev2)")
+        else:
+            p.add_argument("--cut", type=float, default=0.3, help="whole-song cosine cut")
+        p.add_argument("--own", type=float, default=0.5,
+                       help="share of the stems' power a token needs to shape its stem's clusters")
+        p.add_argument("--min-share", type=float, default=0.02,
+                       help="clusters with fewer owned tokens than this share are merged into the others")
+        p.add_argument("--temp", type=float, default=0.0, help="softmax temperature over centroids (0: hard)")
+        p.add_argument("--smooth", type=int, default=1, help="token frames of triangular smoothing on each side")
+        p.add_argument("--pool", type=int, default=4, help="as the cache")
+        p.add_argument("--window", type=float, default=8.0, help="as the cache")
+        p.add_argument("--margin", type=float, default=1.0, help="as the cache")
+        p.add_argument("--layers", default="6,final", help="trunk taps, as the cache (cache-b6: 6,final)")
+        p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--msst-config", required=True)
+        p.add_argument("--msst-ckpt", required=True)
+        p.add_argument("--msst-path", required=True)
+        p.add_argument("--device", default="cuda")
+
+    p = sub.add_parser("registry-separate",
+                       help="split each SW stem into the sources the identity head finds (WAVs + sources.json)")
+    p.add_argument("input", help="audio file, MoisesDB song folder or NI .stem.mp4")
+    p.add_argument("--out", required=True, help="output folder")
+    p.add_argument("--write-stems", action="store_true", help="also write the 6 SW stems (sw/<stem>.wav)")
+    registry_sep_args(p, many_cuts=False)
+    p.set_defaults(func=_registry_separate)
+
+    p = sub.add_parser("registry-separate-eval",
+                       help="SDR of SW stems vs registry split vs oracle split on multitrack songs (MoisesDB)")
+    p.add_argument("--set", required=True, help="kind:path[%%part], e.g. multitrack:/data/moisesdb%%test")
+    p.add_argument("--out", required=True, help="folder: songs.jsonl (resumes) and summary.json")
+    p.add_argument("--songs", nargs="*", help="only these songs (folder names or substrings)")
+    p.add_argument("--limit", type=int, help="at most this many songs")
+    p.add_argument("--min-ref-db", type=float, default=-40.0,
+                   help="references quieter than this (dB under the mix) are not scored")
+    registry_sep_args(p, many_cuts=True)
+    p.set_defaults(func=_registry_separate_eval)
 
     def store_args(p):
         p.add_argument("--store", help="s3://bucket/prefix or a local folder (default: $PRIISM_STORE)")
