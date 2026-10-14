@@ -389,6 +389,7 @@ class Agent:
         """Download ``inputs/<folder>/...`` of the store into the work folder; a file already there is kept
         (inputs are immutable by convention: a changed dataset goes to a new folder name)."""
         n = skipped = 0
+        beat = time.time()
         try:
             for folder in job.inputs:
                 prefix = f"inputs/{folder.strip('/')}/"
@@ -402,6 +403,9 @@ class Agent:
                     self.store.download_file(key, part)
                     os.replace(part, dest)
                     n += 1
+                    if time.time() - beat > 60:  # gigabytes take a while: keep showing the agent alive
+                        self.heartbeat(f"fetching inputs: {n} files", job.id)
+                        beat = time.time()
         except (StoreError, OSError) as e:
             out.write(f"### inputs failed: {e}\n".encode())
             return 1, f"inputs failed: {e}"
