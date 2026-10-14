@@ -27,6 +27,8 @@ Memory: the stem spectra are the big part, complex64 (6, 2, 1025, T): about 0.6 
 
 from __future__ import annotations
 
+import os
+
 import json
 import time
 from dataclasses import dataclass, field
@@ -241,14 +243,28 @@ def _partition(x: np.ndarray, cent: np.ndarray, temp: float) -> np.ndarray:
     return np.moveaxis(w.astype(np.float32), -1, 0)
 
 
+def stem_cut_from_env(stems) -> dict[int, float]:
+    """``PRIISM_STEM_CUT="drums=0.6,bass=0.6"`` -> {stem index: cut}: per-stem overrides of the whole-song cut,
+    read from the environment so every entry point (separate, eval) gets them without new plumbing."""
+    spec = os.environ.get("PRIISM_STEM_CUT", "").strip()
+    out = {}
+    for item in filter(None, (p.strip() for p in spec.split(","))):
+        name, _, val = item.partition("=")
+        if name in stems:
+            out[list(stems).index(name)] = float(val)
+    return out
+
+
 def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5, floor_db: float = 60.0,
-                     min_share: float = 0.02, temp: float = 0.0, min_tokens: int = 64, seed: int = 0
-                     ) -> dict[float, list[tuple[np.ndarray, list[dict]]]]:
+                     min_share: float = 0.02, temp: float = 0.0, min_tokens: int = 64, seed: int = 0,
+                     stem_cut: dict[int, float] | None = None) -> dict[float, list[tuple[np.ndarray, list[dict]]]]:
     """{cut: per stem (weights (K, Tp, Nb), [{"cluster", "owned_tokens", "centroid"}])}, ``centroid`` the
     unit centroid (d,) of the cluster (the fine decoder's query; None when the stem is not split). All cuts share each stem's
     k-means and linkage (``whole_song_sweep``: the labels of one ``whole_song`` run per cut). A stem that
     owns fewer than ``min_tokens`` tokens is not split (K = 1). Clusters are sorted by owned tokens, the
-    largest first."""
+    largest first. ``stem_cut`` {stem index: cut} overrides every cut for that stem (drums and bass rarely
+    hold several sources worth splitting, vocals and guitars often do)."""
+    stem_cut = stem_cut or {}
     x = normalise(emb)
     owned = owned_tokens(energy, own, floor_db)
     out: dict = {c: [] for c in cuts}
@@ -259,9 +275,10 @@ def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5
                 out[c].append((np.ones((1, *energy.shape[1:]), np.float32),
                                [{"cluster": 0, "owned_tokens": n_own, "centroid": None}]))
             continue
-        labs = whole_song_sweep(emb, owned[s], list(cuts), seed=seed)
+        eff = {c: stem_cut.get(s, c) for c in cuts}
+        labs = whole_song_sweep(emb, owned[s], sorted(set(eff.values())), seed=seed)
         for c in cuts:
-            lab = labs[c][owned[s]]
+            lab = labs[eff[c]][owned[s]]
             counts = np.bincount(lab)
             keep = [j for j in np.argsort(-counts) if counts[j] >= min_share * n_own] or [int(counts.argmax())]
             xa = x[owned[s]]
@@ -374,7 +391,8 @@ def separate_file(model: StemModel, path: str | Path, out: str | Path, proj: Pro
     mix_e = float((wav.astype(np.float64) ** 2).sum())
     t1 = time.time()
     emb = embed(an.tokens, head)
-    w = registry_weights(emb, an.energy, [cut], own=own, min_share=min_share, temp=temp, seed=seed)[cut]
+    w = registry_weights(emb, an.energy, [cut], own=own, min_share=min_share, temp=temp, seed=seed,
+                         stem_cut=stem_cut_from_env(an.stems))[cut]
     masks = None
     if decoder is not None:
         from .decoder import decoder_masks

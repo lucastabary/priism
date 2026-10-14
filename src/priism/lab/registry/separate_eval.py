@@ -46,7 +46,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .metrics import paired_compare
-from .separate import (StemModel, analyse, embed, oracle_weights, ref_token_energy, registry_weights, render,
+from .separate import (StemModel, stem_cut_from_env, analyse, embed, oracle_weights, ref_token_energy, registry_weights, render,
                        stem_queries)
 
 EPS = 1e-8
@@ -160,7 +160,8 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
 
     t = time.time()
     emb = embed(an.tokens, head)
-    weights = registry_weights(emb, an.energy, list(cuts), own=own, min_share=min_share, temp=temp, seed=seed)
+    weights = registry_weights(emb, an.energy, list(cuts), own=own, min_share=min_share, temp=temp, seed=seed,
+                               stem_cut=stem_cut_from_env(an.stems))
     secs["cluster"] = time.time() - t
     t = time.time()
     for c in cuts:
