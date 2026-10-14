@@ -102,23 +102,29 @@ class MsstStems:
         self._core.r = r
 
     @torch.no_grad()
-    def __call__(self, wav: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+    def taps_and_spec(self, wav: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(B, C, S) -> (taps (B, T, Nb, D) bf16/float32, stem spectra (B, N, C, F, T) complex64), on the
+        model's device: the batched form the fine decoder trains on."""
         from einops import rearrange
 
-        r, C = self.r, wav.shape[0]
+        r, C = self.r, wav.shape[1]
         with torch.autocast("cuda", torch.bfloat16, enabled=self.device.startswith("cuda")):
-            h, stft_repr, _ = self._core._features(wav[None].to(self.device), taps=self._req)
+            h, stft_repr, _ = self._core._features(wav.to(self.device), taps=self._req)
             i = self._req.index("final")
             final = h[..., i * self.dim:(i + 1) * self.dim]
-            mask = torch.stack([fn(final) for fn in r.mask_estimators], 1)  # (1, N, T, F*C*2)
+            mask = torch.stack([fn(final) for fn in r.mask_estimators], 1)  # (B, N, T, F*C*2)
         mask = rearrange(mask.float(), "b n t (f c) -> b n f t c", c=2)  # complex math in fp32
         spec = torch.view_as_complex(stft_repr.float().contiguous())[:, None] * torch.view_as_complex(mask.contiguous())
-        spec = rearrange(spec, "b n (f s) t -> b n s f t", s=C)[0]
+        spec = rearrange(spec, "b n (f s) t -> b n s f t", s=C)
         if getattr(r, "zero_dc", False):
-            spec[:, :, 0] = 0
+            spec[:, :, :, 0] = 0
         if self._req != self.taps:  # "final" was only needed by the heads
             h = h[..., : len(self.taps) * self.dim]
-        return h[0].float().cpu().numpy(), spec.cpu().numpy().astype(np.complex64)
+        return h, spec
+
+    def __call__(self, wav: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+        h, spec = self.taps_and_spec(wav[None])
+        return h[0].float().cpu().numpy(), spec[0].cpu().numpy().astype(np.complex64)
 
     def istft(self, spec: np.ndarray, length: int) -> np.ndarray:
         r = self.r
@@ -238,7 +244,8 @@ def _partition(x: np.ndarray, cent: np.ndarray, temp: float) -> np.ndarray:
 def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5, floor_db: float = 60.0,
                      min_share: float = 0.02, temp: float = 0.0, min_tokens: int = 64, seed: int = 0
                      ) -> dict[float, list[tuple[np.ndarray, list[dict]]]]:
-    """{cut: per stem (weights (K, Tp, Nb), [{"cluster", "owned_tokens"}])}. All cuts share each stem's
+    """{cut: per stem (weights (K, Tp, Nb), [{"cluster", "owned_tokens", "centroid"}])}, ``centroid`` the
+    unit centroid (d,) of the cluster (the fine decoder's query; None when the stem is not split). All cuts share each stem's
     k-means and linkage (``whole_song_sweep``: the labels of one ``whole_song`` run per cut). A stem that
     owns fewer than ``min_tokens`` tokens is not split (K = 1). Clusters are sorted by owned tokens, the
     largest first."""
@@ -249,7 +256,8 @@ def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5
         n_own = int(owned[s].sum())
         if n_own < min_tokens:
             for c in cuts:
-                out[c].append((np.ones((1, *energy.shape[1:]), np.float32), [{"cluster": 0, "owned_tokens": n_own}]))
+                out[c].append((np.ones((1, *energy.shape[1:]), np.float32),
+                               [{"cluster": 0, "owned_tokens": n_own, "centroid": None}]))
             continue
         labs = whole_song_sweep(emb, owned[s], list(cuts), seed=seed)
         for c in cuts:
@@ -259,8 +267,14 @@ def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5
             xa = x[owned[s]]
             cent = normalise(np.stack([xa[lab == j].sum(0) for j in keep]))
             out[c].append((_partition(x, cent, temp),
-                           [{"cluster": i, "owned_tokens": int(counts[j])} for i, j in enumerate(keep)]))
+                           [{"cluster": i, "owned_tokens": int(counts[j]), "centroid": cent[i]}
+                            for i, j in enumerate(keep)]))
     return out
+
+
+def stem_queries(per_stem: list[tuple[np.ndarray, list[dict]]]) -> list[np.ndarray | None]:
+    """``registry_weights`` of one cut -> per stem its centroids (K, d), or None when K < 2 (not split)."""
+    return [np.stack([i["centroid"] for i in info]) if len(info) >= 2 else None for _, info in per_stem]
 
 
 def oracle_weights(ref_energy: np.ndarray, ref_stem: np.ndarray, n_stems: int) -> list[tuple[np.ndarray, list[int]]]:
@@ -338,9 +352,11 @@ def read_input(path: str | Path, sr: int) -> tuple[np.ndarray, int, int]:
 def separate_file(model: StemModel, path: str | Path, out: str | Path, proj: Projection, head=None,
                   cut: float = 0.3, own: float = 0.5, min_share: float = 0.02, temp: float = 0.0,
                   smooth: int = 1, pool: int = 4, window_s: float = 8.0, margin_s: float = 1.0,
-                  write_stems: bool = False, seed: int = 0, log=_log) -> dict:
+                  write_stems: bool = False, seed: int = 0, decoder=None, log=_log) -> dict:
     """Separate one song into ``out``/<stem>_<k>.wav (float WAV, the input's rate, channels and exact
-    length) plus ``sources.json``. ``write_stems``: also the 6 SW stems as ``sw/<stem>.wav``."""
+    length) plus ``sources.json``. ``write_stems``: also the 6 SW stems as ``sw/<stem>.wav``. ``decoder``
+    (``decoder.FineDecoder``): the clusters' sub-sources get its bin-resolution masks instead of the token
+    weights (a second SW pass); same files, same sums."""
     import soundfile as sf
 
     from ...engine.audio import fit, resample
@@ -356,10 +372,15 @@ def separate_file(model: StemModel, path: str | Path, out: str | Path, proj: Pro
         frames = read_track(path).frames
     an = analyse(model, wav, proj, pool, window_s, margin_s, log)
     mix_e = float((wav.astype(np.float64) ** 2).sum())
-    del wav
     t1 = time.time()
     emb = embed(an.tokens, head)
     w = registry_weights(emb, an.energy, [cut], own=own, min_share=min_share, temp=temp, seed=seed)[cut]
+    masks = None
+    if decoder is not None:
+        from .decoder import decoder_masks
+
+        masks = decoder_masks(model, decoder, wav, emb, stem_queries(w), window_s, margin_s, log)
+    del wav
     t2 = time.time()
 
     def write(dest: Path, y: np.ndarray) -> float:
@@ -377,13 +398,19 @@ def separate_file(model: StemModel, path: str | Path, out: str | Path, proj: Pro
         if write_stems:
             write(out / "sw" / f"{name}.wav", model.istft(an.spec[s], an.length))
         weights, info = w[s]
-        for k, y in enumerate(render(model, an.spec[s], weights, pool, an.length, smooth)):
+        if masks is not None and masks[s] is not None:
+            from .decoder import render_masks
+
+            outs = render_masks(model, an.spec[s], masks[s], an.length)
+        else:
+            outs = render(model, an.spec[s], weights, pool, an.length, smooth)
+        for k, y in enumerate(outs):
             f = f"{name}_{k}.wav"
             sources.append({"file": f, "stem": name, "cluster": k, "owned_tokens": info[k]["owned_tokens"],
                             "energy_db": write(out / f, y)})
     meta = {"input": str(path), "sample_rate": in_sr, "frames": frames, "channels": in_ch, "cut": cut,
             "own": own, "min_share": min_share, "temp": temp, "smooth": smooth, "pool": pool,
-            "head": head is not None, "sources": sources,
+            "head": head is not None, "decoder": decoder is not None, "sources": sources,
             "seconds": {"sw": an.seconds["sw"], "cluster": t2 - t1, "render": time.time() - t2,
                         "total": time.time() - t0}}
     tmp = out / "sources.json.tmp"

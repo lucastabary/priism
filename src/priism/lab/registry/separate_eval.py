@@ -12,6 +12,11 @@ Per song, one SW pass (``separate.analyse``) feeds three systems:
   assigned to its best SW stem, each token of a stem given to the loudest of that stem's references). The
   upper bound of splitting SW stems with masks on the 46 ms x band token grid. One-to-one and ``_m2o``.
 
+- ``decoder`` (with ``--decoder``): the registry's clusters, rendered with the fine decoder's bin-resolution
+  masks (``decoder.py``) instead of the token weights. Compared with ``registry`` on the same songs.
+- ``oracle_bin``: ideal ratio masks at bin resolution among each stem's references (assigned as for
+  ``oracle``), on the SW stem estimate: the ceiling of any real mask on SW stems, the decoder's included.
+
 ``sw_1to1`` (Hungarian on the 6 stems) completes the table.
 
 Metrics, on the whole track, channels concatenated, no BSS-eval projections or filters:
@@ -41,7 +46,8 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .metrics import paired_compare
-from .separate import (StemModel, analyse, embed, oracle_weights, ref_token_energy, registry_weights, render)
+from .separate import (StemModel, analyse, embed, oracle_weights, ref_token_energy, registry_weights, render,
+                       stem_queries)
 
 EPS = 1e-8
 
@@ -117,7 +123,8 @@ def picked(S: np.ndarray, SI: np.ndarray, choice: np.ndarray) -> tuple[np.ndarra
 
 def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: float = 0.5,
                   min_share: float = 0.02, temp: float = 0.0, smooth: int = 1, pool: int = 4,
-                  window_s: float = 8.0, margin_s: float = 1.0, min_ref_db: float = -40.0, seed: int = 0) -> dict:
+                  window_s: float = 8.0, margin_s: float = 1.0, min_ref_db: float = -40.0, seed: int = 0,
+                  decoder=None) -> dict:
     """Every system on one ``features.Song`` -> one JSON-ready record (per reference scores, per system)."""
     t0 = time.time()
     refs = song.sources
@@ -162,6 +169,37 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
         systems[name + "_m2o"] = picked(S, SI, match(S, False))
         n_out[name] = n
     secs["render_registry"] = time.time() - t
+
+    if decoder is not None:  # the same clusters, bin-resolution masks from the fine decoder (a second SW pass)
+        from .decoder import decoder_masks, render_masks
+
+        t = time.time()
+        for c in cuts:
+            name = "decoder" if len(cuts) == 1 else f"decoder@{c:g}"
+            masks = decoder_masks(model, decoder, song.mix, emb, stem_queries(weights[c]), window_s, margin_s)
+            outs = (y for s in range(len(an.stems)) for y in (
+                render_masks(model, an.spec[s], masks[s], an.length) if masks[s] is not None
+                else render(model, an.spec[s], weights[c][s][0], pool, an.length, smooth)))
+            d, e, n = stats(outs)
+            S, SI = score_matrix(rr, d, e)
+            systems[name] = picked(S, SI, match(S, True))
+            systems[name + "_m2o"] = picked(S, SI, match(S, False))
+            n_out[name] = n
+            del masks
+        secs["decoder"] = time.time() - t
+
+    t = time.time()
+    from .decoder import oracle_bin_render
+
+    outs = (y for s in range(len(an.stems)) for y in (
+        oracle_bin_render(model, an.spec[s], refs[best_stem == s], an.length) if (best_stem == s).any()
+        else [model.istft(an.spec[s], an.length)]))
+    d, e, n = stats(outs)
+    S, SI = score_matrix(rr, d, e)
+    systems["oracle_bin"] = picked(S, SI, match(S, True))
+    systems["oracle_bin_m2o"] = picked(S, SI, match(S, False))
+    n_out["oracle_bin"] = n
+    secs["oracle_bin"] = time.time() - t
 
     t = time.time()
     ow = oracle_weights(ref_token_energy(model, refs, pool), best_stem, len(an.stems))
@@ -261,8 +299,13 @@ def summarize(records: list[dict]) -> dict:
                 vals[r["song"]] = float(np.mean(v))
         return vals
 
-    pairs = [(a, "sw") for a in systems if a.startswith(("registry", "oracle")) and not a.endswith("_m2o")]
+    pairs = [(a, "sw") for a in systems if a.startswith(("registry", "oracle", "decoder")) and not a.endswith("_m2o")]
     pairs += [("oracle", a) for a in systems if a.startswith("registry") and not a.endswith("_m2o")]
+    # the decoder against the token split it refines (same clusters, same cut), and the bin ceiling against it
+    pairs += [(a, "registry" + a[len("decoder"):]) for a in systems if a.startswith("decoder")
+              and not a.endswith("_m2o") and "registry" + a[len("decoder"):] in systems]
+    pairs += [("oracle_bin", a) for a in systems if a.startswith("decoder") and not a.endswith("_m2o")]
+    pairs += [("oracle_bin", "oracle")] if {"oracle_bin", "oracle"} <= set(systems) else []
     comp = {}
     for a, b in pairs:
         for subset in ("all", "shared"):
@@ -294,7 +337,7 @@ def table(summary: dict) -> str:
 
 
 def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: list[str] | None = None,
-        limit: int | None = None, log=_log, **kw) -> dict:
+        limit: int | None = None, log=_log, decoder=None, **kw) -> dict:
     """Score every selected song, appending one JSON line per song to ``out``/songs.jsonl (a stopped run
     resumes: songs already there are skipped), then ``out``/summary.json over all lines."""
     from .run import READERS
@@ -312,7 +355,7 @@ def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: li
         t = time.time()
         song = READERS[kind](p, model.sample_rate)
         t_read = time.time() - t
-        rec = evaluate_song(model, song, proj, head, **kw)
+        rec = evaluate_song(model, song, proj, head, decoder=decoder, **kw)
         rec["seconds"]["read"] = t_read
         with lines.open("a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -324,7 +367,7 @@ def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: li
         del song
     records = [json.loads(x) for x in lines.read_text().splitlines() if x.strip()]
     summary = summarize(records)
-    summary["args"] = {"spec": spec, "head": head is not None, **kw}
+    summary["args"] = {"spec": spec, "head": head is not None, "decoder": decoder is not None, **kw}
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=float))
     log(table(summary))
     return summary

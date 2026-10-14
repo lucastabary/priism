@@ -390,13 +390,24 @@ def _registry_model(args: argparse.Namespace):
     return model, Projection.load(args.proj), head
 
 
+def _decoder(args: argparse.Namespace):
+    if not getattr(args, "decoder", None):
+        return None
+    from .registry.decoder import load_decoder
+
+    dec = load_decoder(args.decoder, args.device)
+    if dec.pool != args.pool:
+        sys.exit(f"--pool {args.pool} differs from the decoder's ({dec.pool})")
+    return dec
+
+
 def _registry_separate(args: argparse.Namespace) -> None:
     from .registry.separate import separate_file
 
     model, proj, head = _registry_model(args)
     separate_file(model, args.input, args.out, proj, head, cut=args.cut, own=args.own, min_share=args.min_share,
                   temp=args.temp, smooth=args.smooth, pool=args.pool, window_s=args.window, margin_s=args.margin,
-                  write_stems=args.write_stems, seed=args.seed)
+                  write_stems=args.write_stems, seed=args.seed, decoder=_decoder(args))
 
 
 def _registry_separate_eval(args: argparse.Namespace) -> None:
@@ -405,7 +416,25 @@ def _registry_separate_eval(args: argparse.Namespace) -> None:
     model, proj, head = _registry_model(args)
     run(model, args.set, args.out, proj, head, songs=args.songs, limit=args.limit, cuts=tuple(args.cut),
         own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
-        window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed)
+        window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed,
+        decoder=_decoder(args))
+
+
+def _train_decoder(args: argparse.Namespace) -> None:
+    from .registry.decoder import train_decoder
+
+    if not args.head:
+        sys.exit("--head is required: the queries are identity-head centroids")
+    model, proj, head = _registry_model(args)
+    extra = {"head": args.head, "proj": args.proj, "layers": args.layers}
+    summary = train_decoder(model, head, proj, args.data, args.valid, args.out, steps=args.steps, batch=args.batch,
+                            lr=args.lr, crop_s=args.crop, max_queries=args.max_queries, dim=args.dim,
+                            depth=args.depth, heads=args.heads, hidden=args.hidden, pool=args.pool, own=args.own,
+                            present_db=args.present_db, query_noise=args.query_noise,
+                            level_weight=args.level_weight, valid_crops=args.valid_crops,
+                            eval_every=args.eval_every, plateau=args.plateau, plateau_delta=args.plateau_delta,
+                            max_minutes=args.max_minutes, seed=args.seed, workers=args.workers, extra=extra)
+    print(summary, flush=True)
 
 
 def _train_id(args: argparse.Namespace) -> None:
@@ -890,6 +919,42 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--msst-ckpt", required=True)
         p.add_argument("--msst-path", required=True)
         p.add_argument("--device", default="cuda")
+        p.add_argument("--decoder", help="fine decoder best.pt (train-decoder): bin-resolution masks for the clusters")
+
+    p = sub.add_parser("train-decoder",
+                       help="train the fine decoder (bin masks per registry query) on synthetic songs, SW frozen")
+    p.add_argument("--data", nargs="+", required=True, help="folders of `priism-lab gen` songs (or song folders)")
+    p.add_argument("--valid", nargs="+", required=True, help="held-out song folders (fixed validation crops)")
+    p.add_argument("--head", required=True, help="identity head best.pt (train-id): the queries' embedding")
+    p.add_argument("--proj", required=True, help="the cache's proj.npz (tokens as the head was trained on)")
+    p.add_argument("--layers", default="6,final", help="trunk taps, as the cache (cache-b6: 6,final)")
+    p.add_argument("--pool", type=int, default=4, help="as the cache")
+    p.add_argument("--out", required=True)
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--batch", type=int, default=4, help="crops per step (one SW pass each)")
+    p.add_argument("--max-queries", type=int, default=24, help="sub-sources decoded per step (memory knob)")
+    p.add_argument("--crop", type=float, default=6.0, help="seconds per crop")
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--dim", type=int, default=128)
+    p.add_argument("--depth", type=int, default=1, help="axial RoFormer blocks after the FiLM")
+    p.add_argument("--heads", type=int, default=4)
+    p.add_argument("--hidden", type=int, default=256, help="per-band mask MLP width")
+    p.add_argument("--own", type=float, default=0.5, help="share of the references' power a query token needs")
+    p.add_argument("--present-db", type=float, default=-30.0, help="sources quieter than this under the crop mix get no query")
+    p.add_argument("--query-noise", type=float, default=0.05, help="norm of the noise added to training queries")
+    p.add_argument("--level-weight", type=float, default=0.1, help="weight of the term against silent outputs")
+    p.add_argument("--valid-crops", type=int, default=32)
+    p.add_argument("--eval-every", type=int, default=200)
+    p.add_argument("--plateau", type=int, default=5, help="stop after this many evaluations without gain (0: never)")
+    p.add_argument("--plateau-delta", type=float, default=0.05, help="dB of SI-SDR improvement that counts as a gain")
+    p.add_argument("--max-minutes", type=float, default=120.0)
+    p.add_argument("--workers", type=int, default=2, help="data loader processes (reading crops)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--msst-config", required=True)
+    p.add_argument("--msst-ckpt", required=True)
+    p.add_argument("--msst-path", required=True)
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_train_decoder)
 
     p = sub.add_parser("registry-separate",
                        help="split each SW stem into the sources the identity head finds (WAVs + sources.json)")
