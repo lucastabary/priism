@@ -127,7 +127,7 @@ def picked(S: np.ndarray, SI: np.ndarray, choice: np.ndarray) -> tuple[np.ndarra
 def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: float = 0.5,
                   min_share: float = 0.02, temp: float = 0.0, smooth: int = 1, pool: int = 4,
                   window_s: float = 8.0, margin_s: float = 1.0, min_ref_db: float = -40.0, seed: int = 0,
-                  decoder=None, oracle_k: bool = False) -> dict:
+                  decoder=None, oracle_k: bool = False, oracle_bin: bool = True) -> dict:
     """Every system on one ``features.Song`` -> one JSON-ready record (per reference scores, per system)."""
     t0 = time.time()
     refs = song.sources
@@ -208,18 +208,19 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
             del masks
         secs["decoder"] = time.time() - t
 
-    t = time.time()
-    from .decoder import oracle_bin_render
+    if oracle_bin:
+        t = time.time()
+        from .decoder import oracle_bin_render
 
-    outs = (y for s in range(len(an.stems)) for y in (
-        oracle_bin_render(model, an.spec[s], refs[oracle_stem == s], an.length) if (oracle_stem == s).any()
-        else [model.istft(an.spec[s], an.length)]))
-    d, e, n = stats(outs)
-    S, SI = score_matrix(rr, d, e)
-    systems["oracle_bin"] = picked(S, SI, match(S, True))
-    systems["oracle_bin_m2o"] = picked(S, SI, match(S, False))
-    n_out["oracle_bin"] = n
-    secs["oracle_bin"] = time.time() - t
+        outs = (y for s in range(len(an.stems)) for y in (
+            oracle_bin_render(model, an.spec[s], refs[oracle_stem == s], an.length) if (oracle_stem == s).any()
+            else [model.istft(an.spec[s], an.length)]))
+        d, e, n = stats(outs)
+        S, SI = score_matrix(rr, d, e)
+        systems["oracle_bin"] = picked(S, SI, match(S, True))
+        systems["oracle_bin_m2o"] = picked(S, SI, match(S, False))
+        n_out["oracle_bin"] = n
+        secs["oracle_bin"] = time.time() - t
 
     t = time.time()
     ow = oracle_weights(ref_token_energy(model, refs, pool), oracle_stem, len(an.stems))
@@ -231,6 +232,10 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
     n_out["oracle"] = n
     secs["oracle"] = time.time() - t
 
+    return _record(song, keep, level, best_stem, an, systems, n_out, secs, t0, model)
+
+
+def _record(song, keep, level, best_stem, an, systems, n_out, secs, t0, model) -> dict:
     shared = np.bincount(best_stem, minlength=len(an.stems))[best_stem] >= 2
     labels = [song.labels[j] for j in keep]
     rows = []
@@ -358,8 +363,22 @@ def table(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def excerpt(song, seconds: float, sr: int):
+    """The centred ``seconds`` of a song (mix and references alike): a cheaper evaluation that keeps the full
+    arrangement more often than an intro would. Systems stay comparable (they all see the same excerpt), but
+    whole-song clustering then sees less of the song than in real use."""
+    n = int(round(seconds * sr))
+    S = song.mix.shape[1]
+    if n >= S:
+        return song
+    a = (S - n) // 2
+    song.mix = np.ascontiguousarray(song.mix[:, a:a + n])
+    song.sources = np.ascontiguousarray(song.sources[..., a:a + n])
+    return song
+
+
 def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: list[str] | None = None,
-        limit: int | None = None, log=_log, decoder=None, **kw) -> dict:
+        limit: int | None = None, log=_log, decoder=None, max_seconds: float | None = None, **kw) -> dict:
     """Score every selected song, appending one JSON line per song to ``out``/songs.jsonl (a stopped run
     resumes: songs already there are skipped), then ``out``/summary.json over all lines."""
     from .run import READERS
@@ -376,6 +395,8 @@ def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: li
             continue
         t = time.time()
         song = READERS[kind](p, model.sample_rate)
+        if max_seconds:
+            song = excerpt(song, max_seconds, model.sample_rate)
         t_read = time.time() - t
         rec = evaluate_song(model, song, proj, head, decoder=decoder, **kw)
         rec["seconds"]["read"] = t_read
@@ -389,7 +410,8 @@ def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: li
         del song
     records = [json.loads(x) for x in lines.read_text().splitlines() if x.strip()]
     summary = summarize(records)
-    summary["args"] = {"spec": spec, "head": head is not None, "decoder": decoder is not None, **kw}
+    summary["args"] = {"spec": spec, "head": head is not None, "decoder": decoder is not None,
+                       "max_seconds": max_seconds, **kw}
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=float))
     log(table(summary))
     return summary

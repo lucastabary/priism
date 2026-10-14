@@ -417,7 +417,8 @@ def _registry_separate_eval(args: argparse.Namespace) -> None:
     run(model, args.set, args.out, proj, head, songs=args.songs, limit=args.limit, cuts=tuple(args.cut),
         own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
         window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed,
-        decoder=_decoder(args), oracle_k=args.oracle_k)
+        decoder=_decoder(args), oracle_k=args.oracle_k, oracle_bin=not args.no_oracle_bin,
+        max_seconds=args.max_seconds)
 
 
 def _train_decoder(args: argparse.Namespace) -> None:
@@ -976,6 +977,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="references quieter than this (dB under the mix) are not scored")
     p.add_argument("--oracle-k", action="store_true",
                    help="also score registry_k: each stem cut into as many sources as it holds references")
+    p.add_argument("--no-oracle-bin", action="store_true", help="skip the bin-resolution oracle (saves time)")
+    p.add_argument("--max-seconds", type=float, help="score only the centred excerpt of this length of each song")
     registry_sep_args(p, many_cuts=True)
     p.set_defaults(func=_registry_separate_eval)
 
