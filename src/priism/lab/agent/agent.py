@@ -370,7 +370,9 @@ class Agent:
                "PYTHONUNBUFFERED": "1", "PRIISM": str(self.repo)}
         exit_code, reason = 0, "ok"
         with logf.open("ab") as out:
-            for cmd in cmds:
+            if job.inputs:
+                exit_code, reason = self.fetch_inputs(job, out)
+            for cmd in cmds if exit_code == 0 else []:
                 out.write(f"### {time.strftime('%Y-%m-%d %H:%M:%S')} $ {' '.join(cmd)}\n".encode())
                 out.flush()
                 kw = {"start_new_session": True} if os.name != "nt" else {}
@@ -382,6 +384,30 @@ class Agent:
         self._finish(job, exit_code, reason, start)
         if job.kind == "update" and reason == "ok":
             self.restart = True  # new code is installed: run_forever exits, the service starts it again
+
+    def fetch_inputs(self, job: Job, out) -> tuple[int, str]:
+        """Download ``inputs/<folder>/...`` of the store into the work folder; a file already there is kept
+        (inputs are immutable by convention: a changed dataset goes to a new folder name)."""
+        n = skipped = 0
+        try:
+            for folder in job.inputs:
+                prefix = f"inputs/{folder.strip('/')}/"
+                for key in self.store.list(prefix):
+                    rel = key[len("inputs/"):]
+                    dest = self.workdir / rel
+                    if dest.exists():
+                        skipped += 1
+                        continue
+                    part = dest.with_name(dest.name + ".part")
+                    self.store.download_file(key, part)
+                    os.replace(part, dest)
+                    n += 1
+        except (StoreError, OSError) as e:
+            out.write(f"### inputs failed: {e}\n".encode())
+            return 1, f"inputs failed: {e}"
+        out.write(f"### inputs: {n} files fetched, {skipped} already there\n".encode())
+        out.flush()
+        return 0, "ok"
 
     def watch(self, job: Job, proc, logf: Path, start: float) -> tuple[int, str]:
         """Watch a job until it ends or must stop. The owner's pauses count for none of the limits: the

@@ -10,6 +10,8 @@ per-folder sizes in its heartbeat, and we decide here what goes.
 Store layout: ``queue/{pending,running,done,failed}/<id>.json`` (the spec, then its outcome),
 ``logs/<id>.log``, ``status/<id>.json`` (heartbeat, state, last line), ``cancel/<id>`` (a marker the
 agent obeys), ``results/<id>/...`` (the files the job wrote under its ``results`` folders),
+``inputs/<folder>/...`` (data a job lists in ``inputs``: downloaded into ``<folder>`` of the work folder
+before it runs, files already there skipped; put them there with any S3 client),
 ``agents/<name>.json`` (each agent's heartbeat).
 """
 
@@ -24,7 +26,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # priism-lab subcommands a remote job may run.
 LAB_COMMANDS = {"gen", "cache-features", "registry-eval", "train-id", "eval-sep", "eval-stems",
-                "registry-encoders", "registry-domain", "registry-dims"}
+                "registry-encoders", "registry-domain", "registry-dims", "registry-separate-eval"}
 SCRIPTS = {"phase1": ("scripts/registry_phase1.sh", {"probe", "full"})}
 KINDS = {"priism-lab", "update", "clean", *SCRIPTS}
 _ENV_KEY = re.compile(r"^PRIISM_[A-Z0-9_]+$")
@@ -48,6 +50,7 @@ class Job:
     gpu_idle_minutes: float = 15.0  # a GPU job whose GPU sits at 0 % this long: stopped
     results: list[str] = field(default_factory=list)  # folders (what the job wrote) or files (relative), uploaded at the end
     env: dict[str, str] = field(default_factory=dict)
+    inputs: list[str] = field(default_factory=list)  # folders fetched from the store's inputs/ before the job
     created: float = 0.0
 
     def to_json(self) -> bytes:
@@ -73,7 +76,7 @@ def validate(job: Job) -> None:
         raise JobRejected(f"unknown kind {job.kind!r} (allowed: {sorted(KINDS)})")
     if not all(isinstance(a, str) for a in job.args):
         raise JobRejected("arguments must be strings")
-    for a in job.args + job.results:
+    for a in job.args + job.results + job.inputs:
         _safe_rel(a)
     for k, v in job.env.items():
         if not _ENV_KEY.match(k) or not _ENV_VAL.match(str(v)):

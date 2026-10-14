@@ -8,6 +8,9 @@ Per song, one SW pass (``separate.analyse``) feeds three systems:
   one entry per ``cut``). References and outputs are matched one-to-one (Hungarian on SDR); a reference
   left without an output scores the SDR of a silent estimate, 0 dB; extra outputs are ignored.
   ``registry_m2o`` scores each reference against its best output (many-to-one, for comparison with ``sw``).
+- ``registry_k`` (with ``oracle_k``): the registry cut into as many clusters per stem as the stem holds
+  references (an oracle count, ``separate.registry_weights_k``): splits its gap to the oracle into the count
+  and the embedding.
 - ``oracle``: the same token masks, with labels from the references' own power per token (each reference
   assigned to its best SW stem, each token of a stem given to the loudest of that stem's references). The
   upper bound of splitting SW stems with masks on the 46 ms x band token grid. One-to-one and ``_m2o``.
@@ -46,8 +49,8 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from .metrics import paired_compare
-from .separate import (StemModel, stem_cut_from_env, analyse, embed, oracle_weights, ref_token_energy, registry_weights, render,
-                       stem_queries)
+from .separate import (StemModel, stem_cut_from_env, analyse, embed, oracle_weights, ref_token_energy, registry_weights,
+                       registry_weights_k, render, stem_queries)
 
 EPS = 1e-8
 
@@ -124,7 +127,7 @@ def picked(S: np.ndarray, SI: np.ndarray, choice: np.ndarray) -> tuple[np.ndarra
 def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: float = 0.5,
                   min_share: float = 0.02, temp: float = 0.0, smooth: int = 1, pool: int = 4,
                   window_s: float = 8.0, margin_s: float = 1.0, min_ref_db: float = -40.0, seed: int = 0,
-                  decoder=None) -> dict:
+                  decoder=None, oracle_k: bool = False) -> dict:
     """Every system on one ``features.Song`` -> one JSON-ready record (per reference scores, per system)."""
     t0 = time.time()
     refs = song.sources
@@ -174,6 +177,18 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
         systems[name + "_m2o"] = picked(S, SI, match(S, False))
         n_out[name] = n
     secs["render_registry"] = time.time() - t
+
+    if oracle_k:  # the registry told how many sources each stem holds (its references): count vs embedding
+        t = time.time()
+        wk = registry_weights_k(emb, an.energy, np.bincount(oracle_stem, minlength=len(an.stems)), own=own,
+                                min_share=min_share, temp=temp, seed=seed)
+        outs = (y for s in range(len(an.stems)) for y in render(model, an.spec[s], wk[s][0], pool, an.length, smooth))
+        d, e, n = stats(outs)
+        S, SI = score_matrix(rr, d, e)
+        systems["registry_k"] = picked(S, SI, match(S, True))
+        systems["registry_k_m2o"] = picked(S, SI, match(S, False))
+        n_out["registry_k"] = n
+        secs["registry_k"] = time.time() - t
 
     if decoder is not None:  # the same clusters, bin-resolution masks from the fine decoder (a second SW pass)
         from .decoder import decoder_masks, render_masks
@@ -306,6 +321,8 @@ def summarize(records: list[dict]) -> dict:
 
     pairs = [(a, "sw") for a in systems if a.startswith(("registry", "oracle", "decoder")) and not a.endswith("_m2o")]
     pairs += [("oracle", a) for a in systems if a.startswith("registry") and not a.endswith("_m2o")]
+    pairs += [("registry_k", a) for a in systems if a.startswith("registry") and not a.endswith("_m2o")
+              and not a.startswith("registry_k") and "registry_k" in systems]
     # the decoder against the token split it refines (same clusters, same cut), and the bin ceiling against it
     pairs += [(a, "registry" + a[len("decoder"):]) for a in systems if a.startswith("decoder")
               and not a.endswith("_m2o") and "registry" + a[len("decoder"):] in systems]

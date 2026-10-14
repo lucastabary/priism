@@ -417,7 +417,7 @@ def _registry_separate_eval(args: argparse.Namespace) -> None:
     run(model, args.set, args.out, proj, head, songs=args.songs, limit=args.limit, cuts=tuple(args.cut),
         own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
         window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed,
-        decoder=_decoder(args))
+        decoder=_decoder(args), oracle_k=args.oracle_k)
 
 
 def _train_decoder(args: argparse.Namespace) -> None:
@@ -493,12 +493,14 @@ def _jobs(args: argparse.Namespace) -> None:
         sp.add_argument("--results", action="append", default=list(args.results),
                         help="a folder uploaded when the job ends (repeat for several)")
         sp.add_argument("--env", action="append", default=list(args.env), help="a PRIISM_*=value setting (repeat)")
+        sp.add_argument("--inputs", action="append", default=[],
+                        help="a folder of the store's inputs/ fetched into the work folder first (repeat)")
         sp.add_argument("kind")
         sp.add_argument("job_args", nargs=argparse.REMAINDER)
         o = sp.parse_args(([args.id] if args.id else []) + args.rest)
         env = dict(kv.split("=", 1) for kv in o.env)
         job = jobs.Job(kind=o.kind, args=o.job_args, gpu=not (o.cpu or args.cpu), max_minutes=o.max_minutes,
-                       stall_minutes=o.stall_minutes, results=o.results, env=env)
+                       stall_minutes=o.stall_minutes, results=o.results, env=env, inputs=o.inputs)
         print(jobs.submit(store, job))
     elif args.action == "status":
         st = jobs.status(store)
@@ -972,6 +974,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--limit", type=int, help="at most this many songs")
     p.add_argument("--min-ref-db", type=float, default=-40.0,
                    help="references quieter than this (dB under the mix) are not scored")
+    p.add_argument("--oracle-k", action="store_true",
+                   help="also score registry_k: each stem cut into as many sources as it holds references")
     registry_sep_args(p, many_cuts=True)
     p.set_defaults(func=_registry_separate_eval)
 

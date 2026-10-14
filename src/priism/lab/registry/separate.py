@@ -310,6 +310,35 @@ def registry_weights(emb: np.ndarray, energy: np.ndarray, cuts, own: float = 0.5
     return out
 
 
+def registry_weights_k(emb: np.ndarray, energy: np.ndarray, n_per_stem, own: float = 0.5, floor_db: float = 60.0,
+                       min_share: float = 0.02, temp: float = 0.0, min_tokens: int = 64, seed: int = 0
+                       ) -> list[tuple[np.ndarray, list[dict]]]:
+    """``registry_weights`` with each stem's linkage cut into a GIVEN number of clusters (``n_per_stem``, e.g.
+    the references the stem holds) instead of at a distance: the registry with an oracle count. Against the
+    registry it measures what choosing the number of sources costs; against the oracle, what the embedding
+    costs once the count is right. Same subsample, k-means, post-processing (min_share, centroids, partition)."""
+    from .track import whole_song
+
+    x = normalise(emb)
+    owned = owned_tokens(energy, own, floor_db)
+    out = []
+    for s in range(energy.shape[0]):
+        n_own = int(owned[s].sum())
+        k = int(n_per_stem[s])
+        if n_own < min_tokens or k < 2:
+            out.append((np.ones((1, *energy.shape[1:]), np.float32),
+                        [{"cluster": 0, "owned_tokens": n_own, "centroid": None}]))
+            continue
+        lab = whole_song(emb, owned[s], n=k, seed=seed)[owned[s]]
+        counts = np.bincount(lab)
+        keep = [j for j in np.argsort(-counts) if counts[j] >= min_share * n_own] or [int(counts.argmax())]
+        xa = x[owned[s]]
+        cent = normalise(np.stack([xa[lab == j].sum(0) for j in keep]))
+        out.append((_partition(x, cent, temp),
+                    [{"cluster": i, "owned_tokens": int(counts[j]), "centroid": cent[i]} for i, j in enumerate(keep)]))
+    return out
+
+
 def stem_queries(per_stem: list[tuple[np.ndarray, list[dict]]]) -> list[np.ndarray | None]:
     """``registry_weights`` of one cut -> per stem its centroids (K, d), or None when K < 2 (not split)."""
     return [np.stack([i["centroid"] for i in info]) if len(info) >= 2 else None for _, info in per_stem]

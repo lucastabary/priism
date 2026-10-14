@@ -178,6 +178,14 @@ def test_evaluate_song_and_summary(tmp_path):
     assert ev.table(summary)
 
 
+def test_oracle_count_system(tmp_path):
+    rec = ev.evaluate_song(FakeStems(), _toy(SR * 4), _proj(), None, cuts=(0.5,), window_s=2.0, margin_s=0.25,
+                           oracle_k=True)
+    assert {"registry_k", "registry_k_m2o"} <= set(rec["refs"][0]) and rec["n_outputs"]["registry_k"] >= rec["n_outputs"]["sw"]
+    summary = ev.summarize([rec, {**rec, "song": "toy2", "artist": "other"}])
+    assert any(k.startswith("registry_k - registry") for k in summary["paired"])
+
+
 def test_separate_file_writes_exact_length_at_input_rate(tmp_path):
     song = _toy(SR * 3 + 5)
     path = tmp_path / "in.wav"
