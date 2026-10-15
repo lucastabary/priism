@@ -379,6 +379,65 @@ def _registry_encoders(args: argparse.Namespace) -> None:
     print(summarize(args.out))
 
 
+def _registry_model(args: argparse.Namespace):
+    """(SW stem model, PCA, identity head or None) shared by registry-separate and its evaluation."""
+    from .registry.features import Projection
+    from .registry.head import load_head
+    from .registry.separate import MsstStems
+
+    model = MsstStems(args.msst_config, args.msst_ckpt, args.msst_path, args.device, layers=args.layers)
+    head = load_head(args.head).to(args.device) if args.head else None
+    return model, Projection.load(args.proj), head
+
+
+def _decoder(args: argparse.Namespace):
+    if not getattr(args, "decoder", None):
+        return None
+    from .registry.decoder import load_decoder
+
+    dec = load_decoder(args.decoder, args.device)
+    if dec.pool != args.pool:
+        sys.exit(f"--pool {args.pool} differs from the decoder's ({dec.pool})")
+    return dec
+
+
+def _registry_separate(args: argparse.Namespace) -> None:
+    from .registry.separate import separate_file
+
+    model, proj, head = _registry_model(args)
+    separate_file(model, args.input, args.out, proj, head, cut=args.cut, own=args.own, min_share=args.min_share,
+                  temp=args.temp, smooth=args.smooth, pool=args.pool, window_s=args.window, margin_s=args.margin,
+                  write_stems=args.write_stems, seed=args.seed, decoder=_decoder(args))
+
+
+def _registry_separate_eval(args: argparse.Namespace) -> None:
+    from .registry.separate_eval import run
+
+    model, proj, head = _registry_model(args)
+    run(model, args.set, args.out, proj, head, songs=args.songs, limit=args.limit, cuts=tuple(args.cut),
+        own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
+        window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed,
+        decoder=_decoder(args), oracle_k=args.oracle_k, oracle_bin=not args.no_oracle_bin,
+        max_seconds=args.max_seconds)
+
+
+def _train_decoder(args: argparse.Namespace) -> None:
+    from .registry.decoder import train_decoder
+
+    if not args.head:
+        sys.exit("--head is required: the queries are identity-head centroids")
+    model, proj, head = _registry_model(args)
+    extra = {"head": args.head, "proj": args.proj, "layers": args.layers}
+    summary = train_decoder(model, head, proj, args.data, args.valid, args.out, steps=args.steps, batch=args.batch,
+                            lr=args.lr, crop_s=args.crop, max_queries=args.max_queries, dim=args.dim,
+                            depth=args.depth, heads=args.heads, hidden=args.hidden, pool=args.pool, own=args.own,
+                            present_db=args.present_db, query_noise=args.query_noise,
+                            level_weight=args.level_weight, valid_crops=args.valid_crops,
+                            eval_every=args.eval_every, plateau=args.plateau, plateau_delta=args.plateau_delta,
+                            max_minutes=args.max_minutes, seed=args.seed, workers=args.workers, extra=extra)
+    print(summary, flush=True)
+
+
 def _train_id(args: argparse.Namespace) -> None:
     from .registry.head import train_head
     from .registry.run import select
@@ -449,12 +508,14 @@ def _jobs(args: argparse.Namespace) -> None:
         sp.add_argument("--results", action="append", default=list(args.results),
                         help="a folder uploaded when the job ends (repeat for several)")
         sp.add_argument("--env", action="append", default=list(args.env), help="a PRIISM_*=value setting (repeat)")
+        sp.add_argument("--inputs", action="append", default=[],
+                        help="a folder of the store's inputs/ fetched into the work folder first (repeat)")
         sp.add_argument("kind")
         sp.add_argument("job_args", nargs=argparse.REMAINDER)
         o = sp.parse_args(([args.id] if args.id else []) + args.rest)
         env = dict(kv.split("=", 1) for kv in o.env)
         job = jobs.Job(kind=o.kind, args=o.job_args, gpu=not (o.cpu or args.cpu), max_minutes=o.max_minutes,
-                       stall_minutes=o.stall_minutes, results=o.results, env=env)
+                       stall_minutes=o.stall_minutes, results=o.results, env=env, inputs=o.inputs)
         print(jobs.submit(store, job))
     elif args.action == "status":
         st = jobs.status(store)
@@ -880,6 +941,88 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.set_defaults(func=_cleave_train)
+    def registry_sep_args(p, many_cuts: bool):
+        p.add_argument("--proj", required=True, help="the cache's proj.npz (tokens projected exactly as cached)")
+        p.add_argument("--head", help="identity head best.pt (train-id); default: raw tokens")
+        if many_cuts:
+            p.add_argument("--cut", type=float, nargs="+", default=[0.3],
+                           help="whole-song cosine cut(s); several share one SW pass (tune on %%dev2)")
+        else:
+            p.add_argument("--cut", type=float, default=0.3, help="whole-song cosine cut")
+        p.add_argument("--own", type=float, default=0.5,
+                       help="share of the stems' power a token needs to shape its stem's clusters")
+        p.add_argument("--min-share", type=float, default=0.02,
+                       help="clusters with fewer owned tokens than this share are merged into the others")
+        p.add_argument("--temp", type=float, default=0.0, help="softmax temperature over centroids (0: hard)")
+        p.add_argument("--smooth", type=int, default=1, help="token frames of triangular smoothing on each side")
+        p.add_argument("--pool", type=int, default=4, help="as the cache")
+        p.add_argument("--window", type=float, default=8.0, help="as the cache")
+        p.add_argument("--margin", type=float, default=1.0, help="as the cache")
+        p.add_argument("--layers", default="6,final", help="trunk taps, as the cache (cache-b6: 6,final)")
+        p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--msst-config", required=True)
+        p.add_argument("--msst-ckpt", required=True)
+        p.add_argument("--msst-path", required=True)
+        p.add_argument("--device", default="cuda")
+        p.add_argument("--decoder", help="fine decoder best.pt (train-decoder): bin-resolution masks for the clusters")
+
+    p = sub.add_parser("train-decoder",
+                       help="train the fine decoder (bin masks per registry query) on synthetic songs, SW frozen")
+    p.add_argument("--data", nargs="+", required=True, help="folders of `priism-lab gen` songs (or song folders)")
+    p.add_argument("--valid", nargs="+", required=True, help="held-out song folders (fixed validation crops)")
+    p.add_argument("--head", required=True, help="identity head best.pt (train-id): the queries' embedding")
+    p.add_argument("--proj", required=True, help="the cache's proj.npz (tokens as the head was trained on)")
+    p.add_argument("--layers", default="6,final", help="trunk taps, as the cache (cache-b6: 6,final)")
+    p.add_argument("--pool", type=int, default=4, help="as the cache")
+    p.add_argument("--out", required=True)
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--batch", type=int, default=4, help="crops per step (one SW pass each)")
+    p.add_argument("--max-queries", type=int, default=24, help="sub-sources decoded per step (memory knob)")
+    p.add_argument("--crop", type=float, default=6.0, help="seconds per crop")
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--dim", type=int, default=128)
+    p.add_argument("--depth", type=int, default=1, help="axial RoFormer blocks after the FiLM")
+    p.add_argument("--heads", type=int, default=4)
+    p.add_argument("--hidden", type=int, default=256, help="per-band mask MLP width")
+    p.add_argument("--own", type=float, default=0.5, help="share of the references' power a query token needs")
+    p.add_argument("--present-db", type=float, default=-30.0, help="sources quieter than this under the crop mix get no query")
+    p.add_argument("--query-noise", type=float, default=0.05, help="norm of the noise added to training queries")
+    p.add_argument("--level-weight", type=float, default=0.1, help="weight of the term against silent outputs")
+    p.add_argument("--valid-crops", type=int, default=32)
+    p.add_argument("--eval-every", type=int, default=200)
+    p.add_argument("--plateau", type=int, default=5, help="stop after this many evaluations without gain (0: never)")
+    p.add_argument("--plateau-delta", type=float, default=0.05, help="dB of SI-SDR improvement that counts as a gain")
+    p.add_argument("--max-minutes", type=float, default=120.0)
+    p.add_argument("--workers", type=int, default=2, help="data loader processes (reading crops)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--msst-config", required=True)
+    p.add_argument("--msst-ckpt", required=True)
+    p.add_argument("--msst-path", required=True)
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_train_decoder)
+
+    p = sub.add_parser("registry-separate",
+                       help="split each SW stem into the sources the identity head finds (WAVs + sources.json)")
+    p.add_argument("input", help="audio file, MoisesDB song folder or NI .stem.mp4")
+    p.add_argument("--out", required=True, help="output folder")
+    p.add_argument("--write-stems", action="store_true", help="also write the 6 SW stems (sw/<stem>.wav)")
+    registry_sep_args(p, many_cuts=False)
+    p.set_defaults(func=_registry_separate)
+
+    p = sub.add_parser("registry-separate-eval",
+                       help="SDR of SW stems vs registry split vs oracle split on multitrack songs (MoisesDB)")
+    p.add_argument("--set", required=True, help="kind:path[%%part], e.g. multitrack:/data/moisesdb%%test")
+    p.add_argument("--out", required=True, help="folder: songs.jsonl (resumes) and summary.json")
+    p.add_argument("--songs", nargs="*", help="only these songs (folder names or substrings)")
+    p.add_argument("--limit", type=int, help="at most this many songs")
+    p.add_argument("--min-ref-db", type=float, default=-40.0,
+                   help="references quieter than this (dB under the mix) are not scored")
+    p.add_argument("--oracle-k", action="store_true",
+                   help="also score registry_k: each stem cut into as many sources as it holds references")
+    p.add_argument("--no-oracle-bin", action="store_true", help="skip the bin-resolution oracle (saves time)")
+    p.add_argument("--max-seconds", type=float, help="score only the centred excerpt of this length of each song")
+    registry_sep_args(p, many_cuts=True)
+    p.set_defaults(func=_registry_separate_eval)
 
     def store_args(p):
         p.add_argument("--store", help="s3://bucket/prefix or a local folder (default: $PRIISM_STORE)")

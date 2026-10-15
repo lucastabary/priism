@@ -227,3 +227,19 @@ def test_heartbeat_reports_hardware(tmp_path):
     hw = json.loads(store.get("agents/pc.json"))["hardware"]
     assert hw["cpus"] >= 1 and hw["disk_free_gb"] > 0 and isinstance(hw["gpus"], list)
     validate(Job("priism-lab", ["registry-encoders", "--cache", "cache"]))
+
+
+def test_inputs_are_fetched_before_the_job_and_kept(tmp_path):
+    store, agent = make_agent(tmp_path)
+    store.put("inputs/data/set1/a/x.txt", b"x")
+    store.put("inputs/data/set1/b.txt", b"b")
+    (tmp_path / "work" / "data" / "set1").mkdir(parents=True)
+    (tmp_path / "work" / "data" / "set1" / "b.txt").write_text("local")  # already there: kept
+    code = "import pathlib; print(pathlib.Path('data/set1/a/x.txt').read_text())"
+    st = run(agent, store, Job("phase1", ["probe"], gpu=False, inputs=["data/set1"]), code)
+    jid = jobs.status(store)["jobs"][0]["id"]
+    assert st["state"] == "done"
+    assert "1 files fetched, 1 already there" in jobs.log(store, jid)
+    assert (tmp_path / "work" / "data" / "set1" / "b.txt").read_text() == "local"
+    with pytest.raises(JobRejected):
+        validate(Job("phase1", ["probe"], inputs=["../outside"]))
