@@ -8,6 +8,11 @@ Every evaluation appends one JSON line to ``history.jsonl`` (flushed) and prints
 - ``z_rank`` / ``target_rank``: effective ranks of Z and of the target patch tokens (criterion C1).
 - ``z_use``: validation prediction loss with Z shuffled across songs minus with the true Z (C1: the
   predictor must need Z, else P and L leak the timbre).
+- leakage probes on fixed validation views with known random chains (docs/cleave.md 2.9, ``fx_probes``):
+  ``fx_r2_z`` (linear Z -> FX parameters, should go to ~0), ``kind_bacc_v`` (V-bar -> instrument kind, should
+  stay near ``kind_chance``), with references ``fx_r2_mel`` (the same probe on the plain mean/std log-mel: how
+  much effect a linear map can see at all), ``fx_r2_v``, ``kind_bacc_z`` and ``fx_id_auc`` (Z of the same
+  track under two chains against other tracks).
 - per k in 1..``eval_k``: the three uncertainty signals (posterior sigma, predictor variance, predictor
   error) and their Spearman correlation with k over the validation mixes (docs/cleave.md 2.8).
 
@@ -27,7 +32,8 @@ import numpy as np
 import torch
 from scipy import stats
 
-from .data import KSampler, MixDataset, Song, active_frac, find_songs, load_mix, parse_schedule, read_crop, song_frames_sr
+from .data import (FX_COLS, KSampler, MixDataset, Song, active_frac, collate, find_songs, load_mix, parse_schedule,
+                   read_crop, render_fx, sample_fx, song_frames_sr)
 from .features import HOP, SILENCE_DB, SR, Frontend
 from .masks import sample_mask
 from .model import Cleave, CleaveConfig, effective_rank
@@ -100,18 +106,186 @@ def k_sets(songs: list[Song], n: int, eval_k: int, per_k: int, seed: int = 0) ->
     return out
 
 
+def fx_set(songs: list[Song], crop: int, max_tracks: int, seed: int = 0, n_chains: int = 4) -> list[tuple]:
+    """Fixed probe views: (song, stem, start, kind, [chains]) for playing crops, one crop per track."""
+    rng = np.random.default_rng(seed + 1)
+    out = []
+    for si in rng.permutation(len(songs)):
+        song = songs[si]
+        total = song_frames_sr(song)
+        for st in range(len(song.stems)):
+            a = int(rng.integers(0, max(1, total - crop)))
+            if active_frac(read_crop(song, st, a, crop)) < 0.25:
+                continue
+            out.append((int(si), st, a, song.kinds[st], [sample_fx(rng) for _ in range(n_chains)]))
+            if len(out) >= max_tracks:
+                return out
+    return out
+
+
+def _group_folds(groups: np.ndarray, n_folds: int, seed: int = 0) -> np.ndarray:
+    """Fold index per row; all rows of a group (the views of a track) share a fold."""
+    g = np.unique(groups)
+    fold_of = dict(zip(np.random.default_rng(seed).permutation(g), np.arange(len(g)) % n_folds))
+    return np.array([fold_of[x] for x in groups])
+
+
+def _ridge_fit(X: np.ndarray, Y: np.ndarray, alpha: float):
+    mx, sx, my = X.mean(0), X.std(0) + 1e-8, Y.mean(0)
+    Xs = (X - mx) / sx
+    W = np.linalg.solve(Xs.T @ Xs + alpha * np.eye(X.shape[1]), Xs.T @ (Y - my))
+    return lambda Xn: ((Xn - mx) / sx) @ W + my
+
+
+def ridge_r2(X: np.ndarray, Y: np.ndarray, groups: np.ndarray, n_folds: int = 5,
+             alphas: tuple = (0.1, 1.0, 10.0, 100.0, 1000.0), seed: int = 0, per_col: bool = False):
+    """Out-of-fold R² of a linear (ridge) map X -> Y, mean over the columns of Y that vary (or the R² of
+    every column, NaN where it does not vary, with ``per_col``). Folds by group; alpha picked by an inner
+    group CV on the training folds only, so the score never sees its test rows."""
+    X, Y = X.astype(np.float64), Y.astype(np.float64)
+    keep = Y.std(0) > 1e-6
+    n_cols = Y.shape[1]
+    Y = Y[:, keep]
+    folds = _group_folds(groups, n_folds, seed)
+    pred = np.zeros_like(Y)
+    for f in range(n_folds):
+        tr, te = folds != f, folds == f
+        if not te.any() or len(np.unique(groups[tr])) < 3:
+            return np.full(n_cols, np.nan) if per_col else float("nan")
+        inner = _group_folds(groups[tr], 3, seed + 1)
+        sse = [sum(((_ridge_fit(X[tr][inner != i], Y[tr][inner != i], a)(X[tr][inner == i]) - Y[tr][inner == i]) ** 2).sum()
+                   for i in range(3)) for a in alphas]
+        pred[te] = _ridge_fit(X[tr], Y[tr], alphas[int(np.argmin(sse))])(X[te])
+    r2 = 1 - ((pred - Y) ** 2).sum(0) / ((Y - Y.mean(0)) ** 2).sum(0)
+    if per_col:
+        out = np.full(n_cols, np.nan)
+        out[keep] = r2
+        return out
+    return float(r2.mean())
+
+
+def _center(X: np.ndarray, groups: np.ndarray) -> np.ndarray:
+    """Subtract each group's mean: what is left varies within a track, i.e. with the chain only."""
+    X = X.astype(np.float64).copy()
+    for g in np.unique(groups):
+        X[groups == g] -= X[groups == g].mean(0)
+    return X
+
+
+def _logreg_fit(X: np.ndarray, y: np.ndarray, n_cls: int, l2: float):
+    """Class-balanced multinomial logistic regression (L-BFGS) on standardised X."""
+    mx, sx = X.mean(0), X.std(0) + 1e-8
+    Xt = torch.from_numpy((X - mx) / sx).float()
+    yt = torch.from_numpy(y).long()
+    w_cls = torch.from_numpy(len(y) / (n_cls * np.maximum(np.bincount(y, minlength=n_cls), 1))).float()
+    lin = torch.nn.Linear(X.shape[1], n_cls)
+    opt = torch.optim.LBFGS(lin.parameters(), max_iter=200, line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        loss = torch.nn.functional.cross_entropy(lin(Xt), yt, weight=w_cls) + l2 * (lin.weight ** 2).sum()
+        loss.backward()
+        return loss
+
+    with torch.enable_grad():
+        opt.step(closure)
+    return lambda Xn: lin(torch.from_numpy((Xn - mx) / sx).float()).argmax(-1).numpy()
+
+
+def _bacc(y: np.ndarray, p: np.ndarray) -> float:
+    return float(np.mean([np.mean(p[y == c] == c) for c in np.unique(y)]))
+
+
+def logreg_bacc(X: np.ndarray, labels: np.ndarray, groups: np.ndarray, n_folds: int = 5,
+                l2s: tuple = (1e-3, 1e-2, 1e-1), seed: int = 0) -> tuple[float, float]:
+    """Out-of-fold balanced accuracy of a linear classifier X -> label, and its chance level (1 / classes:
+    the balanced accuracy of always answering the majority class). Classes with fewer than ``n_folds``
+    groups are dropped; folds by group, L2 by inner group CV on the training folds."""
+    n_groups = {c: len(np.unique(groups[labels == c])) for c in np.unique(labels)}
+    ok = np.array([n_groups[c] >= n_folds for c in labels])
+    X, labels, groups = X[ok].astype(np.float64), labels[ok], groups[ok]
+    classes = np.unique(labels)
+    if len(classes) < 2:
+        return float("nan"), float("nan")
+    y = np.searchsorted(classes, labels)
+    folds = _group_folds(groups, n_folds, seed)
+    pred = np.zeros_like(y)
+    for f in range(n_folds):
+        tr, te = folds != f, folds == f
+        inner = _group_folds(groups[tr], 3, seed + 1)
+        score = [np.mean([_bacc(y[tr][inner == i], _logreg_fit(X[tr][inner != i], y[tr][inner != i], len(classes), l2)(X[tr][inner == i]))
+                          for i in range(3) if (inner == i).any()]) for l2 in l2s]
+        pred[te] = _logreg_fit(X[tr], y[tr], len(classes), l2s[int(np.argmax(score))])(X[te])
+    return _bacc(y, pred), 1.0 / len(classes)
+
+
+@torch.no_grad()
+def fx_probes(model: Cleave, batcher: Batcher, songs: list[Song], fxs: list[tuple], crop: int, batch: int,
+              seed: int = 0) -> dict:
+    """Leakage probes on the fixed views ``fxs`` (``fx_set``), rendered on the fly (deterministic).
+
+    The FX regressions run on features and chains centred per track: across unseen tracks, identity
+    variance would drown the effects (a linear probe cannot tell them apart from a handful of tracks), so
+    ``fx_r2_*`` is the share of the within-track chain variance a linear map of the features explains.
+    ``fx_r2_z_by`` breaks ``fx_r2_z`` down per effect (mean over its columns)."""
+    if len(fxs) < 10:
+        return {}
+    model.eval()
+    zs, vs, mels, fx, kinds, groups = [], [], [], [], [], []
+    views = [(i, s, st, a, kind, f) for i, (s, st, a, kind, chains) in enumerate(fxs) for f in chains]
+    for j in range(0, len(views), batch):
+        part = views[j:j + batch]
+        waves = [render_fx(read_crop(songs[s], st, a, crop), f) for _, s, st, a, _, f in part]
+        wave = torch.from_numpy(np.stack(waves))
+        patches, _, active, _ = batcher(wave, model, None)
+        mu, _, _, v = model.encode(patches, active)
+        zs.append(mu.float().cpu().numpy())
+        if v is not None:
+            w = active.float()[..., None]
+            vs.append(((v.float() * w).sum(1) / w.sum(1).clamp_min(1)).cpu().numpy())
+        logmel, _, _ = batcher.front(wave.to(batcher.device))
+        mels.append(torch.cat([logmel.mean(1), logmel.std(1)], -1).cpu().numpy())
+        for i, _, _, _, kind, f in part:
+            fx.append(f)
+            kinds.append(kind)
+            groups.append(i)
+    Z, F_, M = np.concatenate(zs), np.stack(fx), np.concatenate(mels)
+    kinds, groups = np.array(kinds), np.array(groups)
+    Fc = _center(F_, groups)
+    r2_z = ridge_r2(_center(Z, groups), Fc, groups, seed=seed, per_col=True)
+    rec = {"fx_r2_z": float(np.nanmean(r2_z)), "fx_r2_mel": ridge_r2(_center(M, groups), Fc, groups, seed=seed),
+           "n_fx_views": len(Z)}
+    by: dict = {}
+    for c, r in zip(FX_COLS, r2_z):
+        by.setdefault(c.split("_")[0], []).append(r)
+    rec["fx_r2_z_by"] = {k: float(np.nanmean(v)) for k, v in by.items() if not np.all(np.isnan(v))}
+    rec["kind_bacc_z"], rec["kind_chance"] = logreg_bacc(Z, kinds, groups, seed=seed)
+    if vs:
+        V = np.concatenate(vs)
+        rec["fx_r2_v"] = ridge_r2(_center(V, groups), Fc, groups, seed=seed)
+        rec["kind_bacc_v"], _ = logreg_bacc(V, kinds, groups, seed=seed)
+    zn = Z / (np.linalg.norm(Z, axis=1, keepdims=True) + 1e-12)
+    n_ch = len(fxs[0][4])
+    sim = zn[0::n_ch] @ zn[1::n_ch].T  # chain 0 vs chain 1 of every track
+    eye = np.eye(len(sim), dtype=bool)
+    rec["fx_id_auc"] = _auc(sim[eye], sim[~eye])
+    model.train()
+    return rec
+
+
 @torch.no_grad()
 def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list[tuple], ksets: list, crop: int,
-             batch: int, seed: int = 0) -> dict:
+             batch: int, seed: int = 0, fxs: list[tuple] | None = None) -> dict:
     model.eval()
-    rec: dict = {}
+    rec: dict = fx_probes(model, batcher, val_songs, fxs, crop, batch, seed) if fxs else {}
+    model.eval()
     # identity: Z of crop A vs crop B of each track
     zs = []
     for i in range(0, len(pairs), batch):
         part = pairs[i:i + batch]
         waves = [read_crop(val_songs[s], st, x, crop) for s, st, a, b, _ in part for x in (a, b)]
         patches, _, active, _ = batcher(torch.from_numpy(np.stack(waves)), model, None)
-        mu, _, _ = model.encode(patches, active)
+        mu, _, _, _ = model.encode(patches, active)
         zs.append(torch.nn.functional.normalize(mu.float(), dim=-1).cpu())
     if zs:
         z = torch.cat(zs).view(-1, 2, zs[0].shape[-1])
@@ -159,7 +333,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           eval_every: int = 500, eval_k: int = 4, per_k: int = 16, id_chunks: int = 8, min_gap_s: float = 20.0,
           max_val_tracks: int = 200, plateau: int = 8, plateau_delta: float = 0.002, min_z_rank: float = 2.0,
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
-          limit_frac: float = 1.0, measure: int = 0) -> dict:
+          limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
+          w_swap: float = 1.0, fx_tracks: int = 128, fx_chains: int = 4) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -174,13 +349,14 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     batcher = Batcher(cfg, device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.05)
     sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed)
-    loader = torch.utils.data.DataLoader(MixDataset(train_songs, n_samples), batch_size=batch, sampler=sampler,
-                                         num_workers=workers, persistent_workers=workers > 0,
+    loader = torch.utils.data.DataLoader(MixDataset(train_songs, n_samples, pair_frac), batch_size=batch,
+                                         sampler=sampler, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0,
                                          pin_memory=device.startswith("cuda"))
     amp = device.startswith("cuda") and torch.cuda.is_bf16_supported()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     meta = {"train_songs": len(train_songs), "valid_songs": len(val_songs), "params": n_params,
-            "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp}
+            "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp,
+            "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap}
     _log(json.dumps(meta))
 
     def lr_at(step: int) -> float:
@@ -188,12 +364,16 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
             return lr * (step + 1) / warmup
         return lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, (step - warmup) / max(1, steps - warmup)))))
 
-    def step_fn(wave: torch.Tensor, step: int) -> dict:
+    def step_fn(b: dict, step: int) -> dict:
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
-        patches, plc, active, pmask = batcher(wave, model, rng)
+        patches, plc, active, pmask = batcher(b["wave"], model, rng)
+        pair = None
+        if len(b["pair_idx"]):
+            patches_b, _, active_b, _ = batcher(b["wave_b"], model, None)
+            pair = (b["pair_idx"].to(device), patches_b, active_b)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            o = model(patches, plc, active, pmask, beta=beta)
+            o = model(patches, plc, active, pmask, beta=beta, pair=pair, w_inv=w_inv, w_swap=w_swap)
         opt.zero_grad(set_to_none=True)
         o["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -207,11 +387,12 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     crop_id = id_chunks * cfg.chunk_frames * HOP
     pairs = id_pairs(val_songs, crop_id, int(min_gap_s * SR), max_val_tracks, seed)
     ksets = k_sets(val_songs, n_samples, eval_k, per_k, seed)
-    _log(json.dumps({"val_tracks": len(pairs), "val_mixes": len(ksets)}))
+    fxs = fx_set(val_songs, crop_id, fx_tracks, seed, fx_chains) if fx_tracks else []
+    _log(json.dumps({"val_tracks": len(pairs), "val_mixes": len(ksets), "fx_tracks": len(fxs)}))
     hist = (out / "history.jsonl").open("a")
 
     def record(step: int, extra: dict) -> dict:
-        rec = {"step": step, **extra, **evaluate(model, batcher, val_songs, pairs, ksets, crop_id, batch, seed)}
+        rec = {"step": step, **extra, **evaluate(model, batcher, val_songs, pairs, ksets, crop_id, batch, seed, fxs)}
         hist.write(json.dumps(rec) + "\n")
         hist.flush()
         _log(json.dumps(rec))
@@ -224,23 +405,24 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     key = "id_auc_kind" if not math.isnan(rec0.get("id_auc_kind", float("nan"))) else "id_auc"
     best, since, reason = -1.0, 0, f"steps: reached {steps}"
     t0 = time.time()
-    run = {"loss": 0.0, "pred": 0.0, "kl": 0.0, "vic_var": 0.0, "n": 0}
+    keys = ("loss", "pred", "kl", "vic_var", "inv", "swap")
+    run = {**dict.fromkeys(keys, 0.0), "n": 0}
     step = 0
     for batch_ in loader:
         step += 1
         sampler.step = step
-        o = step_fn(batch_["wave"], step)
+        o = step_fn(batch_, step)
         if not torch.isfinite(o["loss"]):
             reason = f"non-finite loss at step {step}"
             break
-        for k in ("loss", "pred", "kl", "vic_var"):
+        for k in keys:
             run[k] += float(o[k].detach())
         run["n"] += 1
         if step % eval_every == 0 or step == steps:
             n = max(1, run.pop("n"))
             extra = {k: v / n for k, v in run.items()}
             extra.update({"kmax": sampler.kmax(), "lr": lr_at(step), "minutes": (time.time() - t0) / 60})
-            run = {"loss": 0.0, "pred": 0.0, "kl": 0.0, "vic_var": 0.0, "n": 0}
+            run = {**dict.fromkeys(keys, 0.0), "n": 0}
             rec = record(step, extra)
             save("last.pt", step)
             score = rec.get(key, float("nan"))
@@ -279,7 +461,7 @@ def _measure(loader, step_fn, n_steps: int, device: str, n_samples: int, batch: 
         t = time.time()
         b = next(it)
         t1 = time.time()
-        step_fn(b["wave"], step)
+        step_fn(b, step)
         if cuda:
             torch.cuda.synchronize()
         t2 = time.time()
@@ -293,5 +475,22 @@ def _measure(loader, step_fn, n_steps: int, device: str, n_samples: int, batch: 
            "audio_hours_per_hour": 3600 * batch * n_samples / SR / 3600 / s_step,
            "peak_gpu_gb": torch.cuda.max_memory_allocated() / 1e9 if cuda else None}
     (out / "measure.json").write_text(json.dumps(rec, indent=1))
+    _log(json.dumps(rec))
+    return rec
+
+
+def probe_checkpoint(ckpt: str | Path, valid_roots: list[str], id_chunks: int = 8, fx_tracks: int = 128,
+                     batch: int = 4, device: str = "cpu", seed: int = 0, fx_chains: int = 4) -> dict:
+    """The leakage probes alone on a saved checkpoint (e.g. a phase 1a no-V run, the baseline of 2.9). Same
+    views as in training for the same ``valid_roots``, ``id_chunks``, ``fx_tracks`` and ``seed``."""
+    state = torch.load(ckpt, map_location=device, weights_only=False)
+    cfg = CleaveConfig(**state["cfg"])
+    model = Cleave(cfg).to(device)
+    model.load_state_dict(state["model"])
+    songs = find_songs(valid_roots)
+    crop = id_chunks * cfg.chunk_frames * HOP
+    rec = {"ckpt": str(ckpt), "step": state.get("step"), "v_dim": cfg.v_dim,
+           **fx_probes(model, Batcher(cfg, device), songs, fx_set(songs, crop, fx_tracks, seed, fx_chains), crop, batch,
+                       seed)}
     _log(json.dumps(rec))
     return rec

@@ -229,7 +229,7 @@ L'hypothèse ne tient que si les mélanges ressortent plus haut. Si aucun signal
 par σ est abandonné. L'épluchage reste possible avec l'énergie du résidu comme seul critère d'arrêt, ou
 avec un critère de split bayésien (vraisemblance à 1 nœud contre 2 nœuds, pénalité BIC, comme X-means).
 
-### 2.9 Séparer Z des effets : le latent V̄ (décidé le 15 octobre, pas encore codé)
+### 2.9 Séparer Z des effets : le latent V̄ (décidé et codé le 15 octobre)
 
 **Le trou.** Le predictor ne reçoit que Z, P et L, donc tout ce qui n'est ni les notes ni le volume finit
 dans Z : reverb, EQ, compression, delay, distorsion. Une même ligne d'acid dont la distorsion varie
@@ -258,6 +258,25 @@ qu'on randomise va dans V̄, le reste dans Z.
 **Limite connue.** Les effets *figés* dans un stem réel (la reverb d'une prise MoisesDB, par exemple)
 restent dans Z, puisqu'aucune paire ne les fait varier. On ne retire que ce qu'on randomise par-dessus.
 V(t), les effets automatisés à l'intérieur d'une section comme un sweep de filtre, viendra plus tard.
+
+**Le code (15 octobre).**
+- `cleave-train --v-dim 16 --pair-frac 0.5 [--v-window 2 --w-inv 1 --w-swap 1]` ; `--v-dim 0` (défaut)
+  garde le modèle de la phase 1a, dont les checkpoints se rechargent.
+- V̄ du chunk c = MLP de la moyenne des CLS de ses voisins encodés dans ±`v_window`, **sans le chunk c
+  lui-même** (il peut être une cible). La vue B est encodée avec le masque de la vue A : Z_B ne lit jamais
+  les sections que A doit prédire.
+- Chaîne = vecteur de 26 tirages uniformes (`FX_COLS` dans `data.py`), 0 quand l'effet est éteint ; ordre
+  studio fixe, chaque effet allumé avec p = 0,5.
+- Sondes (`fx_probes`, aussi `priism-lab cleave-probe CKPT --valid ...` pour un checkpoint existant) :
+  `--fx-tracks` pistes de validation × `--fx-chains` chaînes. Le R² Z → FX est calculé **après centrage
+  par piste** (de Z et des paramètres) : sur des pistes jamais vues, la variance d'identité noie l'effet
+  et même le log-mel brut donnait R² < 0. `fx_r2_mel` (moyenne/écart-type du log-mel) donne le plafond de
+  ce qu'une sonde linéaire voit ; `fx_r2_z_by` détaille par effet. Validation croisée par piste, régularisation
+  choisie par CV interne.
+- **Limite du swap.** Les deux vues viennent du même stem, donc le swap n'empêche pas V̄ de porter de
+  l'identité (V̄_A est aussi « du même instrument »). Ce qui l'en empêche : la dimension 16, la fenêtre sans
+  le chunk courant, et la sonde V̄ → kind qui le mesure. Pour le forcer, il faudrait une troisième vue :
+  un autre stem passé par la chaîne A.
 
 ---
 

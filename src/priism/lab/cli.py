@@ -459,13 +459,26 @@ def _cleave_train(args: argparse.Namespace) -> None:
     from .cleave.train import train
 
     cfg = CleaveConfig(dim=args.dim, local_layers=args.layers, global_layers=args.layers, pred_layers=args.layers,
-                       z_dim=args.z_dim)
+                       z_dim=args.z_dim, v_dim=args.v_dim, v_window=args.v_window)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
           lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
           max_val_tracks=args.max_val_tracks, plateau=args.plateau, max_minutes=args.max_minutes,
           workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
-          measure=args.measure)
+          measure=args.measure, pair_frac=args.pair_frac, w_inv=args.w_inv, w_swap=args.w_swap,
+          fx_tracks=args.fx_tracks, fx_chains=args.fx_chains)
+
+
+def _cleave_probe(args: argparse.Namespace) -> None:
+    import json
+    from pathlib import Path
+
+    from .cleave.train import probe_checkpoint
+
+    rec = probe_checkpoint(args.ckpt, args.valid, args.id_chunks, args.fx_tracks, args.batch, args.device, args.seed,
+                           args.fx_chains)
+    if args.out:
+        Path(args.out).write_text(json.dumps(rec, indent=1))
 
 
 def _store(args: argparse.Namespace):
@@ -928,6 +941,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
     p.add_argument("--z-dim", type=int, default=64)
+    p.add_argument("--v-dim", type=int, default=0, help="V-bar size per section (docs/cleave.md 2.9); 0: no V-bar")
+    p.add_argument("--v-window", type=int, default=2, help="V-bar of a chunk reads its neighbours within this")
+    p.add_argument("--pair-frac", type=float, default=0.0, help="share of k = 1 crops given as paired FX views")
+    p.add_argument("--w-inv", type=float, default=1.0, help="weight of the Z invariance between paired views")
+    p.add_argument("--w-swap", type=float, default=1.0, help="weight of the swap prediction (Z_B + V-bar_A -> A)")
+    p.add_argument("--fx-tracks", type=int, default=128, help="validation tracks of the FX leakage probes (0: off)")
+    p.add_argument("--fx-chains", type=int, default=4, help="random chains per probe track")
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--eval-k", type=int, default=4, help="validation mixes with k = 1..this")
     p.add_argument("--per-k", type=int, default=16)
@@ -941,6 +961,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.set_defaults(func=_cleave_train)
+
+    p = sub.add_parser("cleave-probe", help="FX leakage probes of a Cleave checkpoint (Z -> FX, V-bar -> kind)")
+    p.add_argument("ckpt")
+    p.add_argument("--valid", nargs="+", required=True)
+    p.add_argument("--id-chunks", type=int, default=8)
+    p.add_argument("--fx-tracks", type=int, default=128)
+    p.add_argument("--fx-chains", type=int, default=4)
+    p.add_argument("--batch", type=int, default=4)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--out", help="also write the result to this JSON file")
+    p.set_defaults(func=_cleave_probe)
     def registry_sep_args(p, many_cuts: bool):
         p.add_argument("--proj", required=True, help="the cache's proj.npz (tokens projected exactly as cached)")
         p.add_argument("--head", help="identity head best.pt (train-id); default: raw tokens")

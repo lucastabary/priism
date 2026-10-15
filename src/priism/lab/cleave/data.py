@@ -7,6 +7,9 @@ is one, otherwise from the file name without its leading index (``03_bass.flac``
 
 Mixes sum waveforms of the same song at the same time (coherent tempo and key), each with a random gain:
 adding spectrograms would ignore the phase. Audio is mono and resampled to SR if needed.
+
+Paired FX views (docs/cleave.md 2.9): one k = 1 crop rendered through two random pedalboard chains, so the
+model can learn that what the chains change belongs to V-bar, not to Z.
 """
 
 from __future__ import annotations
@@ -134,12 +137,91 @@ def load_mix(song: Song, k: int, rng: np.random.Generator, n: int, start: int | 
     return mix, used
 
 
-class MixDataset(torch.utils.data.Dataset):
-    """Items are (song index, k, seed) tuples from ``KSampler``; returns a fixed-length mono crop."""
+# Paired FX views (docs/cleave.md 2.9). A chain is a fixed-length vector of uniform draws in [0, 1], one per
+# column, 0 when its effect is off: the target of the Z -> FX leakage probe, scale-free for R². Every effect
+# here belongs to V (distortion and filters included): whatever we randomise is, by definition, not identity.
+FX_COLS = ["gain", "hp_on", "hp_hz", "lp_on", "lp_hz", "eq_on", "eq_hz", "eq_db", "comp_on", "comp_thr",
+           "comp_ratio", "dist_on", "dist_drive", "chorus_on", "chorus_rate", "chorus_depth", "phaser_on",
+           "phaser_rate", "phaser_depth", "delay_on", "delay_s", "delay_fb", "delay_mix", "rev_on", "rev_size",
+           "rev_wet"]
+FX_P = 0.5  # each effect is on with this probability; chorus and phaser share one modulation slot
 
-    def __init__(self, songs: list[Song], n_samples: int):
+
+def sample_fx(rng: np.random.Generator) -> np.ndarray:
+    """A random chain as a (len(FX_COLS),) float32 vector."""
+    v = dict.fromkeys(FX_COLS, 0.0)
+    v["gain"] = rng.random()
+    groups = {"hp": ["hp_hz"], "lp": ["lp_hz"], "eq": ["eq_hz", "eq_db"], "comp": ["comp_thr", "comp_ratio"],
+              "dist": ["dist_drive"], "delay": ["delay_s", "delay_fb", "delay_mix"], "rev": ["rev_size", "rev_wet"]}
+    for g, cols in groups.items():
+        if rng.random() < FX_P:
+            v[g + "_on"] = 1.0
+            for c in cols:
+                v[c] = rng.random()
+    if rng.random() < FX_P:
+        g = "chorus" if rng.random() < 0.5 else "phaser"
+        v[g + "_on"], v[g + "_rate"], v[g + "_depth"] = 1.0, rng.random(), rng.random()
+    return np.array([v[c] for c in FX_COLS], np.float32)
+
+
+def render_fx(x: np.ndarray, fx: np.ndarray, sr: int = SR) -> np.ndarray:
+    """Mono ``x`` through the chain ``fx`` (fixed studio order), same length, peak kept under 0.99."""
+    import pedalboard as pb
+
+    v = dict(zip(FX_COLS, fx.tolist()))
+
+    def lin(u, lo, hi):
+        return lo + u * (hi - lo)
+
+    def log(u, lo, hi):
+        return lo * (hi / lo) ** u
+
+    plugins = []
+    if v["hp_on"]:
+        plugins.append(pb.HighpassFilter(log(v["hp_hz"], 40.0, 800.0)))
+    if v["lp_on"]:
+        plugins.append(pb.LowpassFilter(log(v["lp_hz"], 1500.0, 16000.0)))
+    if v["eq_on"]:
+        plugins.append(pb.PeakFilter(log(v["eq_hz"], 200.0, 6000.0), lin(v["eq_db"], -9.0, 9.0), 1.0))
+    if v["comp_on"]:
+        plugins.append(pb.Compressor(lin(v["comp_thr"], -40.0, -10.0), lin(v["comp_ratio"], 2.0, 10.0)))
+    if v["dist_on"]:
+        plugins.append(pb.Distortion(lin(v["dist_drive"], 5.0, 35.0)))
+    if v["chorus_on"]:
+        plugins.append(pb.Chorus(rate_hz=lin(v["chorus_rate"], 0.2, 3.0), depth=lin(v["chorus_depth"], 0.1, 0.9),
+                                 mix=0.5))
+    if v["phaser_on"]:
+        plugins.append(pb.Phaser(rate_hz=lin(v["phaser_rate"], 0.1, 2.0), depth=lin(v["phaser_depth"], 0.3, 1.0),
+                                 mix=0.5))
+    if v["delay_on"]:
+        plugins.append(pb.Delay(lin(v["delay_s"], 0.08, 0.6), lin(v["delay_fb"], 0.0, 0.6),
+                                lin(v["delay_mix"], 0.15, 0.5)))
+    if v["rev_on"]:
+        plugins.append(pb.Reverb(room_size=lin(v["rev_size"], 0.2, 0.95), wet_level=lin(v["rev_wet"], 0.1, 0.6),
+                                 dry_level=0.8))
+    plugins.append(pb.Gain(lin(v["gain"], -9.0, 3.0)))
+    y = pb.Pedalboard(plugins)(x[None].astype(np.float32), sr)[0][: len(x)]
+    y = np.pad(y, (0, len(x) - len(y))) if len(y) < len(x) else y
+    peak = float(np.abs(y).max())
+    return (y * (0.99 / peak) if peak > 0.99 else y).astype(np.float32)
+
+
+def paired_views(x: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The same crop through two independent random chains A and B: (wave A, wave B, fx A, fx B)."""
+    fa, fb = sample_fx(rng), sample_fx(rng)
+    return render_fx(x, fa), render_fx(x, fb), fa, fb
+
+
+class MixDataset(torch.utils.data.Dataset):
+    """Items are (song index, k, seed) tuples from ``KSampler``; returns a fixed-length mono crop.
+
+    A ``pair_frac`` share of the k = 1 crops come as paired FX views: ``wave`` is view A, ``wave_b`` view B,
+    with their chains. Batch them with ``collate``, which stacks the paired ones apart."""
+
+    def __init__(self, songs: list[Song], n_samples: int, pair_frac: float = 0.0):
         self.songs = songs
         self.n = n_samples
+        self.pair_frac = pair_frac
 
     def __len__(self) -> int:
         return len(self.songs)
@@ -148,7 +230,23 @@ class MixDataset(torch.utils.data.Dataset):
         i, k, seed = item
         rng = np.random.default_rng(seed)
         wave, used = load_mix(self.songs[i], k, rng, self.n)
+        if len(used) == 1 and self.pair_frac > 0 and rng.random() < self.pair_frac:
+            a, b, fa, fb = paired_views(wave, rng)
+            return {"wave": torch.from_numpy(a), "k": 1, "wave_b": torch.from_numpy(b),
+                    "fx_a": torch.from_numpy(fa), "fx_b": torch.from_numpy(fb)}
         return {"wave": torch.from_numpy(wave), "k": len(used)}
+
+
+def collate(items: list[dict]) -> dict:
+    """Stack ``wave`` for all items; ``wave_b`` / ``fx_*`` only for the paired ones, whose batch positions
+    are ``pair_idx`` (empty tensors when none is paired: unpaired items carry no dummy second view)."""
+    paired = [j for j, it in enumerate(items) if "wave_b" in it]
+    n, d = items[0]["wave"].shape[0], len(FX_COLS)
+    out = {"wave": torch.stack([it["wave"] for it in items]), "k": torch.tensor([it["k"] for it in items]),
+           "pair_idx": torch.tensor(paired, dtype=torch.long)}
+    for key, shape in (("wave_b", (0, n)), ("fx_a", (0, d)), ("fx_b", (0, d))):
+        out[key] = torch.stack([items[j][key] for j in paired]) if paired else torch.zeros(shape)
+    return out
 
 
 def parse_schedule(spec: str) -> list[tuple[int, int]]:

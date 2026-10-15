@@ -109,3 +109,83 @@ def test_cpu_smoke_run(tmp_path):
     assert [h["step"] for h in hist] == [0, 20, 40]
     assert hist[-1]["loss"] < hist[1]["loss"] * 1.5
     assert "rho" in hist[-1]["sigma"]
+
+
+def test_paired_views_and_collate():
+    from priism.lab.cleave.data import FX_COLS, collate, paired_views
+
+    rng = np.random.default_rng(0)
+    x = _tone(57, 2.0, [1, 0.5, 0.3])
+    a, b, fa, fb = paired_views(x, rng)
+    assert a.shape == b.shape == x.shape and fa.shape == (len(FX_COLS),)
+    assert np.abs(a).max() <= 0.99 + 1e-6 and not np.allclose(a, b)
+    items = [{"wave": torch.from_numpy(a), "k": 1, "wave_b": torch.from_numpy(b), "fx_a": torch.from_numpy(fa),
+              "fx_b": torch.from_numpy(fb)}, {"wave": torch.from_numpy(x), "k": 1}]
+    out = collate(items)
+    assert out["wave"].shape == (2, len(x)) and out["wave_b"].shape == (1, len(x))
+    assert out["pair_idx"].tolist() == [0]
+    assert collate(items[1:])["wave_b"].shape == (0, len(x))
+
+
+def test_vbar_and_swap_losses():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, v_dim=4)
+    model = Cleave(cfg)
+    B, C = 3, 5
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 2] = True
+    mu, _, _, v = model.encode(patches, active, pmask)
+    assert v.shape == (B, C, 4)
+    pi = torch.tensor([0, 2])
+    out = model(patches, pl, active, pmask, pair=(pi, patches[pi] + 0.1 * torch.randn_like(patches[pi]), active[pi]))
+    assert torch.isfinite(out["loss"]) and out["swap"] > 0 and out["inv"] >= 0
+    out["loss"].backward()
+    assert model.vbar.mlp[-1].weight.grad.abs().sum() > 0
+    # V-bar of a chunk never reads that chunk
+    patches2 = patches.clone()
+    patches2[:, 0] += 5.0
+    _, _, _, v2 = model.encode(patches2, active)
+    _, _, _, v1 = model.encode(patches, active)
+    assert torch.allclose(v1[:, 0], v2[:, 0], atol=1e-5) and not torch.allclose(v1[:, 1], v2[:, 1])
+
+
+def test_no_v_checkpoint_still_loads():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8)
+    state = {k: v for k, v in Cleave(cfg).state_dict().items()}
+    d = cfg.to_dict()
+    del d["v_dim"], d["v_window"]  # a phase 1a checkpoint predates them
+    Cleave(CleaveConfig(**d)).load_state_dict(state)
+
+
+def test_leakage_probes_on_toy_data():
+    from priism.lab.cleave.train import logreg_bacc, ridge_r2
+
+    rng = np.random.default_rng(0)
+    n = 120
+    groups = np.repeat(np.arange(n // 2), 2)
+    Y = rng.random((n, 3))
+    X_leak = np.concatenate([Y @ rng.normal(size=(3, 6)), rng.normal(size=(n, 4))], 1)
+    X_clean = rng.normal(size=(n, 10))
+    assert ridge_r2(X_leak, Y, groups) > 0.9
+    assert ridge_r2(X_clean, Y, groups) < 0.1
+    labels = np.repeat(rng.integers(0, 3, n // 2), 2)
+    X_kind = np.eye(3)[labels] * 3 + rng.normal(size=(n, 3))
+    bacc, chance = logreg_bacc(X_kind, labels, groups)
+    assert chance == 1 / 3 and bacc > 0.8
+    bacc_noise, _ = logreg_bacc(rng.normal(size=(n, 3)), labels, groups)
+    assert bacc_noise < 0.6
+
+
+def test_cpu_smoke_run_with_pairs(tmp_path):
+    from priism.lab.cleave.train import train
+
+    _songs(tmp_path / "train")
+    _songs(tmp_path / "valid", n_songs=4)
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, v_dim=4)
+    train([str(tmp_path / "train")], [str(tmp_path / "valid")], tmp_path / "run", cfg, steps=20, batch=2,
+          crop_chunks=4, warmup=5, eval_every=20, eval_k=1, per_k=4, id_chunks=2, min_gap_s=2.0, workers=0,
+          device="cpu", plateau=0, pair_frac=1.0, fx_tracks=12)
+    hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
+    assert hist[-1]["swap"] > 0 and "fx_r2_z" in hist[-1] and "kind_bacc_v" in hist[-1]

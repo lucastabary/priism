@@ -13,6 +13,13 @@ constant solution tempting.
 
 Three uncertainty signals come out per song (docs/cleave.md 2.8): the posterior sigma of Z, the
 predictor's variance, and its error.
+
+V-bar (docs/cleave.md 2.9, ``v_dim`` > 0): a small latent per chunk, read from the CLS tokens of its
+neighbours within ``v_window`` chunks (never its own chunk, which may be a target), given to the predictor
+beside Z: the slot for mix effects, so they stop leaking into Z. With paired FX views of a crop, two more
+losses push effects out of Z: invariance of the normalised mu between views, and swap prediction (the
+targets of view A from Z of view B, V-bar and P/L of view A). ``v_dim`` = 0 is the phase 1a model, whose
+checkpoints still load.
 """
 
 from __future__ import annotations
@@ -41,6 +48,8 @@ class CleaveConfig:
     patch_f: int = 16
     n_mels: int = N_MELS
     pl_dim: int = PL_DIM
+    v_dim: int = 0  # 0: no V-bar (phase 1a checkpoints)
+    v_window: int = 2  # V-bar of chunk c reads chunks c-w..c+w except c
 
     @property
     def n_tcol(self) -> int:
@@ -127,18 +136,44 @@ class Predictor(nn.Module):
         self.cfg = cfg
         self.pl_embed = nn.Linear(cfg.patch_t * cfg.pl_dim, d)
         self.z_embed = nn.Linear(cfg.z_dim, d)
+        self.v_embed = nn.Linear(cfg.v_dim, d) if cfg.v_dim else None
         self.pos = nn.Parameter(torch.randn(1, cfg.n_patches, d) * 0.02)
         self.body = _body(d, cfg.heads, cfg.pred_layers)
         self.norm = nn.LayerNorm(d)
         self.out = nn.Linear(d, d)
         self.logv = nn.Linear(d, 1)
 
-    def forward(self, z: torch.Tensor, pl: torch.Tensor):
-        """(N, z_dim), (N, n_tcol, patch_t * pl_dim) -> predicted tokens (N, P, d), log-variance (N, P)."""
+    def forward(self, z: torch.Tensor, pl: torch.Tensor, v: torch.Tensor | None = None):
+        """(N, z_dim), (N, n_tcol, patch_t * pl_dim), (N, v_dim) -> predicted tokens (N, P, d), log-var (N, P)."""
         t = self.pl_embed(pl).repeat_interleave(self.cfg.n_rows, dim=1)  # one P/L per time column
         x = t + self.pos + self.z_embed(z)[:, None]
+        if self.v_embed is not None:
+            x = x + self.v_embed(v)[:, None]
         h = self.norm(self.body(x))
         return self.out(h), self.logv(h).squeeze(-1).clamp(-10, 10)
+
+
+class VBar(nn.Module):
+    """Chunk CLS tokens -> V-bar per chunk: the mean of the encoded neighbours' CLS within ``v_window``
+    (own chunk excluded), through an MLP to ``v_dim``. A chunk with no encoded neighbour gets zeros."""
+
+    def __init__(self, cfg: CleaveConfig):
+        super().__init__()
+        d = cfg.dim
+        self.w = cfg.v_window
+        self.norm = nn.LayerNorm(d)
+        self.mlp = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, cfg.v_dim))
+
+    def forward(self, cls: torch.Tensor, enc: torch.Tensor) -> torch.Tensor:
+        """(B, C, d), (B, C) bool encoded -> (B, C, v_dim)."""
+        i = torch.arange(cls.shape[1], device=cls.device)
+        gap = (i[:, None] - i[None]).abs()
+        band = ((gap <= self.w) & (gap > 0)).to(cls.dtype)
+        e = enc.to(cls.dtype)
+        num = torch.einsum("ij,bjd->bid", band, cls * e[..., None])
+        den = torch.einsum("ij,bj->bi", band, e)
+        h = num / den.clamp_min(1)[..., None]
+        return self.mlp(self.norm(h)) * (den > 0)[..., None].to(cls.dtype)
 
 
 def vicreg(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -165,6 +200,7 @@ class Cleave(nn.Module):
         self.local = LocalEncoder(cfg)
         self.glob = GlobalEncoder(cfg)
         self.pred = Predictor(cfg)
+        self.vbar = VBar(cfg) if cfg.v_dim else None
         self.target = copy.deepcopy(self.local)
         self.target.requires_grad_(False)
 
@@ -184,7 +220,8 @@ class Cleave(nn.Module):
         return patches, pl
 
     def encode(self, patches: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor | None = None):
-        """Posterior of Z from the visible patches: mu, logvar (B, z_dim), and the online patch tokens read."""
+        """Posterior of Z from the visible patches: mu, logvar (B, z_dim), the online patch tokens read, and
+        V-bar (B, C, v_dim), None without V-bar."""
         B, C, P, _ = patches.shape
         if pmask is None:
             pmask = torch.zeros(B, C, P, dtype=torch.bool, device=patches.device)
@@ -195,12 +232,17 @@ class Cleave(nn.Module):
         cls = cls_e.new_zeros(B, C, cls_e.shape[-1])
         cls = cls.index_put((bi, ci), cls_e)
         mu, logvar = self.glob(cls, ~enc)
-        return mu, logvar, tok_e[~pmask[bi, ci]]
+        v = self.vbar(cls, enc) if self.vbar is not None else None
+        return mu, logvar, tok_e[~pmask[bi, ci]], v
 
     def forward(self, patches: torch.Tensor, pl: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor,
-                beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False) -> dict:
+                beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
+                pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0) -> dict:
+        """``pair`` = (batch positions of the paired items, view B patches, view B active chunks): view A is
+        the item itself. View B is encoded under view A's mask, so Z_B never reads the sections A must
+        predict."""
         B = patches.shape[0]
-        mu, logvar, tokens = self.encode(patches, active, pmask)
+        mu, logvar, tokens, v = self.encode(patches, active, pmask)
         z = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu) if self.training else mu
         if shuffle_z:  # Z of another song: how much the predictor relies on Z
             z = z.roll(1, 0)
@@ -209,7 +251,8 @@ class Cleave(nn.Module):
         with torch.no_grad():
             _, t = self.target(patches[tb, tc])
             t = F.layer_norm(t.float(), (t.shape[-1],))
-        pred, logv = self.pred(z[tb], pl[tb, tc])
+        vt = v[tb, tc] if v is not None else None
+        pred, logv = self.pred(z[tb], pl[tb, tc], vt)
         m = pmask[tb, tc]
         err = ((pred.float() - t) ** 2).mean(-1)
         logv = logv.float()
@@ -219,6 +262,20 @@ class Cleave(nn.Module):
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
         loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss
+        inv = swap = torch.zeros((), device=loss.device)
+        if pair is not None and len(pair[0]) > 0:
+            pi, patches_b, active_b = pair
+            mu_b, logvar_b, _, _ = self.encode(patches_b, active_b, pmask[pi])
+            z_b = mu_b + torch.exp(0.5 * logvar_b) * torch.randn_like(mu_b) if self.training else mu_b
+            inv = ((F.normalize(mu[pi].float(), dim=-1) - F.normalize(mu_b.float(), dim=-1)) ** 2).sum(-1).mean()
+            pos = torch.full((B,), -1, dtype=torch.long, device=patches.device)
+            pos[pi] = torch.arange(len(pi), device=patches.device)
+            sel = pos[tb] >= 0
+            if sel.any():
+                ps, _ = self.pred(z_b[pos[tb[sel]]], pl[tb[sel], tc[sel]], vt[sel] if vt is not None else None)
+                swap = ((ps.float() - t[sel]) ** 2).mean(-1)[m[sel]].mean()
+            kl_b = (0.5 * (mu_b.float() ** 2 + logvar_b.float().exp() - 1 - logvar_b.float())).sum(-1).mean()
+            loss = loss + w_inv * inv + w_swap * swap + beta * kl_b * len(pi) / B
 
         # per-song signals (docs/cleave.md 2.8)
         mf = m.float()
@@ -227,5 +284,6 @@ class Cleave(nn.Module):
         var_song = torch.zeros(B, device=mf.device).index_add_(0, tb, (logv.detach().exp() * mf).sum(1)) / n_t
         sigma_song = torch.exp(0.5 * logvar.detach().float()).mean(-1)
         return {"loss": loss, "pred": loss_pred.detach(), "nll": loss_nll.detach(), "kl": kl.detach(),
-                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "mu": mu.detach(),
+                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "inv": inv.detach(),
+                "swap": swap.detach(), "mu": mu.detach(),
                 "sigma": sigma_song, "pred_var": var_song, "pred_err": err_song, "targets": t}
