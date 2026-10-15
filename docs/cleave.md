@@ -268,7 +268,8 @@ V(t), les effets automatisés à l'intérieur d'une section comme un sweep de fi
 - Chaîne = vecteur de 26 tirages uniformes (`FX_COLS` dans `data.py`), 0 quand l'effet est éteint ; ordre
   studio fixe, chaque effet allumé avec p = 0,5.
 - Sondes (`fx_probes`, aussi `priism-lab cleave-probe CKPT --valid ...` pour un checkpoint existant) :
-  `--fx-tracks` pistes de validation × `--fx-chains` chaînes. Le R² Z → FX est calculé **après centrage
+  `--fx-tracks` pistes de validation × `--fx-chains` chaînes (par défaut actives seulement avec V̄ ou des
+  paires, pour ne pas alourdir l'évaluation des runs de la phase 1a). Le R² Z → FX est calculé **après centrage
   par piste** (de Z et des paramètres) : sur des pistes jamais vues, la variance d'identité noie l'effet
   et même le log-mel brut donnait R² < 0. `fx_r2_mel` (moyenne/écart-type du log-mel) donne le plafond de
   ce qu'une sonde linéaire voit ; `fx_r2_z_by` détaille par effet. Validation croisée par piste, régularisation

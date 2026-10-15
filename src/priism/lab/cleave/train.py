@@ -334,7 +334,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           max_val_tracks: int = 200, plateau: int = 8, plateau_delta: float = 0.002, min_z_rank: float = 2.0,
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
-          w_swap: float = 1.0, fx_tracks: int = 128, fx_chains: int = 4) -> dict:
+          w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -387,6 +387,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     crop_id = id_chunks * cfg.chunk_frames * HOP
     pairs = id_pairs(val_songs, crop_id, int(min_gap_s * SR), max_val_tracks, seed)
     ksets = k_sets(val_songs, n_samples, eval_k, per_k, seed)
+    if fx_tracks is None:  # auto: probes for V-bar or paired runs; phase 1a runs keep their eval cost
+        fx_tracks = 128 if cfg.v_dim or pair_frac > 0 else 0
     fxs = fx_set(val_songs, crop_id, fx_tracks, seed, fx_chains) if fx_tracks else []
     _log(json.dumps({"val_tracks": len(pairs), "val_mixes": len(ksets), "fx_tracks": len(fxs)}))
     hist = (out / "history.jsonl").open("a")

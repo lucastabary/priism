@@ -946,7 +946,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pair-frac", type=float, default=0.0, help="share of k = 1 crops given as paired FX views")
     p.add_argument("--w-inv", type=float, default=1.0, help="weight of the Z invariance between paired views")
     p.add_argument("--w-swap", type=float, default=1.0, help="weight of the swap prediction (Z_B + V-bar_A -> A)")
-    p.add_argument("--fx-tracks", type=int, default=128, help="validation tracks of the FX leakage probes (0: off)")
+    p.add_argument("--fx-tracks", type=int, default=None,
+                   help="validation tracks of the FX leakage probes (0: off; default 128 with V-bar or pairs, else 0)")
     p.add_argument("--fx-chains", type=int, default=4, help="random chains per probe track")
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--eval-k", type=int, default=4, help="validation mixes with k = 1..this")
