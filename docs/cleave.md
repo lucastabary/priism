@@ -275,9 +275,37 @@ V(t), les effets automatisés à l'intérieur d'une section comme un sweep de fi
   ce qu'une sonde linéaire voit ; `fx_r2_z_by` détaille par effet. Validation croisée par piste, régularisation
   choisie par CV interne.
 - **Limite du swap.** Les deux vues viennent du même stem, donc le swap n'empêche pas V̄ de porter de
-  l'identité (V̄_A est aussi « du même instrument »). Ce qui l'en empêche : la dimension 16, la fenêtre sans
-  le chunk courant, et la sonde V̄ → kind qui le mesure. Pour le forcer, il faudrait une troisième vue :
-  un autre stem passé par la chaîne A.
+  l'identité (V̄_A est aussi « du même instrument »). D'où trois options (15 octobre, soir), toutes
+  désactivées par défaut : `--other-view` (une troisième vue : un autre stem du même morceau, même instant,
+  passé par la chaîne A ; le swap lit V̄ sur elle), `--w-vinv` (V̄ identique depuis le stem et depuis
+  l'autre stem) et `--v-drop p` (V̄ mis à zéro pour une part p des items dans la prédiction principale).
+
+**Le smoke CPU du 15 octobre** (32 boucles NI, dim 64, 600 pas, seeds 0 / 1 ; z_use = perte avec Z
+mélangé moins perte avec le vrai Z) :
+
+| run | z_use | fx_r2_z | kind_bacc_v | std de μ |
+|---|---|---|---|---|
+| sans V̄ ni paires | 0,052 / 0,038 | 0,061 / 0,053 | | ≈ 0,28 |
+| V̄ + paires, invariance MSE (code initial) | 0,000 / 0,000 | 0,050 / 0,042 | 0,68 / 0,73 | 0,0015 |
+| paires seules (InfoNCE) | 0,005 / 0,007 | 0,038 / 0,055 | | 0,10 |
+| V̄ seul, sans paires | 0,004 / 0,013 | 0,049 / 0,058 | 0,79 / 0,87 | 0,14 / 0,18 |
+| V̄ + paires + other-view + v-drop 0,3 | 0,001 / 0,001 | 0,047 / 0,052 | 0,74 / 0,73 | 0,11 |
+| idem + w-vinv 1 | 0,006 / 0,004 | 0,045 / 0,068 | 0,74 / 0,86 | 0,09 / 0,10 |
+
+- **Le z_use = 0 du code initial était un effondrement**, pas le raccourci V̄ : l'invariance comme distance
+  entre μ normalisés se minimise avec un μ constant (écart-type entre crops 0,0015). L'effective rank,
+  calculé sur μ normalisé, ne le voyait pas ; l'évaluation journalise maintenant `z_std`. L'invariance
+  est désormais un InfoNCE sur le batch (`--inv nce`, défaut ; `--inv mse` garde l'ancienne).
+- Même sans effondrement, z_use reste petit dès qu'on ajoute **soit** les paires, **soit** V̄ : chacun
+  divise z_use par 5 à 10. Et z_use mesuré avec V̄ mis à zéro est aussi faible : le predictor ne
+  remplace pas Z par V̄ à l'évaluation, c'est Z qui apprend moins. Hypothèse : sur le log-mel, une
+  grande part du timbre est l'enveloppe spectrale, que nos chaînes (EQ ±9 dB, filtres, distorsion)
+  font varier ; l'invariance retire donc à Z aussi une partie de l'identité. V̄, lu sur le même stem
+  et sans coût KL, prend le reste.
+- La troisième vue et `v_drop` ne changent presque rien à cette échelle (kind_bacc_v ne baisse pas,
+  fx_r2_z reste dans le bruit des seeds). Deux seeds, un modèle minuscule : à reconfirmer sur GPU avant
+  de trancher. Pistes : une famille d'effets plus douce (EQ et filtres moins forts), une sonde
+  `id_auc` sous chaîne, ou garder dans Z ce qu'aucune paire ne fait varier.
 
 ---
 

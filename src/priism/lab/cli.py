@@ -466,7 +466,8 @@ def _cleave_train(args: argparse.Namespace) -> None:
           max_val_tracks=args.max_val_tracks, plateau=args.plateau, max_minutes=args.max_minutes,
           workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
           measure=args.measure, pair_frac=args.pair_frac, w_inv=args.w_inv, w_swap=args.w_swap,
-          fx_tracks=args.fx_tracks, fx_chains=args.fx_chains)
+          fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
+          w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -946,6 +947,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--pair-frac", type=float, default=0.0, help="share of k = 1 crops given as paired FX views")
     p.add_argument("--w-inv", type=float, default=1.0, help="weight of the Z invariance between paired views")
     p.add_argument("--w-swap", type=float, default=1.0, help="weight of the swap prediction (Z_B + V-bar_A -> A)")
+    p.add_argument("--other-view", action="store_true",
+                   help="paired crops also render another stem through chain A; the swap reads V-bar from it")
+    p.add_argument("--v-drop", type=float, default=0.0, help="per-item probability of zeroing V-bar in the main path")
+    p.add_argument("--w-vinv", type=float, default=0.0,
+                   help="weight of the V-bar invariance between the stem and the other stem (needs --other-view)")
+    p.add_argument("--inv", choices=["nce", "mse"], default="nce",
+                   help="Z invariance between paired views: InfoNCE over the batch, or the distance (collapses)")
+    p.add_argument("--inv-tau", type=float, default=0.1, help="InfoNCE temperature")
     p.add_argument("--fx-tracks", type=int, default=None,
                    help="validation tracks of the FX leakage probes (0: off; default 128 with V-bar or pairs, else 0)")
     p.add_argument("--fx-chains", type=int, default=4, help="random chains per probe track")

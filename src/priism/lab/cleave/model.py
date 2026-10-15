@@ -20,6 +20,17 @@ beside Z: the slot for mix effects, so they stop leaking into Z. With paired FX 
 losses push effects out of Z: invariance of the normalised mu between views, and swap prediction (the
 targets of view A from Z of view B, V-bar and P/L of view A). ``v_dim`` = 0 is the phase 1a model, whose
 checkpoints still load.
+
+V-bar read from the stem's own neighbours carries its timbre, a free channel (no KL) that let the
+predictor stop using Z. Three counters, each optional: the swap reads V-bar from another stem of the same
+song under chain A (``pair`` with an other view), so V-bar only helps there by carrying the chain;
+``w_vinv`` asks V-bar to be the same from the stem and from that other stem; ``v_drop`` zeroes V-bar per
+item in the main prediction, so Z alone must still predict.
+
+The invariance of Z between views is InfoNCE by default (``inv="nce"``): mu_B must be closer to its own
+mu_A than to the other crops of the batch. The plain distance between normalised mu (``inv="mse"``) is
+minimised by a constant mu, and in the 2.9 smoke run Z collapsed to one (std across crops 0.0015, against
+0.28 without pairs; the effective rank, computed on normalised mu, did not show it).
 """
 
 from __future__ import annotations
@@ -237,10 +248,12 @@ class Cleave(nn.Module):
 
     def forward(self, patches: torch.Tensor, pl: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor,
                 beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
-                pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0) -> dict:
-        """``pair`` = (batch positions of the paired items, view B patches, view B active chunks): view A is
-        the item itself. View B is encoded under view A's mask, so Z_B never reads the sections A must
-        predict."""
+                pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0, v_drop: float = 0.0,
+                w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1) -> dict:
+        """``pair`` = (batch positions of the paired items, view B patches, view B active chunks), optionally
+        followed by (other-stem patches, other-stem active chunks): view A is the item itself. Views B and O
+        are encoded under view A's mask, so Z_B never reads the sections A must predict and V-bar_O sees the
+        same neighbours as V-bar_A."""
         B = patches.shape[0]
         mu, logvar, tokens, v = self.encode(patches, active, pmask)
         z = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu) if self.training else mu
@@ -252,6 +265,8 @@ class Cleave(nn.Module):
             _, t = self.target(patches[tb, tc])
             t = F.layer_norm(t.float(), (t.shape[-1],))
         vt = v[tb, tc] if v is not None else None
+        if vt is not None and self.training and v_drop > 0:  # Z alone must predict these items
+            vt = vt * (torch.rand(B, device=vt.device) >= v_drop).to(vt.dtype)[tb, None]
         pred, logv = self.pred(z[tb], pl[tb, tc], vt)
         m = pmask[tb, tc]
         err = ((pred.float() - t) ** 2).mean(-1)
@@ -262,20 +277,34 @@ class Cleave(nn.Module):
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
         loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss
-        inv = swap = torch.zeros((), device=loss.device)
+        inv = swap = vinv = torch.zeros((), device=loss.device)
         if pair is not None and len(pair[0]) > 0:
-            pi, patches_b, active_b = pair
+            pi, patches_b, active_b = pair[:3]
             mu_b, logvar_b, _, _ = self.encode(patches_b, active_b, pmask[pi])
+            v_o = self.encode(pair[3], pair[4], pmask[pi])[3] if len(pair) > 3 and v is not None else None
+            if v_o is not None and w_vinv > 0:  # V-bar from the stem and from another stem, same chain
+                both = (v[pi].abs().sum(-1) > 0) & (v_o.abs().sum(-1) > 0)
+                if both.any():
+                    d = F.normalize(v[pi].float(), dim=-1) - F.normalize(v_o.float(), dim=-1)
+                    vinv = (d ** 2).sum(-1)[both].mean()
             z_b = mu_b + torch.exp(0.5 * logvar_b) * torch.randn_like(mu_b) if self.training else mu_b
-            inv = ((F.normalize(mu[pi].float(), dim=-1) - F.normalize(mu_b.float(), dim=-1)) ** 2).sum(-1).mean()
+            na, nb = F.normalize(mu.float(), dim=-1), F.normalize(mu_b.float(), dim=-1)
+            if inv_mode == "nce":  # the other crops of the batch are the negatives
+                inv = F.cross_entropy(nb @ na.T / inv_tau, pi)
+            else:
+                inv = ((na[pi] - nb) ** 2).sum(-1).mean()
             pos = torch.full((B,), -1, dtype=torch.long, device=patches.device)
             pos[pi] = torch.arange(len(pi), device=patches.device)
             sel = pos[tb] >= 0
             if sel.any():
-                ps, _ = self.pred(z_b[pos[tb[sel]]], pl[tb[sel], tc[sel]], vt[sel] if vt is not None else None)
+                if v_o is not None:
+                    vs = v_o[pos[tb[sel]], tc[sel]]
+                else:
+                    vs = v[tb[sel], tc[sel]] if v is not None else None
+                ps, _ = self.pred(z_b[pos[tb[sel]]], pl[tb[sel], tc[sel]], vs)
                 swap = ((ps.float() - t[sel]) ** 2).mean(-1)[m[sel]].mean()
             kl_b = (0.5 * (mu_b.float() ** 2 + logvar_b.float().exp() - 1 - logvar_b.float())).sum(-1).mean()
-            loss = loss + w_inv * inv + w_swap * swap + beta * kl_b * len(pi) / B
+            loss = loss + w_inv * inv + w_swap * swap + w_vinv * vinv + beta * kl_b * len(pi) / B
 
         # per-song signals (docs/cleave.md 2.8)
         mf = m.float()
@@ -285,5 +314,5 @@ class Cleave(nn.Module):
         sigma_song = torch.exp(0.5 * logvar.detach().float()).mean(-1)
         return {"loss": loss, "pred": loss_pred.detach(), "nll": loss_nll.detach(), "kl": kl.detach(),
                 "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "inv": inv.detach(),
-                "swap": swap.detach(), "mu": mu.detach(),
+                "swap": swap.detach(), "vinv": vinv.detach(), "mu": mu.detach(),
                 "sigma": sigma_song, "pred_var": var_song, "pred_err": err_song, "targets": t}

@@ -189,3 +189,65 @@ def test_cpu_smoke_run_with_pairs(tmp_path):
           device="cpu", plateau=0, pair_frac=1.0, fx_tracks=12)
     hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
     assert hist[-1]["swap"] > 0 and "fx_r2_z" in hist[-1] and "kind_bacc_v" in hist[-1]
+
+
+def test_other_view_items(tmp_path):
+    from priism.lab.cleave.data import MixDataset, collate
+
+    _songs(tmp_path, n_songs=1)
+    songs = find_songs([str(tmp_path)])
+    n = SR * 2
+    plain = MixDataset(songs, n)[(0, 1, 7)]
+    paired = MixDataset(songs, n, pair_frac=1.0, other_view=True)[(0, 1, 7)]
+    assert "wave_b" in paired and paired["wave_o"].shape == (n,)
+    assert not torch.allclose(paired["wave_o"], paired["wave"])
+    # the unpaired path draws the same crop as before the other view existed
+    wave, _ = load_mix(songs[0], 1, np.random.default_rng(7), n)
+    assert torch.allclose(plain["wave"], torch.from_numpy(wave))
+    out = collate([paired, plain])
+    assert out["wave_o"].shape == (1, n) and "wave_o" not in collate([plain])
+
+
+def test_swap_reads_vbar_from_the_other_stem():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, v_dim=4)
+    model = Cleave(cfg).eval()
+    B, C = 2, 5
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 2] = True
+    pi = torch.tensor([1])
+    pb, po = patches[pi] + 0.1 * torch.randn_like(patches[pi]), torch.randn_like(patches[pi])
+    o1 = model(patches, pl, active, pmask, pair=(pi, pb, active[pi], po, active[pi]), w_vinv=1.0)
+    o2 = model(patches, pl, active, pmask, pair=(pi, pb, active[pi], po + 3.0, active[pi]), w_vinv=1.0)
+    o3 = model(patches, pl, active, pmask, pair=(pi, pb, active[pi]))
+    assert o1["vinv"] > 0 and o3["vinv"] == 0
+    # InfoNCE invariance: a constant mu pays log(batch), the distance version would pay nothing
+    model.glob.mu.weight.data.zero_()
+    o4 = model(patches, pl, active, pmask, pair=(pi, pb, active[pi]))
+    o5 = model(patches, pl, active, pmask, pair=(pi, pb, active[pi]), inv_mode="mse")
+    assert torch.isclose(o4["inv"], torch.log(torch.tensor(float(B)))) and o5["inv"] < 1e-6
+    model = Cleave(cfg).eval()
+    assert not torch.isclose(o1["swap"], o2["swap"]) and torch.isclose(o1["pred"], o2["pred"])
+    # dropping V-bar changes the main prediction only in training
+    model.train()
+    torch.manual_seed(0)
+    d = model(patches, pl, active, pmask, v_drop=1.0)
+    model.pred.v_embed.weight.data.zero_()  # V-bar then has no effect, as if dropped
+    torch.manual_seed(0)
+    z = model(patches, pl, active, pmask)
+    assert torch.isclose(d["pred"], z["pred"])
+
+
+def test_cpu_smoke_run_with_other_view(tmp_path):
+    from priism.lab.cleave.train import train
+
+    _songs(tmp_path / "train")
+    _songs(tmp_path / "valid", n_songs=4)
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, v_dim=4)
+    train([str(tmp_path / "train")], [str(tmp_path / "valid")], tmp_path / "run", cfg, steps=10, batch=2,
+          crop_chunks=4, warmup=5, eval_every=10, eval_k=1, per_k=4, id_chunks=2, min_gap_s=2.0, workers=0,
+          device="cpu", plateau=0, pair_frac=1.0, fx_tracks=0, other_view=True, v_drop=0.5, w_vinv=1.0)
+    hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
+    assert hist[-1]["swap"] > 0 and hist[-1]["vinv"] > 0

@@ -9,7 +9,10 @@ Mixes sum waveforms of the same song at the same time (coherent tempo and key), 
 adding spectrograms would ignore the phase. Audio is mono and resampled to SR if needed.
 
 Paired FX views (docs/cleave.md 2.9): one k = 1 crop rendered through two random pedalboard chains, so the
-model can learn that what the chains change belongs to V-bar, not to Z.
+model can learn that what the chains change belongs to V-bar, not to Z. With ``other_view``, a paired crop also
+brings another stem of the same song, same time, through chain A: V-bar read from it can describe the
+chain but not the timbre of the stem being predicted (V-bar from the stem's own neighbours carried its
+identity, so the predictor stopped needing Z).
 """
 
 from __future__ import annotations
@@ -212,16 +215,31 @@ def paired_views(x: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, n
     return render_fx(x, fa), render_fx(x, fb), fa, fb
 
 
+def other_stem(song: Song, used: list[int], start: int, n: int, rng: np.random.Generator,
+               min_active: float = 0.25) -> np.ndarray | None:
+    """A random other stem of ``song`` playing in the same crop, or None when none plays."""
+    for s in rng.permutation(len(song.stems)):
+        if int(s) in used:
+            continue
+        x = read_crop(song, int(s), start, n)
+        if active_frac(x) >= min_active:
+            return x
+    return None
+
+
 class MixDataset(torch.utils.data.Dataset):
     """Items are (song index, k, seed) tuples from ``KSampler``; returns a fixed-length mono crop.
 
     A ``pair_frac`` share of the k = 1 crops come as paired FX views: ``wave`` is view A, ``wave_b`` view B,
-    with their chains. Batch them with ``collate``, which stacks the paired ones apart."""
+    with their chains. With ``other_view``, they also carry ``wave_o``, another playing stem through chain A
+    (a crop with no other playing stem then stays unpaired). Batch them with ``collate``, which stacks the
+    paired ones apart."""
 
-    def __init__(self, songs: list[Song], n_samples: int, pair_frac: float = 0.0):
+    def __init__(self, songs: list[Song], n_samples: int, pair_frac: float = 0.0, other_view: bool = False):
         self.songs = songs
         self.n = n_samples
         self.pair_frac = pair_frac
+        self.other_view = other_view
 
     def __len__(self) -> int:
         return len(self.songs)
@@ -229,23 +247,33 @@ class MixDataset(torch.utils.data.Dataset):
     def __getitem__(self, item):
         i, k, seed = item
         rng = np.random.default_rng(seed)
-        wave, used = load_mix(self.songs[i], k, rng, self.n)
+        song = self.songs[i]
+        start = int(rng.integers(0, max(1, song_frames_sr(song) - self.n)))  # load_mix's own first draw
+        wave, used = load_mix(song, k, rng, self.n, start)
         if len(used) == 1 and self.pair_frac > 0 and rng.random() < self.pair_frac:
-            a, b, fa, fb = paired_views(wave, rng)
-            return {"wave": torch.from_numpy(a), "k": 1, "wave_b": torch.from_numpy(b),
-                    "fx_a": torch.from_numpy(fa), "fx_b": torch.from_numpy(fb)}
+            other = other_stem(song, used, start, self.n, rng) if self.other_view else None
+            if not self.other_view or other is not None:
+                a, b, fa, fb = paired_views(wave, rng)
+                item = {"wave": torch.from_numpy(a), "k": 1, "wave_b": torch.from_numpy(b),
+                        "fx_a": torch.from_numpy(fa), "fx_b": torch.from_numpy(fb)}
+                if other is not None:
+                    item["wave_o"] = torch.from_numpy(render_fx(other, fa))
+                return item
         return {"wave": torch.from_numpy(wave), "k": len(used)}
 
 
 def collate(items: list[dict]) -> dict:
-    """Stack ``wave`` for all items; ``wave_b`` / ``fx_*`` only for the paired ones, whose batch positions
-    are ``pair_idx`` (empty tensors when none is paired: unpaired items carry no dummy second view)."""
+    """Stack ``wave`` for all items; ``wave_b`` / ``fx_*`` (and ``wave_o`` when they have it) only for the
+    paired ones, whose batch positions are ``pair_idx`` (empty tensors when none is paired: unpaired items
+    carry no dummy second view)."""
     paired = [j for j, it in enumerate(items) if "wave_b" in it]
     n, d = items[0]["wave"].shape[0], len(FX_COLS)
     out = {"wave": torch.stack([it["wave"] for it in items]), "k": torch.tensor([it["k"] for it in items]),
            "pair_idx": torch.tensor(paired, dtype=torch.long)}
     for key, shape in (("wave_b", (0, n)), ("fx_a", (0, d)), ("fx_b", (0, d))):
         out[key] = torch.stack([items[j][key] for j in paired]) if paired else torch.zeros(shape)
+    if paired and all("wave_o" in items[j] for j in paired):
+        out["wave_o"] = torch.stack([items[j]["wave_o"] for j in paired])
     return out
 
 

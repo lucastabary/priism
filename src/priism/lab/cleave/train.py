@@ -5,7 +5,8 @@ Every evaluation appends one JSON line to ``history.jsonl`` (flushed) and prints
 - ``id_auc`` / ``id_auc_kind``: Z (posterior mean) of two crops of the same track, ``min_gap_s`` apart, against
   other tracks (all, or of the same kind): the identity criterion C2 of docs/cleave.md. Step 0 is the
   randomly initialised model, the baseline C2 has to beat.
-- ``z_rank`` / ``target_rank``: effective ranks of Z and of the target patch tokens (criterion C1).
+- ``z_rank`` / ``target_rank``: effective ranks of Z and of the target patch tokens (criterion C1); ``z_std``,
+  the mean per-dimension std of mu across crops (normalised mu hides a collapse to a constant).
 - ``z_use``: validation prediction loss with Z shuffled across songs minus with the true Z (C1: the
   predictor must need Z, else P and L leak the timbre).
 - leakage probes on fixed validation views with known random chains (docs/cleave.md 2.9, ``fx_probes``):
@@ -286,9 +287,11 @@ def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list
         waves = [read_crop(val_songs[s], st, x, crop) for s, st, a, b, _ in part for x in (a, b)]
         patches, _, active, _ = batcher(torch.from_numpy(np.stack(waves)), model, None)
         mu, _, _, _ = model.encode(patches, active)
-        zs.append(torch.nn.functional.normalize(mu.float(), dim=-1).cpu())
+        zs.append(mu.float().cpu())
     if zs:
-        z = torch.cat(zs).view(-1, 2, zs[0].shape[-1])
+        raw = torch.cat(zs)
+        rec["z_std"] = float(raw.std(0).mean())  # a constant mu has a high rank once normalised, not a std
+        z = torch.nn.functional.normalize(raw, dim=-1).view(-1, 2, raw.shape[-1])
         za, zb = z[:, 0], z[:, 1]
         sim = (za @ zb.T).numpy()
         kinds = np.array([p[4] for p in pairs])
@@ -334,7 +337,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           max_val_tracks: int = 200, plateau: int = 8, plateau_delta: float = 0.002, min_z_rank: float = 2.0,
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
-          w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4) -> dict:
+          w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
+          v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -349,14 +353,15 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     batcher = Batcher(cfg, device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.05)
     sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed)
-    loader = torch.utils.data.DataLoader(MixDataset(train_songs, n_samples, pair_frac), batch_size=batch,
+    loader = torch.utils.data.DataLoader(MixDataset(train_songs, n_samples, pair_frac, other_view), batch_size=batch,
                                          sampler=sampler, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0,
                                          pin_memory=device.startswith("cuda"))
     amp = device.startswith("cuda") and torch.cuda.is_bf16_supported()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     meta = {"train_songs": len(train_songs), "valid_songs": len(val_songs), "params": n_params,
             "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp,
-            "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap}
+            "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap, "other_view": other_view, "v_drop": v_drop,
+            "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau}
     _log(json.dumps(meta))
 
     def lr_at(step: int) -> float:
@@ -372,8 +377,12 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
         if len(b["pair_idx"]):
             patches_b, _, active_b, _ = batcher(b["wave_b"], model, None)
             pair = (b["pair_idx"].to(device), patches_b, active_b)
+            if "wave_o" in b:
+                patches_o, _, active_o, _ = batcher(b["wave_o"], model, None)
+                pair = pair + (patches_o, active_o)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            o = model(patches, plc, active, pmask, beta=beta, pair=pair, w_inv=w_inv, w_swap=w_swap)
+            o = model(patches, plc, active, pmask, beta=beta, pair=pair, w_inv=w_inv, w_swap=w_swap,
+                      v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau)
         opt.zero_grad(set_to_none=True)
         o["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -407,7 +416,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     key = "id_auc_kind" if not math.isnan(rec0.get("id_auc_kind", float("nan"))) else "id_auc"
     best, since, reason = -1.0, 0, f"steps: reached {steps}"
     t0 = time.time()
-    keys = ("loss", "pred", "kl", "vic_var", "inv", "swap")
+    keys = ("loss", "pred", "kl", "vic_var", "inv", "swap", "vinv")
     run = {**dict.fromkeys(keys, 0.0), "n": 0}
     step = 0
     for batch_ in loader:
