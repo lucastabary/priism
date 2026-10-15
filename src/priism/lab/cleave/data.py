@@ -61,6 +61,9 @@ def _song(folder: Path) -> Song | None:
             break
     else:
         stems = sorted(p for p in folder.iterdir() if p.suffix.lower() in AUDIO and p.stem.lower() != "mix")
+        if not stems:  # MoisesDB layout: one subfolder per stem class, the class is the kind
+            stems = sorted(p for d in folder.iterdir() if d.is_dir() for p in d.iterdir() if p.suffix.lower() in AUDIO)
+            return Song(folder, stems, [p.parent.name.lower() for p in stems]) if stems else None
     return Song(folder, stems, _kinds(folder, stems)) if stems else None
 
 
