@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # priism-lab subcommands a remote job may run.
-LAB_COMMANDS = {"gen", "cache-features", "registry-eval", "train-id", "eval-sep", "eval-stems",
+LAB_COMMANDS = {"gen", "cache-features", "registry-eval", "train-id", "eval-sep", "eval-stems", "cleave-train",
                 "registry-encoders", "registry-domain", "registry-dims"}
 SCRIPTS = {"phase1": ("scripts/registry_phase1.sh", {"probe", "full"})}
 KINDS = {"priism-lab", "update", "clean", *SCRIPTS}

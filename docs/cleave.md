@@ -1,0 +1,284 @@
+# Cleave : séparer un morceau en fendant ses sources une à une
+
+*Note de conception, 15 octobre 2026, branche `lab/cleave`. Rien n'est encore entraîné : ce document fixe
+ce qu'on construit, pourquoi, et comment on saura si ça marche. Le code de la phase 1 est dans
+`src/priism/lab/cleave/`.*
+
+*Cliver* une gemme, c'est la fendre en deux le long de ses plans naturels. Cleave fait la même chose à un
+morceau : il en détache une source, puis la suivante, jusqu'à ce que le reste soit vide. Il s'inscrit dans la
+même famille que Facet, qui sépare à partir des stems de BS-Roformer-SW regroupés par identité.
+
+---
+
+## En bref
+
+- **Le but** : séparer un morceau en autant de pistes qu'il a de sources, sans connaître ce nombre, en
+  restant dans le cadre Z / P / L / V du lab (Z = identité et timbre, P = notes et onsets, L = loudness,
+  V = placement et mix).
+- **L'idée** : un encodeur lit le morceau entier et donne une identité Z avec son incertitude σ. Si σ est
+  grand, il y a plusieurs sources. On *épluche* alors la plus forte par diffusion. Le reste (mix moins la
+  source) devient le nouveau morceau, et on recommence jusqu'à ce que le résidu soit à moins de 30 dB.
+- **Phase 1, celle de ce document** : entraîner l'encodeur, un JEPA self-supervised qui apprend Z et σ.
+  Il voit d'abord des pistes à un seul instrument, puis des mélanges de plus en plus riches. On vérifie
+  pendant l'entraînement si σ monte vraiment avec le nombre de sources.
+- **Pourquoi maintenant** : le step 3a de Facet montre que le goulot est l'*assignation* (qui appartient à
+  quelle source), pas le *comptage*. Facet obtient 2.85 dB, Facet avec le vrai nombre de sources 3.00 dB
+  (+0.15, n.s.), l'oracle 4.65 dB. Cleave remplace le clustering par une extraction générative guidée par
+  un prior « à quoi ressemble *une* source ».
+
+---
+
+## 1. La vision complète
+
+```mermaid
+flowchart TB
+    X["Mix X<br/>(morceau entier)"] --> E["Encodeur JEPA<br/>Z, σ"]
+    E -->|"σ bas"| F1["Une seule source :<br/>on s'arrête"]
+    E -->|"σ haut"| S["Split : S1 + R1 = X"]
+    S --> D["Pas de diffusion sur S1<br/>(conditionnés par X, Z1, P, L)<br/>R1 = X − S1 suit"]
+    D -->|"relire Z1, σ1"| D
+    D -->|"σ1 bas"| K["S1 figée : une source"]
+    K --> R["R1 devient le nouveau mix"]
+    R -->|"énergie > −30 dB<br/>(par section)"| E
+    R -->|"énergie ≤ −30 dB"| END["Fin : N sources + résidu"]
+    END --> J["Passe finale jointe<br/>(toutes les sources, somme = X)"]
+```
+
+**L'état** est une chaîne de sources figées S1 … Sk et un résidu R. La somme vaut toujours X par
+construction. C'est l'invariant de l'engine (`input = outputs + rest`), et la contrainte du contrat MyMixxx
+(les stems plus le résidu font le morceau) est garantie sans effort.
+
+**Une étape** :
+1. On calcule (Z, σ) sur le résidu courant. Si σ est bas, le résidu est une seule source et on s'arrête.
+2. **Split** : un nœud S1 et un résidu R1 = X − S1.
+3. **Diffusion** sur S1, conditionnée par le mix, par P et L recalculés sur le nœud, et par Z1. Le résidu
+   n'a pas de diffusion propre : il est déterministe, et il hérite des erreurs de S1.
+4. À chaque pas, on relit (Z1, σ1) = encodeur(S1). Quand σ1 est assez bas, S1 est figée.
+
+**Deux critères d'arrêt.** σ dit « ce nœud est une seule source ». L'énergie du résidu dit « il ne reste
+rien à chercher » : moins de 30 dB sous le mix, mesuré **par section** et non sur tout le morceau, sinon un
+instrument présent seulement dans l'intro disparaît. Un résidu faible avec un σ bas est peut-être un stem
+« ambiance » légitime (reverb, room) plutôt que du déchet.
+
+### Choix déjà faits
+
+- **Z se lit, il ne pilote pas** (au moins au début) : la diffusion extrait la source dominante, et Z sert
+  à décider l'arrêt et à nommer la source. Piloter la diffusion avec un Z échantillonné obligerait à tirer
+  Z dans une loi à plusieurs pics (deux instruments = deux pics). Un tirage dans une seule Gaussienne
+  large tomberait *entre* les deux, sur un timbre qui n'existe pas.
+- **« Le plus fort » est un biais, pas une règle.** Quand deux sources ont à peu près la même énergie, une
+  règle stricte fait sauter la cible d'un exemple à l'autre. On demande d'extraire « une source », avec
+  l'énergie comme préférence.
+- **Le contexte est le morceau entier pour Z, le signal est reconstruit par chunk.** L'identité se décide
+  globalement. La diffusion travaille localement, ce qui la rend abordable.
+
+### Les risques connus
+
+| Risque | Réponse prévue |
+|---|---|
+| Une chaîne gloutonne propage ses erreurs. La recursive separation en parole (OR-PIT) tient sur 2 à 4 locuteurs, un morceau a 10 à 20 sources. | Passe finale jointe sur toutes les sources avec la contrainte de somme, façon Multi-Source Diffusion ou EM. |
+| Point fixe trompeur : kick + basse fusionnés, que l'encodeur juge homogènes, donc σ bas. | σ doit avoir vu des paires difficiles (même registre, même rôle) étiquetées « plusieurs sources ». |
+| Coût : diffusion × nombre de sources × nombre de pas sur un morceau entier. | Diffusion par chunk conditionnée par Z global ; diffusion en latent ; GPU obligatoire pour la séparation. |
+| σ ne mesure pas ce qu'on croit (section 2.8). | C'est l'objet du test de la phase 1. |
+
+---
+
+## 2. Phase 1 : le JEPA qui donne Z et σ
+
+### 2.1 Représentation
+
+Log-mel à 44.1 kHz, `n_fft` 2048, hop 512 (86 frames/s), 128 bandes de 20 Hz à 16 kHz, en mono (V et la
+stéréo viendront plus tard). Le niveau absolu est conservé : L en dépend, et un gain aléatoire par stem
+sert d'augmentation.
+
+Un morceau de 4 min fait environ 20 700 frames, soit à peu près 5 Mo de spectrogramme en fp16. On ne le
+stocke pas : les stems restent en FLAC et le mel est calculé à la volée sur le device. Le mix se fait sur
+la forme d'onde, jamais en sommant des spectrogrammes, car les interférences de phase comptent.
+
+### 2.2 Architecture hiérarchique
+
+Le morceau entier en contexte avec une attention plate coûterait environ 10 000 tokens par morceau et
+5 TFLOP par passe, trop pour les 6 Go d'une RTX 4050. On découpe donc en deux niveaux :
+
+```mermaid
+flowchart LR
+    M["Log-mel du morceau"] --> C["Chunks de 192 frames (2.2 s)<br/>patchs 16 frames × 16 bandes<br/>= 12 × 8 = 96 patchs"]
+    C --> L["Encodeur local<br/>(attention dans le chunk)<br/>+ token CLS par chunk"]
+    L --> G["Encodeur global<br/>sur les CLS des chunks visibles<br/>+ un token Z"]
+    G --> Z["Z ~ N(μ, σ²)"]
+    Z --> P["Predictor<br/>(Z, position, P, L)<br/>par chunk cible"]
+    PL["P et L déterministes<br/>des zones masquées"] --> P
+    P --> O["Embeddings prédits<br/>+ variance par patch"]
+    T["Encodeur cible EMA<br/>sur les chunks complets"] --> TG["Embeddings cibles"]
+    O -. "perte" .- TG
+```
+
+- **Encodeur local** : petit transformer (d = 256, 4 couches) sur les 96 patchs d'un chunk, plus un token
+  CLS. Les patchs masqués sont remplacés par un token `[MASK]` appris.
+- **Encodeur global** : transformer (d = 256, 4 couches) sur les CLS des chunks qui ne sont ni silencieux
+  ni entièrement masqués. La position temporelle est sinusoïdale, donc la longueur du morceau est libre.
+  Un token Z appris donne en sortie μ et log σ² (dimension 64).
+- **Predictor** : il ne reçoit **que** Z, la position de chaque patch et le P et L de sa frame de temps.
+  Il ne voit aucun autre patch du morceau. Z est donc un **bottleneck** : tout ce que P et L n'expliquent
+  pas, c'est-à-dire le timbre, doit passer par lui.
+- **Cibles** : un encodeur local EMA (moyenne glissante des poids, 0.996 → 1) appliqué aux chunks
+  complets, avec une layer norm sur ses sorties, comme dans I-JEPA.
+
+Le coût devient quasi linéaire en durée : 108 chunks × 96 patchs pour 4 min, avec une attention limitée à
+96 tokens. L'ordre de grandeur est 10¹¹ FLOP par morceau, contre 7·10¹² en attention plate. Sur GPU, le
+chargement des données risque d'être le vrai goulot.
+
+### 2.3 P et L, calculés de façon déterministe
+
+Ils sont calculés sur le même STFT que l'entrée, sans aucun apprentissage :
+
+- **L** : loudness A-weighted par frame en dB, ramenée dans [−1, 0]. Un seul scalaire par frame : par
+  bande, L redonnerait l'enveloppe spectrale, c'est-à-dire le timbre.
+- **Onsets** : spectral flux sur le log-mel (somme des différences positives), à côté de P.
+- **P** : salience harmonique sur une grille en demi-tons (MIDI 24 à 107, 84 hauteurs). Chaque hauteur
+  somme les amplitudes à ses 6 premiers harmoniques, avec des poids 0.8^(h−1). Deux réglages limitent la
+  fuite de timbre :
+  - la salience est normalisée **par frame** (maximum = 1), ce qui retire le niveau absolu ;
+  - seules les 4 plus fortes hauteurs par frame sont gardées, le reste est mis à 0. On sait donc *quelles*
+    notes sont jouées, mais très peu *comment* elles sonnent.
+
+**Fuite résiduelle attendue** : la répartition des harmoniques déplace un peu la salience (une clarinette
+crée des fantômes à la quinte). On la mesure par le **gain d'usage de Z** : la perte de validation avec Z
+mélangé entre morceaux, moins la perte avec le vrai Z. Si ce gain est proche de 0, le predictor se passe
+de Z, et P ou L en disent trop.
+
+### 2.4 Masquage
+
+L'audio est redondant (AudioMAE et A-JEPA masquent 60 à 80 %). Deux types de masques ciblent le timbre :
+
+- **Sections** : de 25 à 40 % des chunks non silencieux, par séries de 1 à 4 chunks consécutifs (2 à 9 s),
+  sont masqués entièrement. Le modèle doit retrouver « à quoi ressemble cet instrument ailleurs dans le
+  morceau ». C'est là que sert le contexte entier.
+- **Bandes** : sur une partie des chunks visibles, une bande de 2 à 4 rangées de fréquence (sur 8) est
+  masquée. Prédire des partiels à partir des autres, c'est apprendre l'enveloppe harmonique.
+
+Les cibles sont tous les patchs masqués, sous-échantillonnés si nécessaire. Un bras de comparaison en
+multi-block I-JEPA standard est prévu, mais pas pour le premier test.
+
+### 2.5 Pertes
+
+- **Prédiction** : MSE entre l'embedding prédit et la cible, sur les patchs masqués.
+- **Variance du predictor** : une tête donne log v par patch. Elle est entraînée en NLL gaussienne sur
+  l'erreur au carré, **avec la moyenne détachée**, pour que l'apprentissage de la variance ne dégrade pas la
+  prédiction (contrairement à une NLL jointe, cf. β-NLL, Seitzer et al. 2022).
+- **KL sur Z** : β·KL(N(μ, σ²) ‖ N(0, 1)) avec β = 10⁻³, et z est échantillonné par reparamétrisation.
+  C'est le bottleneck d'information de Z.
+- **Anti-collapse** : un terme VICReg (variance par dimension ≥ 1, covariance faible) sur les patchs de
+  l'encodeur local. JEPA évite souvent le collapse avec l'EMA seule, mais notre predictor ne voit que Z,
+  ce qui rend la solution constante très tentante.
+
+### 2.6 Données
+
+| Source | Contenu | Usage |
+|---|---|---|
+| Générateur `priism-lab gen` | illimité, un stem par source, `meta.json` avec le type de chaque source | train ; valid sur des seeds à part |
+| Slakh2100 | environ 145 h, MIDI rendu avec des banques de sons pro, `stems/*.flac` | train (à télécharger) |
+| MoisesDB train | 58 morceaux, 12 artistes (notre split par artiste) | train |
+| MedleyDB 1 + 2 | environ 200 multipistes réels | train, si on obtient l'accès |
+| MoisesDB dev2 | 24 morceaux, 8 artistes | suivi pendant l'entraînement |
+| MoisesDB test | 158 morceaux, 27 artistes | **intouché** : évaluation finale seulement |
+
+Le loader accepte tout dossier de morceau dont les stems sont dans `sources/` ou `stems/` (sinon les
+fichiers audio du dossier, sauf `mix.*`).
+
+**Le risque principal est le recording fingerprint**, déjà vu avec CLAP au probe B. Avec quelques
+centaines d'enregistrements réels, Z peut apprendre la chaîne d'enregistrement plutôt que l'instrument.
+Contre-mesures : gain aléatoire dès maintenant, puis des chaînes FX (la phase 5 a montré une relation
+dose-réponse), et une validation disjointe par artiste.
+
+**Combien de données ?** On ne le sait pas a priori. On le mesure par une courbe de scaling : même budget
+de pas sur 10 %, 30 % et 100 % des données. Si le score sur données réelles tenues à part monte encore entre
+30 et 100 %, on est limité par les données.
+
+### 2.7 Curriculum
+
+- **Phase 1a** : une seule piste à la fois (k = 1). Le modèle apprend ce qu'est un instrument réel.
+- **Phase 1b** : k monte progressivement (2, puis jusqu'à 4 ou plus). Une fraction de monopistes est
+  rejouée en continu contre l'oubli. Par défaut, les mélanges prennent k stems **d'un même morceau**,
+  cohérents en tempo et en tonalité.
+
+L'option `--k-schedule "0:1,20000:2,30000:4"` fixe le k maximal par pas ; `--mono-frac` fixe la part de
+k = 1 une fois les mélanges introduits.
+
+### 2.8 L'hypothèse sur σ, et ce qui la réfuterait
+
+En VAE, σ ne mesure pas l'ambiguïté : il mesure combien d'information le decoder demande. Un mélange
+demande *plus* d'information, donc σ pourrait **baisser**. On logge donc trois signaux par k, à chaque
+évaluation :
+
+| Signal | Ce qu'il mesure |
+|---|---|
+| σ du posterior de Z | l'incertitude sur l'identité, ou le besoin d'information |
+| Variance prédite par le predictor | l'imprévisibilité des zones masquées |
+| Erreur du predictor | « un seul Z ne suffit pas à tout expliquer » |
+
+**Hypothèse** (à confirmer ou infirmer en phase 1b) : au moins un des trois signaux croît avec k, avec une
+corrélation de Spearman positive par morceau et un IC bootstrap qui exclut 0.
+
+**Contrôle** : un signal peut monter juste parce que les mélanges sont hors distribution. On compare donc
+deux conditions :
+- des monopistes d'instruments **jamais vus** : hors distribution, mais une seule source ;
+- des mélanges d'instruments **vus** : dans la distribution, mais plusieurs sources.
+
+L'hypothèse ne tient que si les mélanges ressortent plus haut. Si aucun signal ne passe, le split piloté
+par σ est abandonné. L'épluchage reste possible avec l'énergie du résidu comme seul critère d'arrêt, ou
+avec un critère de split bayésien (vraisemblance à 1 nœud contre 2 nœuds, pénalité BIC, comme X-means).
+
+---
+
+## 3. Le premier test (quelques heures de GPU)
+
+Ordre imposé par la règle du lab :
+1. **Smoke test CPU** : un petit modèle, une loss qui descend, des shapes justes, pas de NaN. Fait en local.
+2. **Mesure GPU** : `priism-lab cleave-train --measure` donne la mémoire de pointe et les secondes par pas,
+   pour extrapoler le coût.
+3. **Probe d'environ 3 h**, en phase 1a uniquement, sur données synthétiques et MoisesDB train.
+
+**Critères, écrits avant le lancement :**
+- **C1, pas de collapse** : le rang effectif de Z sur la validation reste ≥ 8 (sur 64), celui des
+  embeddings cibles ≥ 16, et le gain d'usage de Z est > 0 avec un IC qui exclut 0.
+- **C2, Z porte une identité** : sur MoisesDB dev2, on prend deux extraits de la même piste espacés d'au
+  moins 20 s, et on mesure l'AUC « même piste contre autre piste du même type » (protocole du probe B,
+  pondéré par artiste). Le score doit battre **le même encodeur à poids aléatoires**, avec un IC bootstrap
+  apparié qui exclut 0.
+- **Objectif, pas critère** : approcher le plancher MFCC du probe B (0.816 intra-classe). Les repères
+  existants sont SW block6 0.857, MERT 0.867 et CLAP 0.937.
+
+**Garde-fous** dans la boucle : arrêt sur NaN ou inf, arrêt si le rang effectif de Z passe sous 2 après
+le warmup, plafond de pas et de minutes, et un plateau sur l'AUC de validation. Les logs sont en JSONL,
+flushés ligne par ligne.
+
+**Où et combien** : le modèle est petit, donc le coût est surtout du chargement de données. Sur Chav
+(gratuit mais pas fiable), c'est un job agent non bloquant. Sur le pod (RTX 4090, environ 0.75 $/h),
+3 heures coûtent environ 2.3 $, à prendre dans l'enveloppe des 25 EUR. La décision se prend après la
+mesure de l'étape 2. **Prérequis** : MoisesDB dev2 n'existe que sur le volume du pod, il faut le copier là
+où le test tourne.
+
+---
+
+## 4. Ce qui vient ensuite
+
+- **Phase 1b** : les mélanges et le test de σ (section 2.8).
+- **Phase 2** : le prior de diffusion p(S | Z, P, L) sur des sources isolées, par chunk, avec Z global.
+- **Phase 3** : la boucle d'épluchage complète et la passe finale jointe, mesurées en SDR sur MoisesDB test
+  contre Facet (2.85 dB) et SW (1.97 dB), avec la même métrique que le step 3a.
+
+---
+
+## Références
+
+- Assran et al. 2023, *I-JEPA* (masquage multi-block, encodeur cible EMA).
+- Fei et al. 2023, *A-JEPA* ; Huang et al. 2022, *Audio-MAE* (masquage de spectrogrammes).
+- LeCun 2022, *A Path Towards Autonomous Machine Intelligence* (JEPA à variable latente régularisée).
+- Kinoshita et al. 2018 ; Takahashi et al. 2019, *OR-PIT* (séparation récursive, nombre de locuteurs inconnu).
+- Burgess et al. 2019, *MONet* (décomposition récursive par attention).
+- Jayaram & Thickstun 2020, *BASIS* ; Mariani et al. 2023, *Multi-Source Diffusion Models* (séparation par
+  priors génératifs).
+- Engel et al. 2020, *DDSP* (f0 + loudness + timbre).
+- Seitzer et al. 2022, *β-NLL* ; Bardes et al. 2022, *VICReg*.
+- Pelleg & Moore 2000, *X-means* ; Hamerly & Elkan 2003, *G-means* (split d'un cluster).

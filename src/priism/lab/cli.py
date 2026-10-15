@@ -395,6 +395,20 @@ def _train_id(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def _cleave_train(args: argparse.Namespace) -> None:
+    from .cleave.model import CleaveConfig
+    from .cleave.train import train
+
+    cfg = CleaveConfig(dim=args.dim, local_layers=args.layers, global_layers=args.layers, pred_layers=args.layers,
+                       z_dim=args.z_dim)
+    train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
+          lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
+          eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
+          max_val_tracks=args.max_val_tracks, plateau=args.plateau, max_minutes=args.max_minutes,
+          workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
+          measure=args.measure)
+
+
 def _store(args: argparse.Namespace):
     import os
 
@@ -837,6 +851,35 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--group-local", action="store_true",
                    help="group stems (NI, stem loops) are positives only within a chunk, never across time")
     p.set_defaults(func=_train_id)
+
+    p = sub.add_parser("cleave-train", help="train the Cleave JEPA (Z + sigma of a whole song, docs/cleave.md)")
+    p.add_argument("--train", nargs="+", required=True, help="song folders, or folders of song folders")
+    p.add_argument("--valid", nargs="+", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--steps", type=int, default=50000)
+    p.add_argument("--batch", type=int, default=4)
+    p.add_argument("--crop-chunks", type=int, default=64, help="chunks of 2.2 s per training crop")
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--warmup", type=int, default=1000)
+    p.add_argument("--k-schedule", default="0:1", help="largest k per step, e.g. 0:1,20000:2,30000:4")
+    p.add_argument("--mono-frac", type=float, default=0.5, help="share of k = 1 once mixes are allowed")
+    p.add_argument("--beta", type=float, default=1e-3, help="weight of KL(Z || N(0, I))")
+    p.add_argument("--dim", type=int, default=256)
+    p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
+    p.add_argument("--z-dim", type=int, default=64)
+    p.add_argument("--eval-every", type=int, default=500)
+    p.add_argument("--eval-k", type=int, default=4, help="validation mixes with k = 1..this")
+    p.add_argument("--per-k", type=int, default=16)
+    p.add_argument("--id-chunks", type=int, default=8, help="chunks per crop of the identity score")
+    p.add_argument("--max-val-tracks", type=int, default=200)
+    p.add_argument("--plateau", type=int, default=8, help="stop after this many evaluations without gain (0: never)")
+    p.add_argument("--max-minutes", type=float, default=240.0)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--limit-frac", type=float, default=1.0, help="train on this fraction of the songs (scaling)")
+    p.add_argument("--measure", type=int, default=0, help="only time this many steps and extrapolate")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cuda")
+    p.set_defaults(func=_cleave_train)
 
     def store_args(p):
         p.add_argument("--store", help="s3://bucket/prefix or a local folder (default: $PRIISM_STORE)")
