@@ -229,6 +229,36 @@ L'hypothèse ne tient que si les mélanges ressortent plus haut. Si aucun signal
 par σ est abandonné. L'épluchage reste possible avec l'énergie du résidu comme seul critère d'arrêt, ou
 avec un critère de split bayésien (vraisemblance à 1 nœud contre 2 nœuds, pénalité BIC, comme X-means).
 
+### 2.9 Séparer Z des effets : le latent V̄ (décidé le 15 octobre, pas encore codé)
+
+**Le trou.** Le predictor ne reçoit que Z, P et L, donc tout ce qui n'est ni les notes ni le volume finit
+dans Z : reverb, EQ, compression, delay, distorsion. Une même ligne d'acid dont la distorsion varie
+pendant le morceau aurait plusieurs Z, et σ la découperait en plusieurs sources.
+
+**La règle.** *Tout* effet appartient à V, la distorsion et les filtres compris. Z est l'instrument sec.
+Dans le signal, la frontière n'existe pas : c'est la famille d'augmentations qui la définit. Tout ce
+qu'on randomise va dans V̄, le reste dans Z.
+
+**Le mécanisme.**
+- **Le latent.** Un latent V̄ par section (dimension 16, lu sur une fenêtre de quelques chunks), à côté du
+  Z global. Le predictor reçoit Z + V̄ + P + L.
+- **Les vues appariées.** Sur un même crop de stem, deux chaînes pedalboard aléatoires A et B : gain, EQ
+  et filtres, compression, distorsion, chorus/phaser, delay, reverb. P et L sont recalculés sur chaque
+  vue.
+- **Invariance.** Z(A) ≈ Z(B), sur μ normalisé.
+- **Prédiction croisée (swap).** On prédit les cibles de A à partir de (Z_B, V̄_A, P_A, L_A). Si Z gardait
+  de l'effet, ou si V̄ gardait de l'identité, la prédiction échouerait.
+- **Sondes de fuite** à chaque évaluation :
+  - Z → paramètres FX : R² linéaire proche de 0 ;
+  - V̄ → type d'instrument : précision équilibrée proche du baseline « classe majoritaire ».
+
+  Elles s'appliquent aussi au checkpoint du probe sans V̄ (section 3), qui sert de baseline : on y
+  mesurera combien d'effet Z absorbe aujourd'hui.
+
+**Limite connue.** Les effets *figés* dans un stem réel (la reverb d'une prise MoisesDB, par exemple)
+restent dans Z, puisqu'aucune paire ne les fait varier. On ne retire que ce qu'on randomise par-dessus.
+V(t), les effets automatisés à l'intérieur d'une section comme un sweep de filtre, viendra plus tard.
+
 ---
 
 ## 3. Le premier test (quelques heures de GPU)
