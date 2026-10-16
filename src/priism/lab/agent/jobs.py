@@ -13,6 +13,13 @@ agent obeys), ``results/<id>/...`` (the files the job wrote under its ``results`
 ``inputs/<folder>/...`` (data a job lists in ``inputs``: downloaded into ``<folder>`` of the work folder
 before it runs, files already there skipped; put them there with any S3 client),
 ``agents/<name>.json`` (each agent's heartbeat).
+
+Priorities (``PRIORITIES``): the agent takes the highest-priority pending job, the oldest first among equals,
+and a ``background`` job gives way to any higher one: the agent stops it (SIGTERM, grace, SIGKILL), puts it
+back in ``queue/pending/`` with ``preemptions`` + 1 and its active minutes so far in ``active_minutes``, runs
+the other jobs, then starts it again. A background job's command must therefore resume from its own
+checkpoint (``cleave-train --resume``), and its ``max_minutes`` counts all of its runs. A job spec without a
+priority (older clients) is ``normal``.
 """
 
 from __future__ import annotations
@@ -35,6 +42,9 @@ PROTECTED = {".agent"}  # the agent's own state (control, stats, unsynced outcom
 _BRANCH = re.compile(r"^[\w][\w./-]{0,100}$")
 
 
+PRIORITIES = {"background": 0, "normal": 1}  # higher runs first and preempts the lower ones
+
+
 class JobRejected(ValueError):
     pass
 
@@ -52,6 +62,13 @@ class Job:
     env: dict[str, str] = field(default_factory=dict)
     inputs: list[str] = field(default_factory=list)  # folders fetched from the store's inputs/ before the job
     created: float = 0.0
+    priority: str = "normal"
+    preemptions: int = 0  # times the agent stopped it for a higher-priority job (set by the agent)
+    active_minutes: float = 0.0  # minutes run before its last preemption, counted against max_minutes
+
+    @property
+    def rank(self) -> int:
+        return PRIORITIES.get(self.priority, PRIORITIES["normal"])
 
     def to_json(self) -> bytes:
         return json.dumps(asdict(self), indent=1).encode()
@@ -59,6 +76,11 @@ class Job:
     @classmethod
     def from_json(cls, data: bytes) -> Job:
         d = json.loads(data)
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Job:
+        """Unknown fields dropped: specs written by newer or older code still load."""
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -74,6 +96,8 @@ def _safe_rel(arg: str) -> None:
 def validate(job: Job) -> None:
     if job.kind not in KINDS:
         raise JobRejected(f"unknown kind {job.kind!r} (allowed: {sorted(KINDS)})")
+    if job.priority not in PRIORITIES:
+        raise JobRejected(f"unknown priority {job.priority!r} (allowed: {sorted(PRIORITIES)})")
     if not all(isinstance(a, str) for a in job.args):
         raise JobRejected("arguments must be strings")
     for a in job.args + job.results + job.inputs:
@@ -133,9 +157,21 @@ def status(store) -> dict:
     for state in ("pending", "running", "done", "failed"):
         for key in store.list(f"queue/{state}/"):
             jid = PurePosixPath(key).stem
-            st = json.loads(store.get(f"status/{jid}.json") or b"{}") if state != "pending" else {}
-            out["jobs"].append({"id": jid, "state": state, **{k: st.get(k) for k in
-                                ("reason", "exit_code", "minutes", "last_line", "time", "synced")}})
+            shown, extra = state, {}
+            if state == "pending":  # the spec holds the priority; a preempted job has a status of its last run
+                try:
+                    spec = Job.from_json(store.get(key) or b"{}")
+                    extra = {"priority": spec.priority, "preemptions": spec.preemptions}
+                except (ValueError, TypeError):
+                    spec = None
+                st = json.loads(store.get(f"status/{jid}.json") or b"{}") if spec and spec.preemptions else {}
+                shown = "preempted" if st else state
+            else:
+                st = json.loads(store.get(f"status/{jid}.json") or b"{}")
+            out["jobs"].append({"id": jid, "state": shown, "priority": "normal", "preemptions": 0,
+                                **{k: st[k] for k in ("priority", "preemptions") if k in st}, **extra,
+                                **{k: st.get(k) for k in ("reason", "exit_code", "minutes", "last_line", "time",
+                                                          "synced")}})
     return out
 
 
@@ -145,8 +181,14 @@ def log(store, job_id: str, tail: int | None = None) -> str:
 
 
 def cancel(store, job_id: str) -> None:
-    if store.get(f"queue/pending/{job_id}.json") is not None:
+    """A pending (or preempted) job is removed from the queue; a running one gets a marker the agent obeys."""
+    spec = store.get(f"queue/pending/{job_id}.json")
+    if spec is not None:
         store.delete(f"queue/pending/{job_id}.json")
+        if store.get(f"status/{job_id}.json") is not None:  # preempted: it has run, keep its record
+            store.put(f"queue/failed/{job_id}.json", spec)
+            store.put(f"status/{job_id}.json", json.dumps({"state": "failed", "reason": "cancelled while preempted",
+                                                           "time": time.time()}).encode())
     else:
         store.put(f"cancel/{job_id}", b"cancel")
 
