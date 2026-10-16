@@ -373,6 +373,32 @@ lent et plus sûr pour les 12 Go de RAM de Chav. 20 000 pas prennent alors envir
 
   Deux probes, mêmes réglages que s0b, avec le pool.
 
+**Résultats des deux probes** (mêmes réglages, pool 3 Go) :
+- **`frozen`** (`--ema 1`, terminé) : la prédiction est stable (pred 0,02), mais Z ne sert pas
+  (z_use ≈ 0,0005). id_auc_kind oscille entre 0,62 et 0,79 autour de l'init, et z_rank tombe à 6. P/L
+  suffisent à prédire des cibles aléatoires. **C1 et C2 échouent.**
+- **`novic`** (`--w-var 0 --w-cov 0`, annulé au pas 2600) : les cibles s'effondrent (target_rank passe de
+  69 à 7). Z finit par servir (z_use 0,37, id_auc_kind 0,79), mais seulement pour prédire ces ~7
+  directions : z_rank vaut 3. **C1 échoue.** Le VICReg est donc nécessaire, mais il ne cause pas la dérive.
+
+### 3.2 La branche de contexte I-JEPA
+
+Le diagnostic de 3.1 est que rien ne demande aux tokens de patch d'être prévisibles. `--ctx-layers N`
+ajoute le chemin I-JEPA classique à côté du goulot Z : sur les chunks masqués par bandes, un petit
+predictor lit les tokens en ligne du chunk et prédit les tokens cibles des bandes masquées. Les sections
+masquées entières restent l'affaire du seul predictor qui lit Z. Les tokens reçoivent un gradient de
+prédiction, et les cibles EMA deviennent alors des features prévisibles, au lieu de bruit de haut rang.
+
+**Probes `cleave-p1a-ctx-s0` et `-s1`** : mêmes réglages que s0b, plus `--ctx-layers 2`, avec les seeds 0
+et 1 sur Chav. **Critères, écrits avant le lancement** :
+- C1 et C2 inchangés (z_rank ≥ 8, target_rank ≥ 16, z_use > 0, id_auc_kind > 0,713 à l'init), et
+  **tenus jusqu'à l'arrêt**, pas seulement dans une fenêtre du début comme le pas 400 de s0b.
+- La stabilité : val_pred reste sous 0,5 (contre ≈ 1 dans le collapse de s0b), et la perte `ctx` décroît.
+- Les deux seeds doivent passer. Avec n = 2, il ne faut pas en tirer de conclusion fine : on regarde
+  surtout si les deux trajectoires vont dans le même sens.
+- Le risque attendu est que la branche de contexte rende les cibles prévisibles par P/L seuls, ce qui
+  reproduirait le cas `frozen` (z_use ≈ 0). La parade serait alors de réduire ce qui fuit par P/L (3.3).
+
 ---
 
 ## 4. Ce qui vient ensuite
