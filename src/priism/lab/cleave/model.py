@@ -27,6 +27,17 @@ hold the encoder's own mask-token outputs) and predicts the target tokens of the
 the patch tokens get no prediction gradient (the main predictor reads only Z), so the EMA targets drifted to
 high-rank noise and Z collapsed (probe s0b, 3.1). ``ctx_layers`` = 0 keeps the older models and checkpoints.
 
+Mel targets (``target`` = "mel", docs/cleave-diagnostic.md): the prediction targets are the masked log-mel
+patches themselves, normalised per patch (MAE's norm_pix_loss), instead of the EMA encoder's tokens. They
+cannot drift or collapse, so the test of whether the Z bottleneck works no longer depends on the target
+dynamics that broke every phase 1a probe.
+
+Z-use hinge (``w_zuse`` > 0): z_use (the loss with Z of another song minus the loss with the true Z) becomes
+a training term, max(0, ``zuse_margin`` - gap). Bounded on purpose: an open-ended gap is maximised by a
+predictor that just breaks on a wrong Z, without Z learning anything. It is a contrastive term (close to
+CPC / InfoNCE): Z learns whatever tells the songs of the batch apart, timbre or recording, so it has to be
+measured, not assumed.
+
 V-bar read from the stem's own neighbours carries its timbre, a free channel (no KL) that let the
 predictor stop using Z. Three counters, each optional: the swap reads V-bar from another stem of the same
 song under chain A (``pair`` with an other view), so V-bar only helps there by carrying the chain;
@@ -68,6 +79,7 @@ class CleaveConfig:
     v_dim: int = 0  # 0: no V-bar (phase 1a checkpoints)
     v_window: int = 2  # V-bar of chunk c reads chunks c-w..c+w except c
     ctx_layers: int = 0  # 0: no context branch (checkpoints before 3.2)
+    target: str = "ema"  # "ema": EMA encoder tokens (I-JEPA); "mel": normalised log-mel patches (MAE)
 
     @property
     def n_tcol(self) -> int:
@@ -80,6 +92,10 @@ class CleaveConfig:
     @property
     def n_patches(self) -> int:
         return self.n_tcol * self.n_rows
+
+    @property
+    def target_dim(self) -> int:
+        return self.patch_t * self.patch_f if self.target == "mel" else self.dim
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -158,7 +174,7 @@ class Predictor(nn.Module):
         self.pos = nn.Parameter(torch.randn(1, cfg.n_patches, d) * 0.02)
         self.body = _body(d, cfg.heads, cfg.pred_layers)
         self.norm = nn.LayerNorm(d)
-        self.out = nn.Linear(d, d)
+        self.out = nn.Linear(d, cfg.target_dim)
         self.logv = nn.Linear(d, 1)
 
     def forward(self, z: torch.Tensor, pl: torch.Tensor, v: torch.Tensor | None = None):
@@ -203,7 +219,7 @@ class ContextPredictor(nn.Module):
         self.pos = nn.Parameter(torch.randn(1, cfg.n_patches, d) * 0.02)
         self.body = _body(d, cfg.heads, cfg.ctx_layers)
         self.norm = nn.LayerNorm(d)
-        self.out = nn.Linear(d, d)
+        self.out = nn.Linear(d, cfg.target_dim)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         return self.out(self.norm(self.body(tokens + self.pos)))
@@ -276,7 +292,8 @@ class Cleave(nn.Module):
     def forward(self, patches: torch.Tensor, pl: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor,
                 beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
                 pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0, v_drop: float = 0.0,
-                w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1, w_ctx: float = 1.0) -> dict:
+                w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1, w_ctx: float = 1.0, w_zuse: float = 0.0,
+                zuse_margin: float = 0.1) -> dict:
         """``pair`` = (batch positions of the paired items, view B patches, view B active chunks), optionally
         followed by (other-stem patches, other-stem active chunks): view A is the item itself. Views B and O
         are encoded under view A's mask, so Z_B never reads the sections A must predict and V-bar_O sees the
@@ -289,7 +306,10 @@ class Cleave(nn.Module):
         tgt = active & pmask.any(-1)
         tb, tc = tgt.nonzero(as_tuple=True)
         with torch.no_grad():
-            _, t = self.target(patches[tb, tc])
+            if self.cfg.target == "mel":
+                t = patches[tb, tc].float()
+            else:
+                _, t = self.target(patches[tb, tc])
             t = F.layer_norm(t.float(), (t.shape[-1],))
         vt = v[tb, tc] if v is not None else None
         if vt is not None and self.training and v_drop > 0:  # Z alone must predict these items
@@ -304,6 +324,11 @@ class Cleave(nn.Module):
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
         loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss
+        zgap = torch.zeros((), device=loss.device)
+        if w_zuse > 0 and B > 1:  # the Z of the next crop of the batch: another song (or another stem)
+            ps, _ = self.pred(z.roll(1, 0)[tb], pl[tb, tc], vt)
+            zgap = ((ps.float() - t) ** 2).mean(-1)[m].mean() - loss_pred
+            loss = loss + w_zuse * torch.relu(zuse_margin - zgap)
         ctx = torch.zeros((), device=loss.device)
         if self.ctx is not None:  # band-masked chunks: encoded, and target rows of their own
             row = torch.full(pmask.shape[:2], -1, dtype=torch.long, device=pmask.device)
@@ -350,6 +375,6 @@ class Cleave(nn.Module):
         var_song = torch.zeros(B, device=mf.device).index_add_(0, tb, (logv.detach().exp() * mf).sum(1)) / n_t
         sigma_song = torch.exp(0.5 * logvar.detach().float()).mean(-1)
         return {"loss": loss, "pred": loss_pred.detach(), "nll": loss_nll.detach(), "kl": kl.detach(),
-                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "ctx": ctx.detach(), "inv": inv.detach(),
+                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "ctx": ctx.detach(), "zgap": zgap.detach(), "inv": inv.detach(),
                 "swap": swap.detach(), "vinv": vinv.detach(), "mu": mu.detach(),
                 "sigma": sigma_song, "pred_var": var_song, "pred_err": err_song, "targets": t}

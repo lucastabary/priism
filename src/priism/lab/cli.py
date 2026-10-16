@@ -459,7 +459,8 @@ def _cleave_train(args: argparse.Namespace) -> None:
     from .cleave.train import train
 
     cfg = CleaveConfig(dim=args.dim, local_layers=args.layers, global_layers=args.layers, pred_layers=args.layers,
-                       z_dim=args.z_dim, v_dim=args.v_dim, v_window=args.v_window, ctx_layers=args.ctx_layers)
+                       z_dim=args.z_dim, v_dim=args.v_dim, v_window=args.v_window, ctx_layers=args.ctx_layers,
+                       target=args.target)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
           lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
@@ -469,7 +470,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
           fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
           w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau, pool_gb=args.pool_gb,
           pool_reuse=args.pool_reuse, ema=args.ema, w_var=args.w_var, w_cov=args.w_cov,
-          w_ctx=args.w_ctx, resume=args.resume)
+          w_ctx=args.w_ctx, resume=args.resume, w_zuse=args.w_zuse, zuse_margin=args.zuse_margin)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -962,6 +963,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--ctx-layers", type=int, default=0,
                    help="layers of the I-JEPA context predictor (visible patches -> masked bands); 0: off")
     p.add_argument("--w-ctx", type=float, default=1.0, help="weight of the context prediction loss")
+    p.add_argument("--w-zuse", type=float, default=0.0,
+                   help="weight of the z_use hinge: max(0, margin - (loss with a wrong Z - loss with the true Z))")
+    p.add_argument("--zuse-margin", type=float, default=0.1)
+    p.add_argument("--target", choices=["ema", "mel"], default="ema",
+                   help="prediction targets: EMA encoder tokens (I-JEPA) or normalised log-mel patches (MAE)")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
     p.add_argument("--z-dim", type=int, default=64)

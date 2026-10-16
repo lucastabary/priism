@@ -343,3 +343,35 @@ def test_cpu_smoke_run_with_context_branch(tmp_path):
     assert summary["step"] == 20 and summary["w_ctx"] == 1.0
     hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
     assert hist[-1]["ctx"] > 0
+
+
+def test_mel_targets_are_the_normalised_patches():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, target="mel")
+    model = Cleave(cfg)
+    B, C = 2, 3
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 1] = True
+    out = model(patches, pl, active, pmask)
+    assert torch.isfinite(out["loss"]) and out["targets"].shape[-1] == cfg.patch_t * cfg.patch_f
+    want = torch.nn.functional.layer_norm(patches[:, 1].reshape(-1, patches.shape[-1]), (patches.shape[-1],))
+    assert torch.allclose(out["targets"].reshape(-1, patches.shape[-1]), want, atol=1e-5)
+
+
+def test_zuse_hinge_reports_the_gap_and_trains_on_it():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, target="mel")
+    model = Cleave(cfg)
+    B, C = 3, 3
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 1] = True
+    torch.manual_seed(0)
+    a = model(patches, pl, active, pmask, beta=0.0, w_zuse=1.0, zuse_margin=10.0)
+    torch.manual_seed(0)
+    b = model(patches, pl, active, pmask, beta=0.0)
+    assert float(b["zgap"]) == 0 and torch.isfinite(a["zgap"])
+    assert abs(float(a["loss"] - b["loss"]) - (10.0 - float(a["zgap"]))) < 1e-3
