@@ -554,7 +554,8 @@ def _jobs(args: argparse.Namespace) -> None:
         st = jobs.status(store)
         for name, a in st["agents"].items():
             print(f"agent {name}: {a.get('state')} (job {a.get('job')}), seen {a['age_s'] / 60:.1f} min ago, "
-                  f"gpu {a.get('gpu')}, version {a.get('version')}{', PAUSED by its owner' if a.get('paused') else ''}")
+                  f"gpu {a.get('gpu')}, version {a.get('version')}{', PAUSED by its owner' if a.get('paused') else ''}"
+                  f"{', QUIET mode (job duty-cycled)' if a.get('quiet') else ''}")
             if a.get("hardware"):
                 h = a["hardware"]
                 gpus = ", ".join(f"{g['name']} {g['vram_mib'] / 1024:.0f} GB" for g in h.get("gpus", [])) or "no GPU"

@@ -7,6 +7,10 @@
 #   the agent reads every few seconds (pause freezes the running job at once, resume continues it);
 # - shows the agent's state (<cache>\.agent\status.json) and how long it worked in the last 24 h, 7 days,
 #   30 days and in all (<cache>\.agent\stats.json: job seconds per hour, pauses excluded);
+# - quiet mode, for the night: the agent duty-cycles the running job (2 s running, 3 s frozen by default,
+#   about 40 % of the power, quieter fans). The Quiet mode menu picks Auto (the quiet hours, 22:00 to 08:00
+#   by default, editable), Always or Never; the icon turns dark blue while a job runs quietly. The tray also
+#   writes this PC's UTC offset (utc_offset_min), so the agent's quiet hours follow Windows' clock;
 # - keeps the PC from going to sleep while a job runs (not while paused or idle);
 # - updates itself: the agent publishes its checkout's tray.ps1 in <cache>\.agent\ (so an `update` job
 #   reaches the tray too); when it differs from the running code and parses, it replaces this file and the
@@ -42,15 +46,33 @@ function Read-Json($path) {
 function Get-Control {
     $c = Read-Json $ControlPath
     $quota = if ($c -and $c.quota_gb) { [double]$c.quota_gb } else { [double]$Config.quota_gb }
-    [pscustomobject]@{ paused = [bool]($c -and $c.paused); quota_gb = $quota }
+    $quiet = if ($c -and @('auto', 'on', 'off') -contains $c.quiet) { [string]$c.quiet } else { 'auto' }
+    $from = if ($c -and $c.quiet_from) { [string]$c.quiet_from } else { '22:00' }
+    $to = if ($c -and $c.quiet_to) { [string]$c.quiet_to } else { '08:00' }
+    $offset = if ($c -and $null -ne $c.utc_offset_min) { [double]$c.utc_offset_min } else { $null }
+    [pscustomobject]@{ paused = [bool]($c -and $c.paused); quota_gb = $quota; quiet = $quiet; quiet_from = $from
+                       quiet_to = $to; utc_offset_min = $offset }
 }
 
-function Set-Control([bool]$paused, [double]$quota) {
+function Set-Control([hashtable]$changes) {
+    # Changes some settings and keeps the others (including ones this tray does not know, from a newer agent).
+    $all = @{}
+    $c = Read-Json $ControlPath
+    if ($c) { foreach ($p in $c.PSObject.Properties) { $all[$p.Name] = $p.Value } }
+    foreach ($k in $changes.Keys) { $all[$k] = $changes[$k] }
     New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
     $tmp = "$ControlPath.tmp"
     # WriteAllText: UTF-8 without BOM; written then renamed, so the agent never reads half a file.
-    [IO.File]::WriteAllText($tmp, (@{ paused = $paused; quota_gb = $quota } | ConvertTo-Json -Compress))
+    [IO.File]::WriteAllText($tmp, ($all | ConvertTo-Json -Compress))
     Move-Item -Force -LiteralPath $tmp -Destination $ControlPath
+}
+
+function Sync-UtcOffset {
+    # The agent runs in WSL, whose clock may not be in Windows' time zone: it reads the quiet hours with this
+    # offset. Rewritten only when it changes (first run, daylight saving time, travel).
+    $c = Get-Control
+    $now = [TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes
+    if ($null -eq $c.utc_offset_min -or [double]$c.utc_offset_min -ne $now) { Set-Control @{ utc_offset_min = $now } }
 }
 
 function Now-Seconds { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0 }
@@ -110,6 +132,7 @@ function New-DotIcon([System.Drawing.Color]$color, [bool]$pauseBars) {
 $Icons = @{
     running = New-DotIcon ([System.Drawing.Color]::FromArgb(46, 160, 67)) $false
     idle    = New-DotIcon ([System.Drawing.Color]::FromArgb(56, 120, 200)) $false
+    quiet   = New-DotIcon ([System.Drawing.Color]::FromArgb(40, 60, 140)) $false
     paused  = New-DotIcon ([System.Drawing.Color]::FromArgb(230, 140, 20)) $true
     problem = New-DotIcon ([System.Drawing.Color]::FromArgb(200, 50, 50)) $false
     off     = New-DotIcon ([System.Drawing.Color]::FromArgb(130, 130, 130)) $false
@@ -138,6 +161,17 @@ $ItemWorkAll = Add-Item ''
 [void]$Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $ItemCache = Add-Item ''
 $ItemPause = Add-Item 'Pause' $true
+$ItemQuiet = Add-Item 'Quiet mode' $true
+function Add-SubItem([string]$text) {
+    $i = New-Object System.Windows.Forms.ToolStripMenuItem $text
+    [void]$ItemQuiet.DropDownItems.Add($i)
+    $i
+}
+$ItemQuietAuto = Add-SubItem 'Auto: quiet hours'
+$ItemQuietOn = Add-SubItem 'Always quiet'
+$ItemQuietOff = Add-SubItem 'Never quiet'
+[void]$ItemQuiet.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$ItemQuietHours = Add-SubItem 'Set quiet hours...'
 $ItemQuota = Add-Item 'Set cache size limit...' $true
 $ItemOpen = Add-Item 'Open cache folder' $true
 [void]$Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
@@ -177,6 +211,23 @@ function Update-Tray {
         $icon, $title = 'idle', 'Idle'
         $detail = 'Waiting for jobs'
     }
+
+    # Quiet mode (the agent says whether it applies now): shown on a running job, and in the menu.
+    $quietNow = $s -and $s.quiet -and $age -le 240
+    if ($running -and $quietNow) {
+        $icon, $title = 'quiet', 'Working quietly'
+        $detail += ' (quiet mode: runs 2 s of every 5)'
+    }
+    $hours = "$($c.quiet_from) to $($c.quiet_to)"
+    $ItemQuiet.Text = switch ($c.quiet) {
+        'on' { 'Quiet mode: always' }
+        'off' { 'Quiet mode: never' }
+        default { "Quiet mode: auto, $hours" + $(if ($quietNow) { ' (now)' } else { '' }) }
+    }
+    $ItemQuietAuto.Text = "Auto: quiet from $hours"
+    $ItemQuietAuto.Checked = $c.quiet -eq 'auto'
+    $ItemQuietOn.Checked = $c.quiet -eq 'on'
+    $ItemQuietOff.Checked = $c.quiet -eq 'off'
 
     $Tray.Icon = $Icons[$icon]
     $tip = "priism agent: $title"
@@ -219,8 +270,30 @@ function Update-Self {
 
 $ItemPause.add_Click({
     $c = Get-Control
-    Set-Control (-not $c.paused) $c.quota_gb
+    Set-Control @{ paused = (-not $c.paused) }
     Update-Tray
+})
+
+$ItemQuietAuto.add_Click({ Set-Control @{ quiet = 'auto' }; Update-Tray })
+$ItemQuietOn.add_Click({ Set-Control @{ quiet = 'on' }; Update-Tray })
+$ItemQuietOff.add_Click({ Set-Control @{ quiet = 'off' }; Update-Tray })
+
+$ItemQuietHours.add_Click({
+    $c = Get-Control
+    $answer = [Microsoft.VisualBasic.Interaction]::InputBox(
+        "Quiet hours, start-end (24 h clock), e.g. 22:00-08:00.`n`nIn Auto mode, a job runs only part of the " +
+        "time during these hours, so the PC stays quieter.", 'priism quiet hours', "$($c.quiet_from)-$($c.quiet_to)")
+    if ($answer) {
+        $m = [regex]::Match($answer, '^\s*([01]?\d|2[0-3])[:h.]([0-5]\d)\s*-\s*([01]?\d|2[0-3])[:h.]([0-5]\d)\s*$')
+        if ($m.Success) {
+            $from = '{0:00}:{1}' -f [int]$m.Groups[1].Value, $m.Groups[2].Value
+            $to = '{0:00}:{1}' -f [int]$m.Groups[3].Value, $m.Groups[4].Value
+            Set-Control @{ quiet_from = $from; quiet_to = $to }
+            Update-Tray
+        } else {
+            [void][System.Windows.Forms.MessageBox]::Show("Not two times like 22:00-08:00: $answer", 'priism')
+        }
+    }
 })
 
 $ItemQuota.add_Click({
@@ -232,7 +305,7 @@ $ItemQuota.add_Click({
         $gb = 0.0
         if ([double]::TryParse($answer.Replace(',', '.'), [Globalization.NumberStyles]::Float,
                 [Globalization.CultureInfo]::InvariantCulture, [ref]$gb) -and $gb -gt 0) {
-            Set-Control $c.paused $gb
+            Set-Control @{ quota_gb = $gb }
             Update-Tray
         } else {
             [void][System.Windows.Forms.MessageBox]::Show("Not a number of GB: $answer", 'priism')
@@ -268,11 +341,13 @@ $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = 5000
 $script:Ticks = 0
 $Timer.add_Tick({
+    try { Sync-UtcOffset } catch { }
     try { Update-Tray } catch { }
     $script:Ticks++
     if ($script:Ticks % 12 -eq 0) { try { Update-Self } catch { } }  # every minute
 })
 $Timer.Start()
+try { Sync-UtcOffset } catch { }
 try { Update-Tray } catch { }
 [System.Windows.Forms.Application]::Run()
 $Tray.Dispose()

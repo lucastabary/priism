@@ -32,6 +32,15 @@ work folder, his cache. Over the cap a running job is stopped and only ``clean``
 is decided on our side, from the per-folder sizes in the heartbeat. For the tray, the agent keeps
 ``.agent/status.json`` (its state, every tick) and ``.agent/stats.json`` (seconds of job time per hour,
 paused time excluded).
+
+Quiet mode, for a PC that must stay bearable at night: the running job is duty-cycled, ``quiet_run_s``
+running then ``quiet_pause_s`` frozen (default 2 s / 3 s, about 40 % of the power, so fewer fans), with the
+same SIGSTOP / SIGCONT as the owner's pause: generic, no job change, its VRAM stays allocated. ``quiet`` in
+control.json is ``auto`` (on from ``quiet_from`` to ``quiet_to``, default 22:00 to 08:00, the PC's local
+time: ``utc_offset_min``, written by the tray, wins over the WSL clock's own time zone), ``on`` or ``off``.
+Frozen time counts for none of the limits (time cap, stall and GPU-idle clocks count active time only) nor
+in stats.json; the owner's pause wins over quiet mode, and a quiet job can still be preempted. status.json
+and the heartbeat carry ``quiet`` (on now or not), so the tray and ``jobs status`` show it.
 """
 
 from __future__ import annotations
@@ -149,7 +158,8 @@ class Agent:
                  bin_dir: str | Path | None = None, gpu=gpu_stats, tick: float = 10.0, sync_every: float = 30.0,
                  wait_for_free_gpu: bool = False,
                  free_util: int = 10, free_mem_mib: int = 1500, free_samples: int = 3, free_gap_s: float = 5.0,
-                 quota_gb: float = 50.0, disk_every: float = 60.0, term_grace: float = 60.0, log=print):
+                 quota_gb: float = 50.0, disk_every: float = 60.0, term_grace: float = 60.0, quiet_default: str = "auto",
+                 log=print):
         self.store, self.workdir, self.repo = store, Path(workdir), Path(repo)
         self.name = name or socket.gethostname()
         self.bin_dir = Path(bin_dir or Path(sys.executable).parent)
@@ -166,6 +176,7 @@ class Agent:
         self._work: dict[str, float] = {}  # job seconds per epoch hour, not yet added to stats.json
         self._job_start: float | None = None
         self.term_grace = term_grace
+        self.quiet_default = quiet_default  # when control.json says nothing (tests: "off")
         self._specs: dict[str, tuple[int, bool]] = {}  # pending key -> (rank, valid): specs never change
 
     # --------------------------------------------------------------------------------------- store access
@@ -190,7 +201,7 @@ class Agent:
         self._try(self.store.put, f"agents/{self.name}.json", json.dumps(
             {"time": time.time(), "state": state, "job": job, "gpu": g, "version": self._version(),
              "hardware": self.hardware(),
-             "paused": self.control()["paused"],
+             "paused": self.control()["paused"], "quiet": self.quiet_now(), "quiet_mode": self.control()["quiet"],
              "disk": {"used_gb": round(used / 1e9, 2), "quota_gb": self.quota(),
                       "top_gb": {k: round(v / 1e9, 2) for k, v in top.items()}}}).encode())
 
@@ -249,7 +260,33 @@ class Agent:
             c = json.loads((self.state_dir / "control.json").read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             c = {}
-        return {"paused": bool(c.get("paused", False)), "quota_gb": float(c.get("quota_gb") or self.quota_gb)}
+        def num(key: str, default: float, low: float) -> float:
+            try:
+                return max(low, float(c.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+
+        off = c.get("utc_offset_min")
+        return {"paused": bool(c.get("paused", False)), "quota_gb": float(c.get("quota_gb") or self.quota_gb),
+                "quiet": c["quiet"] if c.get("quiet") in ("auto", "on", "off") else self.quiet_default,
+                "quiet_from": str(c.get("quiet_from") or "22:00"), "quiet_to": str(c.get("quiet_to") or "08:00"),
+                "quiet_run_s": num("quiet_run_s", 2.0, 0.1), "quiet_pause_s": num("quiet_pause_s", 3.0, 0.1),
+                "utc_offset_min": float(off) if isinstance(off, (int, float)) else None}
+
+    def quiet_now(self, ctl: dict | None = None, now: float | None = None) -> bool:
+        """Whether quiet mode applies at ``now``: forced on or off, or (auto) inside the quiet hours, a window
+        that may wrap past midnight; equal bounds or unreadable hours mean no quiet hours."""
+        ctl = ctl or self.control()
+        if ctl["quiet"] != "auto":
+            return ctl["quiet"] == "on"
+        now = time.time() if now is None else now
+        t = time.gmtime(now + ctl["utc_offset_min"] * 60) if ctl["utc_offset_min"] is not None else time.localtime(now)
+        m = t.tm_hour * 60 + t.tm_min
+        try:
+            a, b = (int(h) * 60 + int(mm) for h, mm in (ctl["quiet_from"].split(":"), ctl["quiet_to"].split(":")))
+        except ValueError:
+            return False
+        return a <= m < b if a <= b else m >= a or m < b
 
     def quota(self) -> float:
         return self.control()["quota_gb"]
@@ -270,7 +307,7 @@ class Agent:
         _write_json(self.state_dir / "status.json", {
             "time": time.time(), "state": state, "job": job,
             "job_start": job_start or (self._job_start if job else None), "name": self.name,
-            "online": self.online, "used_bytes": self.disk()[0], "quota_gb": self.quota()})
+            "online": self.online, "used_bytes": self.disk()[0], "quota_gb": self.quota(), "quiet": self.quiet_now()})
 
     def _count_work(self, seconds: float, flush: bool = False) -> None:
         """Add job time to the current hour; ``flush`` writes the pending hours to stats.json."""
@@ -489,10 +526,12 @@ class Agent:
         return 0, "ok"
 
     def watch(self, job: Job, proc, logf: Path, start: float) -> tuple[int, str]:
-        """Watch a job until it ends or must stop. The owner's pauses count for none of the limits: the
-        stall and GPU-idle clocks restart at each resume, the time cap counts active time only."""
-        idle_since, last_sync, last, paused_s, frozen, resumed = None, 0.0, time.time(), 0.0, False, start
-        log_len, log_grew = 0, start  # the log's real length and when it last grew: see _log_grew
+        """Watch a job until it ends or must stop. The owner's pauses and quiet mode's frozen parts count for
+        none of the limits: the time cap, stall and GPU-idle clocks count active time only (the last two also
+        restart at each owner resume)."""
+        last_sync, last, paused_s, frozen, quiet, quiet_s = 0.0, time.time(), 0.0, False, False, 0.0
+        active, grew_at, idle_from = 0.0, 0.0, None  # active seconds; when (in them) the log grew, the GPU idled
+        log_len = 0  # the log's real length: see _log_grew
         self._job_start = start
         if hasattr(signal, "SIGCONT"):  # a job found frozen after an agent restart: the loop refreezes it if paused
             _signal_group(proc, signal.SIGCONT)
@@ -503,26 +542,37 @@ class Agent:
                 return code, "ok" if code == 0 else f"exit code {code}"
             now = time.time()
             dt, last = min(now - last, 60.0), now  # capped: time the PC spent asleep is not job time
-            want = self.control()["paused"] and hasattr(signal, "SIGSTOP")
+            ctl = self.control()
+            want = ctl["paused"] and hasattr(signal, "SIGSTOP")
             if want != frozen:
                 _signal_group(proc, signal.SIGSTOP if want else signal.SIGCONT)
-                frozen, resumed, idle_since, last_sync = want, now, None, 0.0
+                frozen, grew_at, idle_from, last_sync = want, active, None, 0.0
                 msg = "paused by the machine's owner" if frozen else "resumed"
                 self.log(f"{job.id}: {msg}")
                 with logf.open("a") as f:
                     f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {msg}\n")
-            if frozen:
-                paused_s += dt
-            else:
-                self._count_work(dt)
+            run_dt = 0.0 if frozen else max(0.0, dt - quiet_s)  # quiet_s: frozen by the last quiet sleep
+            paused_s += dt - run_dt
+            active += run_dt
+            self._count_work(run_dt)
+            want = not frozen and hasattr(signal, "SIGSTOP") and self.quiet_now(ctl)
+            if frozen:  # the owner's pause wins; quiet mode starts again when he resumes
+                quiet = False
+            elif want != quiet:
+                quiet = want
+                msg = (f"quiet mode on (runs {ctl['quiet_run_s']:g} s, frozen {ctl['quiet_pause_s']:g} s)" if quiet
+                       else "quiet mode off")
+                self.log(f"{job.id}: {msg}")
+                with logf.open("a") as f:
+                    f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {msg}\n")
             self._local("paused" if frozen else "running", job.id, start)
             stop = None
             log_len, grew = _log_grew(logf, log_len)
             if grew:
-                log_grew = now
+                grew_at = active
             if frozen:
                 pass
-            elif now - max(log_grew, resumed) > job.stall_minutes * 60:
+            elif active - grew_at > job.stall_minutes * 60:
                 stop = f"no log output for {job.stall_minutes:g} min"
             elif job.active_minutes * 60 + now - start - paused_s > job.max_minutes * 60:
                 stop = f"time cap {job.max_minutes:g} min"
@@ -531,11 +581,11 @@ class Agent:
             elif job.gpu:
                 g = self.gpu()
                 if g is not None and g[0] == 0:
-                    idle_since = idle_since or now
-                    if now - idle_since > job.gpu_idle_minutes * 60:
+                    idle_from = active if idle_from is None else idle_from
+                    if active - idle_from > job.gpu_idle_minutes * 60:
                         stop = f"GPU idle for {job.gpu_idle_minutes:g} min"
                 else:
-                    idle_since = None
+                    idle_from = None
             if stop is None and now - last_sync >= self.sync_every:
                 last_sync = now
                 self._count_work(0.0, flush=True)
@@ -557,7 +607,25 @@ class Agent:
                     job.preemptions += 1
                     job.active_minutes += (time.time() - start - paused_s) / 60
                 return -1, stop
-            time.sleep(self.tick)
+            quiet_s = self._quiet_sleep(proc, ctl) if quiet else 0.0
+            if not quiet:
+                time.sleep(self.tick)
+
+    def _quiet_sleep(self, proc, ctl: dict) -> float:
+        """Quiet mode's sleep between checks: whole cycles (frozen, then running) for about ``tick`` seconds,
+        ending with the job running, so the GPU is sampled while it works. Returns the seconds it was frozen."""
+        run_s, pause_s = ctl["quiet_run_s"], ctl["quiet_pause_s"]
+        frozen = 0.0
+        for _ in range(max(1, round(self.tick / (run_s + pause_s)))):
+            t = time.time()
+            _signal_group(proc, signal.SIGSTOP)
+            time.sleep(pause_s)
+            _signal_group(proc, signal.SIGCONT)
+            frozen += time.time() - t
+            time.sleep(run_s)
+            if proc.poll() is not None:
+                break
+        return frozen
 
     def _sync(self, job: Job, logf: Path, start: float, state: str, extra: dict | None = None) -> bool:
         data = logf.read_bytes()[-2_000_000:] if logf.exists() else b""
