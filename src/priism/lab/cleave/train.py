@@ -339,7 +339,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
           w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
           v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1,
-          pool_gb: float = 0.0, pool_reuse: int = 32, w_var: float = 1.0, w_cov: float = 0.04) -> dict:
+          pool_gb: float = 0.0, pool_reuse: int = 32, w_var: float = 1.0, w_cov: float = 0.04,
+          w_ctx: float = 1.0) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -375,6 +376,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
             "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp,
             "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap, "other_view": other_view, "v_drop": v_drop,
             "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau, "ema": ema, "w_var": w_var, "w_cov": w_cov,
+            "w_ctx": w_ctx,
             **pool}
     _log(json.dumps(meta))
 
@@ -396,7 +398,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
                 pair = pair + (patches_o, active_o)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             o = model(patches, plc, active, pmask, beta=beta, w_var=w_var, w_cov=w_cov, pair=pair, w_inv=w_inv,
-                      w_swap=w_swap, v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau)
+                      w_swap=w_swap, v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau,
+                      w_ctx=w_ctx)
         opt.zero_grad(set_to_none=True)
         o["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -430,7 +433,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     key = "id_auc_kind" if not math.isnan(rec0.get("id_auc_kind", float("nan"))) else "id_auc"
     best, since, reason = -1.0, 0, f"steps: reached {steps}"
     t0 = time.time()
-    keys = ("loss", "pred", "kl", "vic_var", "inv", "swap", "vinv")
+    keys = ("loss", "pred", "kl", "vic_var", "ctx", "inv", "swap", "vinv")
     run = {**dict.fromkeys(keys, 0.0), "n": 0}
     step = 0
     for batch_ in loader:

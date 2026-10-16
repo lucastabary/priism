@@ -21,6 +21,12 @@ losses push effects out of Z: invariance of the normalised mu between views, and
 targets of view A from Z of view B, V-bar and P/L of view A). ``v_dim`` = 0 is the phase 1a model, whose
 checkpoints still load.
 
+Context branch (``ctx_layers`` > 0, docs/cleave.md 3.2): the classic I-JEPA path beside the Z bottleneck. On
+the band-masked chunks, a small predictor reads the online patch tokens of the chunk (the masked positions
+hold the encoder's own mask-token outputs) and predicts the target tokens of the masked bands. Without it
+the patch tokens get no prediction gradient (the main predictor reads only Z), so the EMA targets drifted to
+high-rank noise and Z collapsed (probe s0b, 3.1). ``ctx_layers`` = 0 keeps the older models and checkpoints.
+
 V-bar read from the stem's own neighbours carries its timbre, a free channel (no KL) that let the
 predictor stop using Z. Three counters, each optional: the swap reads V-bar from another stem of the same
 song under chain A (``pair`` with an other view), so V-bar only helps there by carrying the chain;
@@ -61,6 +67,7 @@ class CleaveConfig:
     pl_dim: int = PL_DIM
     v_dim: int = 0  # 0: no V-bar (phase 1a checkpoints)
     v_window: int = 2  # V-bar of chunk c reads chunks c-w..c+w except c
+    ctx_layers: int = 0  # 0: no context branch (checkpoints before 3.2)
 
     @property
     def n_tcol(self) -> int:
@@ -187,6 +194,21 @@ class VBar(nn.Module):
         return self.mlp(self.norm(h)) * (den > 0)[..., None].to(cls.dtype)
 
 
+class ContextPredictor(nn.Module):
+    """Online patch tokens of one chunk -> predicted target tokens at every position (I-JEPA)."""
+
+    def __init__(self, cfg: CleaveConfig):
+        super().__init__()
+        d = cfg.dim
+        self.pos = nn.Parameter(torch.randn(1, cfg.n_patches, d) * 0.02)
+        self.body = _body(d, cfg.heads, cfg.ctx_layers)
+        self.norm = nn.LayerNorm(d)
+        self.out = nn.Linear(d, d)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.out(self.norm(self.body(tokens + self.pos)))
+
+
 def vicreg(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(n, d) -> variance hinge (std >= 1 per dim) and off-diagonal covariance (Bardes et al. 2022)."""
     x = x.float() - x.float().mean(0)
@@ -212,6 +234,7 @@ class Cleave(nn.Module):
         self.glob = GlobalEncoder(cfg)
         self.pred = Predictor(cfg)
         self.vbar = VBar(cfg) if cfg.v_dim else None
+        self.ctx = ContextPredictor(cfg) if cfg.ctx_layers else None
         self.target = copy.deepcopy(self.local)
         self.target.requires_grad_(False)
 
@@ -230,9 +253,11 @@ class Cleave(nn.Module):
         pl = pl[:, :T].reshape(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
         return patches, pl
 
-    def encode(self, patches: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor | None = None):
+    def encode(self, patches: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor | None = None,
+               full: bool = False):
         """Posterior of Z from the visible patches: mu, logvar (B, z_dim), the online patch tokens read, and
-        V-bar (B, C, v_dim), None without V-bar."""
+        V-bar (B, C, v_dim), None without V-bar. ``full`` adds (batch idx, chunk idx, all patch tokens) of
+        the encoded chunks, for the context branch."""
         B, C, P, _ = patches.shape
         if pmask is None:
             pmask = torch.zeros(B, C, P, dtype=torch.bool, device=patches.device)
@@ -244,18 +269,20 @@ class Cleave(nn.Module):
         cls = cls.index_put((bi, ci), cls_e)
         mu, logvar = self.glob(cls, ~enc)
         v = self.vbar(cls, enc) if self.vbar is not None else None
+        if full:
+            return mu, logvar, tok_e[~pmask[bi, ci]], v, (bi, ci, tok_e)
         return mu, logvar, tok_e[~pmask[bi, ci]], v
 
     def forward(self, patches: torch.Tensor, pl: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor,
                 beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
                 pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0, v_drop: float = 0.0,
-                w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1) -> dict:
+                w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1, w_ctx: float = 1.0) -> dict:
         """``pair`` = (batch positions of the paired items, view B patches, view B active chunks), optionally
         followed by (other-stem patches, other-stem active chunks): view A is the item itself. Views B and O
         are encoded under view A's mask, so Z_B never reads the sections A must predict and V-bar_O sees the
         same neighbours as V-bar_A."""
         B = patches.shape[0]
-        mu, logvar, tokens, v = self.encode(patches, active, pmask)
+        mu, logvar, tokens, v, (bi, ci, tok_all) = self.encode(patches, active, pmask, full=True)
         z = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu) if self.training else mu
         if shuffle_z:  # Z of another song: how much the predictor relies on Z
             z = z.roll(1, 0)
@@ -277,6 +304,16 @@ class Cleave(nn.Module):
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
         loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss
+        ctx = torch.zeros((), device=loss.device)
+        if self.ctx is not None:  # band-masked chunks: encoded, and target rows of their own
+            row = torch.full(pmask.shape[:2], -1, dtype=torch.long, device=pmask.device)
+            row[bi, ci] = torch.arange(len(bi), device=pmask.device)
+            r = row[tb, tc]
+            sel = r >= 0
+            if sel.any():
+                pc = self.ctx(tok_all[r[sel]])
+                ctx = ((pc.float() - t[sel]) ** 2).mean(-1)[m[sel]].mean()
+                loss = loss + w_ctx * ctx
         inv = swap = vinv = torch.zeros((), device=loss.device)
         if pair is not None and len(pair[0]) > 0:
             pi, patches_b, active_b = pair[:3]
@@ -313,6 +350,6 @@ class Cleave(nn.Module):
         var_song = torch.zeros(B, device=mf.device).index_add_(0, tb, (logv.detach().exp() * mf).sum(1)) / n_t
         sigma_song = torch.exp(0.5 * logvar.detach().float()).mean(-1)
         return {"loss": loss, "pred": loss_pred.detach(), "nll": loss_nll.detach(), "kl": kl.detach(),
-                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "inv": inv.detach(),
+                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "ctx": ctx.detach(), "inv": inv.detach(),
                 "swap": swap.detach(), "vinv": vinv.detach(), "mu": mu.detach(),
                 "sigma": sigma_song, "pred_var": var_song, "pred_err": err_song, "targets": t}

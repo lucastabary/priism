@@ -302,3 +302,44 @@ def test_cpu_smoke_run_with_pool(tmp_path):
                     id_chunks=2, min_gap_s=2.0, workers=0, device="cpu", plateau=0, pool_gb=0.01, pool_reuse=4,
                     pair_frac=0.5, other_view=True)
     assert summary["step"] == 20 and summary["pool_songs"] >= 1
+
+
+def test_context_branch_trains_the_patch_tokens():
+    # docs/cleave.md 3.2: without it the local encoder's patch tokens get no prediction gradient
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, ctx_layers=1)
+    model = Cleave(cfg)
+    B, C = 2, 3
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_tcol, cfg.n_rows, dtype=torch.bool)
+    pmask[:, 1] = True  # a section: no context inside the chunk
+    pmask[:, 2, :, 2:4] = True  # a band: the context branch's target
+    pmask = pmask.flatten(2)
+    out = model(patches, pl, active, pmask, w_var=0.0, w_cov=0.0, w_ctx=1.0)
+    assert float(out["ctx"]) > 0
+    model.zero_grad()
+    torch.manual_seed(0)
+    with_ctx = model(patches, pl, active, pmask, w_var=0.0, w_cov=0.0, w_ctx=1.0)["loss"]
+    torch.manual_seed(0)
+    without = model(patches, pl, active, pmask, w_var=0.0, w_cov=0.0, w_ctx=0.0)["loss"]
+    (with_ctx - without).backward()  # the context loss alone reaches the online local encoder, not the target
+    assert model.local.embed.weight.grad.abs().sum() > 0
+    assert all(p.grad is None for p in model.target.parameters())
+    # older checkpoints (no ctx_layers) still load
+    old = Cleave(CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8))
+    assert old.ctx is None and float(old(patches, pl, active, pmask)["ctx"]) == 0
+
+
+def test_cpu_smoke_run_with_context_branch(tmp_path):
+    from priism.lab.cleave.train import train
+
+    _songs(tmp_path / "train")
+    _songs(tmp_path / "valid", n_songs=2)
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, ctx_layers=1)
+    summary = train([str(tmp_path / "train")], [str(tmp_path / "valid")], tmp_path / "run", cfg, steps=20,
+                    batch=2, crop_chunks=4, warmup=5, eval_every=20, eval_k=1, per_k=4, id_chunks=2,
+                    min_gap_s=2.0, workers=0, device="cpu", plateau=0)
+    assert summary["step"] == 20 and summary["w_ctx"] == 1.0
+    hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
+    assert hist[-1]["ctx"] > 0
