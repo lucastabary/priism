@@ -468,7 +468,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
           measure=args.measure, pair_frac=args.pair_frac, w_inv=args.w_inv, w_swap=args.w_swap,
           fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
           w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau, pool_gb=args.pool_gb,
-          pool_reuse=args.pool_reuse)
+          pool_reuse=args.pool_reuse, ema=args.ema, w_var=args.w_var, w_cov=args.w_cov)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -940,6 +940,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--k-schedule", default="0:1", help="largest k per step, e.g. 0:1,20000:2,30000:4")
     p.add_argument("--mono-frac", type=float, default=0.5, help="share of k = 1 once mixes are allowed")
     p.add_argument("--beta", type=float, default=1e-3, help="weight of KL(Z || N(0, I))")
+    p.add_argument("--ema", type=float, default=0.996,
+                   help="starting EMA momentum of the target encoder, cosine to 1; 1: targets frozen at the random init")
+    p.add_argument("--w-var", type=float, default=1.0, help="weight of the VICReg variance hinge on the patch tokens")
+    p.add_argument("--w-cov", type=float, default=0.04, help="weight of the VICReg covariance on the patch tokens")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
     p.add_argument("--z-dim", type=int, default=64)

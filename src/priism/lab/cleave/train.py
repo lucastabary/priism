@@ -339,7 +339,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
           w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
           v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1,
-          pool_gb: float = 0.0, pool_reuse: int = 32) -> dict:
+          pool_gb: float = 0.0, pool_reuse: int = 32, w_var: float = 1.0, w_cov: float = 0.04) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -374,7 +374,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     meta = {"train_songs": len(train_songs), "valid_songs": len(val_songs), "params": n_params,
             "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp,
             "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap, "other_view": other_view, "v_drop": v_drop,
-            "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau, **pool}
+            "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau, "ema": ema, "w_var": w_var, "w_cov": w_cov,
+            **pool}
     _log(json.dumps(meta))
 
     def lr_at(step: int) -> float:
@@ -394,8 +395,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
                 patches_o, _, active_o, _ = batcher(b["wave_o"], model, None)
                 pair = pair + (patches_o, active_o)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            o = model(patches, plc, active, pmask, beta=beta, pair=pair, w_inv=w_inv, w_swap=w_swap,
-                      v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau)
+            o = model(patches, plc, active, pmask, beta=beta, w_var=w_var, w_cov=w_cov, pair=pair, w_inv=w_inv,
+                      w_swap=w_swap, v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau)
         opt.zero_grad(set_to_none=True)
         o["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
