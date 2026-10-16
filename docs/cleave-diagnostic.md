@@ -295,3 +295,29 @@ priorité « background » : utile quoi qu'on décide, et préemptible. Les test
 - Hershey et al. 2016, *Deep clustering* ; Yu et al. 2017, *Permutation invariant training*.
 - Mariani et al. 2023, *Multi-Source Diffusion Models* ; Takahashi et al. 2019, *Recursive speech
   separation* (OR-PIT).
+
+---
+
+## 7. Suivi : l'option A lancée (16 octobre, soir)
+
+**Le code.** `train-id --loss dc` (`registry/head.py`). C'est la même tête et le même cache que Facet, mais
+la perte est un deep clustering à labels souples, sur tous les tokens audibles de deux chunks éloignés
+d'un morceau. Un token y est pondéré par sa puissance à la puissance 0,5. `best.pt` garde la plus petite
+perte DC de validation, calculée sur des chunks fixes. Le smoke CPU sur le vrai cache (`cache-b6`, 200 pas,
+niveau track) donne une perte qui passe de 0,143 à 0,099, `val_dc` de 0,105 à 0,090, et `far_auc` qui monte
+de 0,71 à 0,76, à 0,25 s par pas.
+
+**Le protocole, écrit avant le lancement :**
+- **Le bras** : `--loss dc --level track`, avec les données de la tête 3b (`p6-fx09` + `moises%train`,
+  valid `p6-valid%dev` + `moises%dev2`), 5000 pas, plateau 6, seeds 0 à 2, sur Chav.
+- **Les comparaisons**, appariées par morceau :
+  - contre Facet (`fx09`, supcon, synthétique seul) : c'est le produit actuel ;
+  - contre `fx09mdb` (supcon, mêmes données) : ça isole l'effet de la perte. Il reste une différence de
+    niveau (track contre instrument).
+
+  Les deux baselines existent déjà sur dev2 et sur test-20, à cut 0,4 et temp 0,05.
+- **Le réglage** : la cut de DC est choisie sur dev2 parmi 0,2 à 0,6, en moyenne sur les seeds. Test-20 n'est
+  évalué qu'à cette cut.
+- **Go** : DC − Facet ≥ +0,5 dB en SDR moyen par morceau sur test-20 (moyenne des 3 seeds), avec un IC
+  bootstrap qui exclut 0. **Stop** si le gain est sous +0,2 dB, ou si l'IC contient 0 : on n'ajuste pas la
+  recette.

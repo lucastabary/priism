@@ -449,8 +449,8 @@ def _train_id(args: argparse.Namespace) -> None:
                          context=args.context, chunk_s=args.chunk, min_gap_s=args.min_gap,
                          eval_every=args.eval_every, plateau=args.plateau, device=args.device,
                          group_local=args.group_local, bench=bench, bench_every=args.bench_every,
-                         bench_cut=args.bench_cut,
-                         max_minutes=args.max_minutes, seed=args.seed)
+                         bench_cut=args.bench_cut, loss_kind=args.loss, dc_tokens=args.dc_tokens,
+                         dc_pow=args.dc_pow, max_minutes=args.max_minutes, seed=args.seed)
     print(summary)
 
 
@@ -937,6 +937,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--bench-cut", type=float, default=0.2, help="whole-song cut used by the benchmark")
     p.add_argument("--group-local", action="store_true",
                    help="group stems (NI, stem loops) are positives only within a chunk, never across time")
+    p.add_argument("--loss", choices=["supcon", "dc"], default="supcon",
+                   help="supcon on clearly owned tokens, or deep clustering with soft labels on all audible tokens")
+    p.add_argument("--dc-tokens", type=int, default=512, help="dc: audible tokens drawn per chunk")
+    p.add_argument("--dc-pow", type=float, default=0.5, help="dc: token weight = power ** this (0: uniform)")
     p.set_defaults(func=_train_id)
 
     p = sub.add_parser("cleave-train", help="train the Cleave JEPA (Z + sigma of a whole song, docs/cleave.md)")

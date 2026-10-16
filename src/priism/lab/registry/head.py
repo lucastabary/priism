@@ -13,6 +13,14 @@ different-source token pairs far apart in a song, on a fixed sample, for the hea
 tokens (the phase 1 baseline). Clustering with a fixed threshold would collapse into one cluster early in
 training and score the same at every step.
 
+``loss="dc"`` trains the same head on the separation objective instead (docs/cleave-diagnostic.md, option A):
+deep clustering (Hershey et al. 2016) with soft labels, on *every* audible token of two chunks of a song, not
+only the clearly owned ones. The target affinity of two tokens is the probability that they belong to the
+same reference (the dot product of their energy shares), and each token is weighted by its power to the
+``dc_pow``, so the loud, contested tokens that decide the SDR weigh the most. Supcon never sees a token
+shared by two sources, which is where Facet's assignment loses most of the 1.8 dB to the oracle. With
+``dc``, ``best.pt`` keeps the lowest validation DC loss (on fixed chunks); ``far_auc`` is still logged.
+
 Guards (lab rule: never leave a long run unwatched): the run stops on a non-finite loss, when the
 validation score has not improved by ``plateau_delta`` for ``plateau`` evaluations, or at ``max_minutes``.
 Every evaluation is appended to ``history.jsonl``; ``best.pt`` keeps the best validation score.
@@ -118,6 +126,63 @@ def sample_tokens(song: Cached, level: str, chunk: int, min_gap: int,
     return out
 
 
+def sample_chunk_tokens(song: Cached, level: str, chunk: int, min_gap: int, n: int, rng: np.random.Generator,
+                        pow_: float = 0.5, t0s: tuple[int, ...] | None = None, floor_db: float = 60.0
+                        ) -> list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]:
+    """For deep clustering: two chunks ``min_gap`` apart (or ``t0s``) -> per chunk (t0, rows (m, 2) of
+    (frame, band), soft labels (m, R) = energy shares of the song's references, weights (m,)). Up to ``n``
+    audible tokens per chunk, drawn uniformly; the weight (token power ** ``pow_``, mean 1 over the chunk)
+    carries the loudness instead, so a quiet token is cheap but still seen."""
+    if t0s is None:
+        T = song.tokens.shape[0]
+        hi = max(1, T - chunk)
+        a = int(rng.integers(hi))
+        far = [t for t in range(0, hi, max(1, chunk // 4)) if abs(t - a) >= min(min_gap, hi // 2)]
+        t0s = (a, int(rng.choice(far)) if far else int(rng.integers(hi)))
+    out = []
+    for t0 in t0s:
+        e = song.energy_at(t0, t0 + chunk)
+        if level == "instrument":
+            g = song.instruments
+            e = np.stack([e[g == x].sum(0) for x in np.unique(g)])
+        total = e.sum(0)
+        rows = np.argwhere(total > song.total_max * 10 ** (-floor_db / 10))
+        if len(rows) < 8:
+            continue
+        rows = rows[rng.choice(len(rows), min(n, len(rows)), replace=False)]
+        tot = total[rows[:, 0], rows[:, 1]]
+        y = (e[:, rows[:, 0], rows[:, 1]] / np.maximum(tot, 1e-20)).T
+        w = tot.astype(np.float64) ** pow_
+        out.append((int(t0), rows, y.astype(np.float32), (w / w.mean()).astype(np.float32)))
+    return out
+
+
+def dc_loss(v: torch.Tensor, y: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Weighted deep clustering |V V^T - Y Y^T|_W^2 / (sum w)^2 in its low-rank form (never N x N):
+    v (N, d) unit embeddings, y (N, R) soft labels, w (N,) token weights."""
+    s = w.sqrt()[:, None]
+    vw, yw = v * s, y * s
+    return ((vw.T @ vw).pow(2).sum() - 2 * (vw.T @ yw).pow(2).sum() + (yw.T @ yw).pow(2).sum()) / w.sum() ** 2
+
+
+def _dc_song(head, song: Cached, items, chunk: int, device: str) -> torch.Tensor:
+    vs, ys, ws = [], [], []
+    for t0, rows, y, w in items:
+        x = torch.from_numpy(song.tokens[t0: t0 + chunk].astype(np.float32)).to(device)
+        vs.append(head(x, torch.from_numpy(rows).to(device)))
+        ys.append(torch.from_numpy(y).to(device))
+        ws.append(torch.from_numpy(w).to(device))
+    return dc_loss(torch.cat(vs), torch.cat(ys), torch.cat(ws))
+
+
+def dc_validation(songs: list[Cached], level: str, chunk: int, min_gap: int, n: int = 1024, pow_: float = 0.5,
+                  seed: int = 0) -> list[tuple[int, list]]:
+    """Fixed chunks and tokens per validation song, drawn once, for a comparable DC loss at every eval."""
+    rng = np.random.default_rng(seed)
+    return [(i, items) for i, s in enumerate(songs)
+            if len(items := sample_chunk_tokens(s, level, chunk, min_gap, n, rng, pow_)) > 0]
+
+
 def supcon(z: torch.Tensor, labels: torch.Tensor, temp: float = 0.1, ignore: torch.Tensor | None = None
            ) -> torch.Tensor:
     """Supervised contrastive loss over unit rows z (N, d) with integer labels (N,). ``ignore`` (N, N) bool:
@@ -210,7 +275,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                dim: int = 64, context: int = 2, eval_every: int = 250,
                plateau: int = 6, plateau_delta: float = 0.002, max_minutes: float = 120.0, seed: int = 0,
                device: str = "cpu", group_local: bool = False, bench: list[Cached] | None = None,
-               bench_every: int = 4, bench_cut: float = 0.2, log=_log) -> dict:
+               bench_every: int = 4, bench_cut: float = 0.2, loss_kind: str = "supcon", dc_tokens: int = 512,
+               dc_pow: float = 0.5, log=_log) -> dict:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
@@ -226,7 +292,12 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     # not pushed away, and other sources stay negatives. Real timbres without teaching "kick == hats".
     is_group = [_group_refs(s, level) if group_local else None for s in train]
     pairs = validation_pairs(valid, level, min_gap)
-    best, since, start, hist = -1.0, 0, time.time(), out / "history.jsonl"
+    dc_val = dc_validation(valid, level, chunk, min_gap, 2 * dc_tokens, dc_pow, seed) if loss_kind == "dc" else []
+
+    def val_dc() -> float:
+        with torch.no_grad():
+            return float(np.mean([float(_dc_song(head, valid[i], items, chunk, device)) for i, items in dc_val]))
+    best, since, start, hist = -math.inf, 0, time.time(), out / "history.jsonl"
     hist.unlink(missing_ok=True)
     raw = validate(lambda x: x, valid, pairs)  # phase 1 baseline: the cached tokens themselves
     if bench:  # the raw tokens on the same benchmark, the line to stay above
@@ -239,8 +310,18 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
     losses: list[float] = []
     reason = "steps"
     for step in range(1, steps + 1):
+        loss = None
+        if loss_kind == "dc":
+            per_song = []
+            for si in rng.choice(len(train), min(songs_per_step, len(train)), replace=False):
+                items = sample_chunk_tokens(train[si], level, chunk, min_gap, dc_tokens, rng, dc_pow)
+                if items:
+                    per_song.append(_dc_song(head, train[si], items, chunk, device))
+            if not per_song:
+                continue
+            loss = torch.stack(per_song).mean()
         zs, labels, fine = [], [], []
-        for si in rng.choice(len(train), min(songs_per_step, len(train)), replace=False):
+        for si in (rng.choice(len(train), min(songs_per_step, len(train)), replace=False) if loss is None else []):
             song = train[si]
             by_chunk: dict[int, list] = {}
             for t0, r, rows in sample_tokens(song, level, chunk, min_gap, per_ref, own, rng):
@@ -254,11 +335,12 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
                     np.full(len(rw), (int(si) * 1000 + r) * 2 + (t0 == min(by_chunk))
                             if is_group[si] is not None and is_group[si][r] else (int(si) * 1000 + r) * 2)
                     for r, rw in items])).to(device))
-        if len(zs) < 2:
-            continue
-        lab, fin = torch.cat(labels), torch.cat(fine)
-        ignore = (lab[:, None] == lab[None]) & (fin[:, None] != fin[None]) if group_local else None
-        loss = supcon(torch.cat(zs), fin if group_local else lab, temp, ignore)
+        if loss is None:
+            if len(zs) < 2:
+                continue
+            lab, fin = torch.cat(labels), torch.cat(fine)
+            ignore = (lab[:, None] == lab[None]) & (fin[:, None] != fin[None]) if group_local else None
+            loss = supcon(torch.cat(zs), fin if group_local else lab, temp, ignore)
         if not torch.isfinite(loss):
             reason = f"non-finite loss at step {step}"
             log(reason)
@@ -274,6 +356,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             head.eval()
             t_val = time.time()
             v = validate(head.embed, valid, pairs)
+            if dc_val:
+                v["val_dc"] = val_dc()
             n_eval += 1
             if bench and (n_eval % bench_every == 0 or step == steps):
                 v.update(benchmark(head.embed, bench, bench_cut, chunk))
@@ -284,8 +368,10 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             with hist.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
             log(json.dumps(rec))
-            if v["far_auc"] > best + plateau_delta:
-                best, since = v["far_auc"], 0
+            # dc: lower is better, and -log makes plateau_delta relative (the loss is ~0.1, not ~1 like an AUC)
+            score = -math.log(max(v["val_dc"], 1e-12)) if dc_val else v["far_auc"]
+            if score > best + plateau_delta:
+                best, since = score, 0
                 torch.save({"cfg": head.cfg, "state": {k: v.cpu() for k, v in head.state_dict().items()},
                             "step": step, "valid": v}, out / "best.pt")
             else:
@@ -301,7 +387,8 @@ def train_head(train: list[Cached], valid: list[Cached], out: str | Path, level:
             t_step = time.time()
     torch.save({"cfg": head.cfg, "state": {k: v.cpu() for k, v in head.state_dict().items()}, "step": step},
                out / "last.pt")
-    summary = {"group_local": group_local, "stopped": reason, "best_far_auc": best, "raw": raw, "level": level, "seed": seed}
+    summary = {"group_local": group_local, "stopped": reason, "loss": loss_kind,
+               ("best_val_dc" if dc_val else "best_far_auc"): math.exp(-best) if dc_val else best, "raw": raw, "level": level, "seed": seed}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return summary
 

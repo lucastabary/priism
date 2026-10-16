@@ -189,3 +189,31 @@ def test_supcon_ignore_drops_pairs():
     a = supcon(z, labels, ignore=None)
     b = supcon(z, labels, ignore=ign)  # token 2 (close to 0) no longer a negative for 0: lower loss
     assert b < a
+
+
+def test_dc_loss_is_zero_for_the_true_partition_and_counts_soft_labels():
+    from priism.lab.registry.head import dc_loss
+
+    y = torch.tensor([[1.0, 0], [1, 0], [0, 1], [0, 1]])
+    w = torch.ones(4)
+    assert float(dc_loss(y.clone(), y, w)) == pytest.approx(0, abs=1e-6)
+    swapped = torch.tensor([[1.0, 0], [0, 1], [1, 0], [0, 1]])
+    assert float(dc_loss(swapped, y, w)) > 0.2
+    # a token shared 50/50: its best embedding sits between the two sources, not on either
+    ys = torch.tensor([[1.0, 0], [0, 1], [0.5, 0.5]])
+    mid = torch.nn.functional.normalize(torch.tensor([[1.0, 0], [0, 1], [1, 1]]), dim=1)
+    side = torch.tensor([[1.0, 0], [0, 1], [1, 0]])
+    assert dc_loss(mid, ys, torch.ones(3)) < dc_loss(side, ys, torch.ones(3))
+
+
+def test_identity_head_trains_with_deep_clustering(tmp_path):
+    rng = np.random.default_rng(9)
+    train = _cached_toys(rng, 6, T=300, d=8, drift=1.0, noise=0.3)
+    valid = _cached_toys(rng, 2, T=300, d=8, drift=1.0, noise=0.3)
+    s = train_head(train, valid, tmp_path, level="track", steps=60, songs_per_step=3, chunk_s=0.8,
+                   min_gap_s=4.0, eval_every=20, dim=8, context=1, plateau=0, loss_kind="dc", dc_tokens=64,
+                   log=lambda *_: None)
+    assert s["stopped"] == "steps" and s["loss"] == "dc"
+    hist = [__import__("json").loads(x) for x in (tmp_path / "history.jsonl").read_text().splitlines()]
+    assert hist[-1]["val_dc"] < hist[1]["val_dc"] * 1.2 and hist[-1]["loss"] < hist[1]["loss"]
+    assert (tmp_path / "best.pt").exists() and "best_val_dc" in s
