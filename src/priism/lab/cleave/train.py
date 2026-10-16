@@ -8,7 +8,10 @@ Every evaluation appends one JSON line to ``history.jsonl`` (flushed) and prints
 - ``z_rank`` / ``target_rank``: effective ranks of Z and of the target patch tokens (criterion C1); ``z_std``,
   the mean per-dimension std of mu across crops (normalised mu hides a collapse to a constant).
 - ``z_use``: validation prediction loss with Z shuffled across songs minus with the true Z (C1: the
-  predictor must need Z, else P and L leak the timbre).
+  predictor must need Z, else P and L leak the timbre); ``z_use_rel`` = z_use / (loss with shuffled Z), the
+  share of the error the true Z removes, comparable across target scales.
+- ``pl_r2_z``: out-of-fold ridge R² from Z to the crop's P/L statistics (mean pitch register, mean loudness),
+  folds by track: Z should not carry what P and L already give.
 - leakage probes on fixed validation views with known random chains (docs/cleave.md 2.9, ``fx_probes``):
   ``fx_r2_z`` (linear Z -> FX parameters, should go to ~0), ``kind_bacc_v`` (V-bar -> instrument kind, should
   stay near ``kind_chance``), with references ``fx_r2_mel`` (the same probe on the plain mean/std log-mel: how
@@ -289,13 +292,19 @@ def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list
     rec: dict = fx_probes(model, batcher, val_songs, fxs, crop, batch, seed) if fxs else {}
     model.eval()
     # identity: Z of crop A vs crop B of each track
-    zs = []
+    zs, plstats = [], []
     for i in range(0, len(pairs), batch):
         part = pairs[i:i + batch]
         waves = [read_crop(val_songs[s], st, x, crop) for s, st, a, b, _ in part for x in (a, b)]
-        patches, _, active, _ = batcher(torch.from_numpy(np.stack(waves)), model, None)
+        patches, plc, active, _ = batcher(torch.from_numpy(np.stack(waves)), model, None)
         mu, _, _, _ = model.encode(patches, active)
         zs.append(mu.float().cpu())
+        frames = plc.reshape(plc.shape[0], -1, model.cfg.pl_dim).float().cpu()
+        sal = frames[..., : model.cfg.pl_dim - 2]
+        register = (sal * torch.arange(sal.shape[-1])).sum(-1) / sal.sum(-1).clamp_min(1e-6)
+        played = sal.sum(-1) > 0
+        plstats.append(torch.stack([(register * played).sum(1) / played.sum(1).clamp_min(1),
+                                    frames[..., -2].mean(1)], -1))
     if zs:
         raw = torch.cat(zs)
         rec["z_std"] = float(raw.std(0).mean())  # a constant mu has a high rank once normalised, not a std
@@ -309,6 +318,8 @@ def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list
         rec["id_auc_kind"] = _auc(sim[eye], sim[~eye & same_kind])
         rec["z_rank"] = effective_rank(torch.cat([za, zb]))
         rec["n_tracks"] = len(pairs)
+        groups = np.repeat(np.arange(len(pairs)), 2)
+        rec["pl_r2_z"] = ridge_r2(raw.numpy(), torch.cat(plstats).numpy(), groups, seed=seed)
     # uncertainty signals per k, prediction loss, Z usage
     rng = np.random.default_rng(seed)
     sig = {"sigma": [], "pred_var": [], "pred_err": []}
@@ -333,6 +344,7 @@ def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list
     if pred:
         rec["val_pred"] = float(np.mean(pred))
         rec["z_use"] = float(np.mean(pred_shuf) - np.mean(pred))
+        rec["z_use_rel"] = rec["z_use"] / max(float(np.mean(pred_shuf)), 1e-12)
         rec["target_rank"] = effective_rank(torch.cat(targets))
     model.train()
     return rec
@@ -462,7 +474,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
         torch.save(ckpt, tmp)
         os.replace(tmp, out / name)  # a kill while saving leaves the previous checkpoint whole
 
-    keys = ("loss", "pred", "kl", "vic_var", "ctx", "zgap", "inv", "swap", "vinv")
+    keys = ("loss", "pred", "kl", "vic_var", "ctx", "zgap", "base", "inv", "swap", "vinv")
     if state:
         key, rec0, best, since = state["key"], state["rec0"], state["best"], state["since"]
         run = {**dict.fromkeys(keys, 0.0), **state["run"]}

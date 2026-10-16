@@ -393,3 +393,36 @@ def test_d2v_targets_average_normalised_layers():
     pmask[:, 1] = True
     out = model(patches, pl, active, pmask, w_var=0.0, w_cov=0.0)
     assert torch.isfinite(out["loss"]) and out["targets"].shape[-1] == cfg.dim
+
+
+def test_residual_mode_trains_a_pl_only_predictor_and_standardises_the_rest():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, target="mel",
+                       residual=True)
+    model = Cleave(cfg)
+    B, C = 2, 3
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 1] = True
+    out = model(patches, pl, active, pmask)
+    assert float(out["base"]) > 0 and torch.isfinite(out["loss"])
+    t = out["targets"]
+    assert abs(float(t.reshape(-1, t.shape[-1]).std(0).mean()) - 1) < 0.05  # standardised residual
+    model.zero_grad()
+    out["loss"].backward()
+    assert model.base.out.weight.grad.abs().sum() > 0
+
+
+def test_cpu_smoke_run_residual_reports_relative_z_use(tmp_path):
+    from priism.lab.cleave.train import train
+
+    _songs(tmp_path / "train")
+    _songs(tmp_path / "valid", n_songs=2)
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8, target="mel",
+                       residual=True)
+    train([str(tmp_path / "train")], [str(tmp_path / "valid")], tmp_path / "run", cfg, steps=20, batch=2,
+          crop_chunks=4, warmup=5, eval_every=20, eval_k=1, per_k=4, id_chunks=2, min_gap_s=2.0, workers=0,
+          device="cpu", plateau=0)
+    hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
+    assert "z_use_rel" in hist[-1] and "pl_r2_z" in hist[-1] and hist[-1]["base"] > 0

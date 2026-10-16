@@ -44,6 +44,12 @@ chunk's patches) before averaging. Several layers and a per-layer norm keep the 
 one layer's noise or collapsing onto a few directions, without VICReg; the targets have unit variance per
 channel, so beta keeps its intended scale.
 
+Residual prediction (``residual``, docs/cleave-diagnostic.md section 8): a second predictor g reads only
+position and P/L (its Z input is held at zero) and learns the targets on its own loss; the Z predictor learns
+the residual t - g (g detached), standardised per dimension over the batch. Everything P/L explain is gone
+from what Z must predict, and the residual has unit variance, so Z's gain is no longer ~0.003 of MSE that
+any KL outbids. ``pred`` is then the MSE on the standardised residual: ~1 means Z adds nothing.
+
 V-bar read from the stem's own neighbours carries its timbre, a free channel (no KL) that let the
 predictor stop using Z. Three counters, each optional: the swap reads V-bar from another stem of the same
 song under chain A (``pair`` with an other view), so V-bar only helps there by carrying the chain;
@@ -87,6 +93,7 @@ class CleaveConfig:
     ctx_layers: int = 0  # 0: no context branch (checkpoints before 3.2)
     target: str = "ema"  # "ema": EMA encoder tokens (I-JEPA); "mel": log-mel patches (MAE); "d2v": data2vec
     d2v_k: int = 2  # d2v: layers averaged (the last ones)
+    residual: bool = False  # Z predicts what a P/L-only predictor leaves (standardised)
 
     @property
     def n_tcol(self) -> int:
@@ -269,6 +276,7 @@ class Cleave(nn.Module):
         self.pred = Predictor(cfg)
         self.vbar = VBar(cfg) if cfg.v_dim else None
         self.ctx = ContextPredictor(cfg) if cfg.ctx_layers else None
+        self.base = Predictor(cfg) if cfg.residual else None  # g(P, L): fed a zero Z
         self.target = copy.deepcopy(self.local)
         self.target.requires_grad_(False)
 
@@ -334,8 +342,15 @@ class Cleave(nn.Module):
         vt = v[tb, tc] if v is not None else None
         if vt is not None and self.training and v_drop > 0:  # Z alone must predict these items
             vt = vt * (torch.rand(B, device=vt.device) >= v_drop).to(vt.dtype)[tb, None]
-        pred, logv = self.pred(z[tb], pl[tb, tc], vt)
         m = pmask[tb, tc]
+        loss_base = torch.zeros((), device=patches.device)
+        if self.base is not None:
+            zero = torch.zeros_like(z[tb])
+            g, _ = self.base(zero, pl[tb, tc], torch.zeros_like(vt) if vt is not None else None)
+            loss_base = ((g.float() - t) ** 2).mean(-1)[m].mean()
+            r = t - g.detach().float()
+            t = r / r[m].std(0, keepdim=True).clamp_min(1e-4)  # the Z predictor's target from here on
+        pred, logv = self.pred(z[tb], pl[tb, tc], vt)
         err = ((pred.float() - t) ** 2).mean(-1)
         logv = logv.float()
         loss_pred = err[m].mean()
@@ -343,7 +358,7 @@ class Cleave(nn.Module):
         kl = (0.5 * (mu.float() ** 2 + logvar.float().exp() - 1 - logvar.float())).sum(-1).mean()
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
-        loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss
+        loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss + loss_base
         zgap = torch.zeros((), device=loss.device)
         if w_zuse > 0 and B > 1:  # the Z of the next crop of the batch: another song (or another stem)
             ps, _ = self.pred(z.roll(1, 0)[tb], pl[tb, tc], vt)
@@ -395,6 +410,6 @@ class Cleave(nn.Module):
         var_song = torch.zeros(B, device=mf.device).index_add_(0, tb, (logv.detach().exp() * mf).sum(1)) / n_t
         sigma_song = torch.exp(0.5 * logvar.detach().float()).mean(-1)
         return {"loss": loss, "pred": loss_pred.detach(), "nll": loss_nll.detach(), "kl": kl.detach(),
-                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "ctx": ctx.detach(), "zgap": zgap.detach(), "inv": inv.detach(),
+                "vic_var": v_loss.detach(), "vic_cov": c_loss.detach(), "ctx": ctx.detach(), "zgap": zgap.detach(), "base": loss_base.detach(), "inv": inv.detach(),
                 "swap": swap.detach(), "vinv": vinv.detach(), "mu": mu.detach(),
                 "sigma": sigma_song, "pred_var": var_song, "pred_err": err_song, "targets": t}
