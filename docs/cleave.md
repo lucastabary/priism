@@ -337,6 +337,42 @@ flushés ligne par ligne.
 mesure de l'étape 2. **Prérequis** : MoisesDB dev2 n'existe que sur le volume du pod, il faut le copier là
 où le test tourne.
 
+### 3.1 La mesure et le probe sur Chav (16 octobre)
+
+**Mesure** (150 pas, batch 8, crops de 71 s, `data/reg-train-fx`) : la mémoire GPU de pointe est de
+1,4 Go. Le pool RAM supprime l'attente des données : 0,52 s/pas sans pool (7 workers), 0,20 s/pas avec
+`--pool-gb 3` (7 workers) et 0,21 s/pas avec 4 workers. On garde **4 workers + pool 3 Go**, à peine plus
+lent et plus sûr pour les 12 Go de RAM de Chav. 20 000 pas prennent alors environ 70 min de calcul.
+
+**Probe `cleave-p1a-s0b`** (phase 1a, 200 morceaux, sans pool) : arrêté au plateau au pas 3400, après
+31 min. **C1 échoue.**
+
+| pas | pred | KL | z_std | z_use | id_auc_kind | pred_err k=1 → 4 |
+|---|---|---|---|---|---|---|
+| 0 | | | 0,049 | −0,001 | 0,713 | 1,43 → 1,46 |
+| 200 | 0,39 | 22 | 0,167 | 0,002 | 0,794 | 0,075 → 0,179 (ρ 0,69) |
+| 400 | 0,27 | 12 | 0,191 | **0,012** | **0,844** | 0,29 → 0,45 |
+| 1000 | 0,99 | 0,27 | 0,044 | 0,0003 | 0,786 | 1,00 → 1,00 |
+| 3400 | 0,98 | 0,05 | 0,003 | ≈ 0 | 0,694 | 0,98 → 0,99 |
+
+- Le meilleur checkpoint (pas 400) bat l'init aléatoire (0,844 contre 0,713) et dépasse même le plancher
+  MFCC (0,816). Puis tout se défait : l'erreur de prédiction **remonte** jusqu'à ≈ 1, la valeur obtenue
+  en prédisant la moyenne d'une cible normalisée. Z ne sert plus (z_use ≈ 0), le KL le ramène au prior
+  (σ ≈ 0,99, z_std 0,003), et l'AUC finit sous l'init aléatoire.
+- La hausse de pred_err avec k (ρ = 0,69) n'est vue qu'aux pas 200 et 400. Ensuite l'erreur est plate
+  à ≈ 1 pour tout k. Ce n'est donc pas encore un résultat sur σ.
+- **Diagnostic** : les tokens de patch de l'encodeur local ne reçoivent aucun gradient de prédiction.
+  Le predictor ne lit que Z, donc seuls le VICReg (variance ≥ 1, décorrélation) et le chemin CLS → Z les
+  façonnent. Les cibles sont l'EMA de cet encodeur : elles dérivent vers des features de haut rang
+  (target_rank 240 sur 256, presque isotropes) que ni Z ni P/L ne prédisent. Le predictor renonce et Z
+  s'effondre. Au début, les cibles sont proches de l'init aléatoire, qui donne des features lisses et
+  prévisibles : c'est la fenêtre du pas 400.
+- **Options** (`cleave-train --ema 1`, `--w-var`, `--w-cov`) :
+  - `--ema 1` fige les cibles à l'init aléatoire (une projection aléatoire, comme BEST-RQ) ;
+  - `--w-var 0 --w-cov 0` garde l'EMA sans VICReg, pour tester si c'est le VICReg qui pousse la dérive.
+
+  Deux probes, mêmes réglages que s0b, avec le pool.
+
 ---
 
 ## 4. Ce qui vient ensuite
