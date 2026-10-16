@@ -418,7 +418,15 @@ def _registry_separate_eval(args: argparse.Namespace) -> None:
         own=args.own, min_share=args.min_share, temp=args.temp, smooth=args.smooth, pool=args.pool,
         window_s=args.window, margin_s=args.margin, min_ref_db=args.min_ref_db, seed=args.seed,
         decoder=_decoder(args), oracle_k=args.oracle_k, oracle_bin=not args.no_oracle_bin,
-        max_seconds=args.max_seconds)
+        max_seconds=args.max_seconds, cascade=_cascade(args))
+
+
+def _cascade(args: argparse.Namespace):
+    if not args.cascade:
+        return None
+    from .registry.cascade import parse_steps
+
+    return parse_steps(args.cascade, args.cascade_merge, args.msst_path, args.device)
 
 
 def _train_decoder(args: argparse.Namespace) -> None:
@@ -1091,6 +1099,11 @@ def main(argv: list[str] | None = None) -> None:
                    help="also score registry_k: each stem cut into as many sources as it holds references")
     p.add_argument("--no-oracle-bin", action="store_true", help="skip the bin-resolution oracle (saves time)")
     p.add_argument("--max-seconds", type=float, help="score only the centred excerpt of this length of each song")
+    p.add_argument("--cascade", nargs="*", default=[], metavar="STEM=TYPE:CONFIG:CKPT",
+                   help="also score cascades: SW stem STEM split by an MSST checkpoint (type mdx23c, bs_roformer or "
+                        "mel_band_roformer), e.g. drums=mdx23c:models/drumsep.yaml:models/drumsep.ckpt")
+    p.add_argument("--cascade-merge", nargs="*", default=[], metavar="NAME=A+B",
+                   help="a cascade variant with these outputs summed (e.g. cymbals=ride+crash)")
     registry_sep_args(p, many_cuts=True)
     p.set_defaults(func=_registry_separate_eval)
 

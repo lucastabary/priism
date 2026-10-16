@@ -127,7 +127,7 @@ def picked(S: np.ndarray, SI: np.ndarray, choice: np.ndarray) -> tuple[np.ndarra
 def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: float = 0.5,
                   min_share: float = 0.02, temp: float = 0.0, smooth: int = 1, pool: int = 4,
                   window_s: float = 8.0, margin_s: float = 1.0, min_ref_db: float = -40.0, seed: int = 0,
-                  decoder=None, oracle_k: bool = False, oracle_bin: bool = True) -> dict:
+                  decoder=None, oracle_k: bool = False, oracle_bin: bool = True, cascade=None) -> dict:
     """Every system on one ``features.Song`` -> one JSON-ready record (per reference scores, per system)."""
     t0 = time.time()
     refs = song.sources
@@ -177,6 +177,38 @@ def evaluate_song(model: StemModel, song, proj, head=None, cuts=(0.3,), own: flo
         systems[name + "_m2o"] = picked(S, SI, match(S, False))
         n_out[name] = n
     secs["render_registry"] = time.time() - t
+
+    if cascade:  # pretrained specialists on some SW stems (cascade.py); the other stems whole, or split by Facet
+        from .cascade import split
+
+        t = time.time()
+        parts = {}  # SW stem index -> {merged: (names, waveforms)}
+        for st in cascade:
+            s = an.stems.index(st.stem)
+            parts[s] = split(st, model.istft(an.spec[s], an.length), model.sample_rate)
+        secs["cascade_models"] = time.time() - t
+        t = time.time()
+        for merged in sorted({v for p in parts.values() for v in p}):
+            base = "cascade_merged" if merged else "cascade"
+
+            def outputs(facet_cut=None):
+                for s in range(len(an.stems)):
+                    if s in parts:
+                        yield from parts[s][merged if merged in parts[s] else False][1]
+                    elif facet_cut is None:
+                        yield model.istft(an.spec[s], an.length)
+                    else:
+                        yield from render(model, an.spec[s], weights[facet_cut][s][0], pool, an.length, smooth)
+
+            for name, cut in [(base, None)] + [(base + "_facet" + ("" if len(cuts) == 1 else f"@{c:g}"), c)
+                                               for c in cuts]:
+                d, e, n = stats(outputs(cut))
+                S, SI = score_matrix(rr, d, e)
+                systems[name] = picked(S, SI, match(S, True))
+                systems[name + "_m2o"] = picked(S, SI, match(S, False))
+                n_out[name] = n
+        secs["render_cascade"] = time.time() - t
+        del parts
 
     if oracle_k:  # the registry told how many sources each stem holds (its references): count vs embedding
         t = time.time()
@@ -333,6 +365,15 @@ def summarize(records: list[dict]) -> dict:
               and not a.endswith("_m2o") and "registry" + a[len("decoder"):] in systems]
     pairs += [("oracle_bin", a) for a in systems if a.startswith("decoder") and not a.endswith("_m2o")]
     pairs += [("oracle_bin", "oracle")] if {"oracle_bin", "oracle"} <= set(systems) else []
+    # cascades against SW and against Facet at the same cut (option B's go/no-go: cascade_facet - registry)
+    for a in systems:
+        if a.startswith("cascade") and not a.endswith("_m2o"):
+            reg = "registry" + (a[a.index("@"):] if "@" in a else "")
+            pairs += [(a, "sw")] + ([(a, reg)] if reg in systems else [])
+            if a.startswith("cascade_facet") or a.startswith("cascade_merged_facet"):
+                plain = a.split("_facet")[0]
+                pairs += [(a, plain)] if plain in systems else []
+    pairs += [("cascade_merged", "cascade")] if {"cascade_merged", "cascade"} <= set(systems) else []
     comp = {}
     for a, b in pairs:
         for subset in ("all", "shared"):
@@ -411,7 +452,10 @@ def run(model: StemModel, spec: str, out: str | Path, proj, head=None, songs: li
     records = [json.loads(x) for x in lines.read_text().splitlines() if x.strip()]
     summary = summarize(records)
     summary["args"] = {"spec": spec, "head": head is not None, "decoder": decoder is not None,
-                       "max_seconds": max_seconds, **kw}
+                       "max_seconds": max_seconds, **{k: v for k, v in kw.items() if k != "cascade"},
+                       "cascade": [{"stem": st.stem, "model": getattr(st.splitter, "name", type(st.splitter).__name__),
+                                    "stems": list(st.splitter.stems), "merge": st.merge}
+                                   for st in kw.get("cascade") or []]}
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=float))
     log(table(summary))
     return summary
