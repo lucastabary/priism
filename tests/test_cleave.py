@@ -375,3 +375,21 @@ def test_zuse_hinge_reports_the_gap_and_trains_on_it():
     b = model(patches, pl, active, pmask, beta=0.0)
     assert float(b["zgap"]) == 0 and torch.isfinite(a["zgap"])
     assert abs(float(a["loss"] - b["loss"]) - (10.0 - float(a["zgap"]))) < 1e-3
+
+
+def test_d2v_targets_average_normalised_layers():
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=3, global_layers=1, pred_layers=1, z_dim=8, target="d2v",
+                       d2v_k=2)
+    model = Cleave(cfg)
+    B, C = 2, 3
+    patches = torch.randn(B, C, cfg.n_patches, cfg.patch_t * cfg.patch_f)
+    t = model.target.layer_targets(patches[0], 2)
+    assert t.shape == (C, cfg.n_patches, cfg.dim)
+    # the mean of two per-channel standardised layers: zero mean per channel and chunk
+    assert t.mean(1).abs().max() < 1e-4
+    pl = torch.rand(B, C, cfg.n_tcol, cfg.patch_t * cfg.pl_dim)
+    active = torch.ones(B, C, dtype=torch.bool)
+    pmask = torch.zeros(B, C, cfg.n_patches, dtype=torch.bool)
+    pmask[:, 1] = True
+    out = model(patches, pl, active, pmask, w_var=0.0, w_cov=0.0)
+    assert torch.isfinite(out["loss"]) and out["targets"].shape[-1] == cfg.dim

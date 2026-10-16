@@ -38,6 +38,12 @@ predictor that just breaks on a wrong Z, without Z learning anything. It is a co
 CPC / InfoNCE): Z learns whatever tells the songs of the batch apart, timbre or recording, so it has to be
 measured, not assumed.
 
+data2vec targets (``target`` = "d2v", Baevski et al. 2022, the usual recipe for audio): the mean of the EMA
+encoder's last ``d2v_k`` layer outputs on the unmasked chunk, each instance-normalised (per channel over the
+chunk's patches) before averaging. Several layers and a per-layer norm keep the targets from drifting to
+one layer's noise or collapsing onto a few directions, without VICReg; the targets have unit variance per
+channel, so beta keeps its intended scale.
+
 V-bar read from the stem's own neighbours carries its timbre, a free channel (no KL) that let the
 predictor stop using Z. Three counters, each optional: the swap reads V-bar from another stem of the same
 song under chain A (``pair`` with an other view), so V-bar only helps there by carrying the chain;
@@ -79,7 +85,8 @@ class CleaveConfig:
     v_dim: int = 0  # 0: no V-bar (phase 1a checkpoints)
     v_window: int = 2  # V-bar of chunk c reads chunks c-w..c+w except c
     ctx_layers: int = 0  # 0: no context branch (checkpoints before 3.2)
-    target: str = "ema"  # "ema": EMA encoder tokens (I-JEPA); "mel": normalised log-mel patches (MAE)
+    target: str = "ema"  # "ema": EMA encoder tokens (I-JEPA); "mel": log-mel patches (MAE); "d2v": data2vec
+    d2v_k: int = 2  # d2v: layers averaged (the last ones)
 
     @property
     def n_tcol(self) -> int:
@@ -141,6 +148,17 @@ class LocalEncoder(nn.Module):
         x = torch.cat([self.cls.expand(x.shape[0], -1, -1), x + self.pos], 1)
         x = self.norm(self.body(x))
         return x[:, 0], x[:, 1:]
+
+    def layer_targets(self, patches: torch.Tensor, k: int) -> torch.Tensor:
+        """data2vec targets: (N, P, in) -> (N, P, d), mean of the last ``k`` layer outputs (patch tokens),
+        each instance-normalised over the P patches of its chunk."""
+        x = torch.cat([self.cls.expand(patches.shape[0], -1, -1), self.embed(patches) + self.pos], 1)
+        outs = []
+        for layer in self.body.layers:
+            x = layer(x)
+            outs.append(x[:, 1:])
+        tops = [F.instance_norm(o.float().transpose(1, 2)).transpose(1, 2) for o in outs[-k:]]
+        return torch.stack(tops).mean(0)
 
 
 class GlobalEncoder(nn.Module):
@@ -307,10 +325,12 @@ class Cleave(nn.Module):
         tb, tc = tgt.nonzero(as_tuple=True)
         with torch.no_grad():
             if self.cfg.target == "mel":
-                t = patches[tb, tc].float()
+                t = F.layer_norm(patches[tb, tc].float(), (patches.shape[-1],))
+            elif self.cfg.target == "d2v":  # already normalised per channel, layer by layer
+                t = self.target.layer_targets(patches[tb, tc], self.cfg.d2v_k)
             else:
                 _, t = self.target(patches[tb, tc])
-            t = F.layer_norm(t.float(), (t.shape[-1],))
+                t = F.layer_norm(t.float(), (t.shape[-1],))
         vt = v[tb, tc] if v is not None else None
         if vt is not None and self.training and v_drop > 0:  # Z alone must predict these items
             vt = vt * (torch.rand(B, device=vt.device) >= v_drop).to(vt.dtype)[tb, None]

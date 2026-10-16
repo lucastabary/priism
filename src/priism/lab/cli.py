@@ -468,7 +468,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
 
     cfg = CleaveConfig(dim=args.dim, local_layers=args.layers, global_layers=args.layers, pred_layers=args.layers,
                        z_dim=args.z_dim, v_dim=args.v_dim, v_window=args.v_window, ctx_layers=args.ctx_layers,
-                       target=args.target)
+                       target=args.target, d2v_k=args.d2v_k)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
           lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
@@ -974,8 +974,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--w-zuse", type=float, default=0.0,
                    help="weight of the z_use hinge: max(0, margin - (loss with a wrong Z - loss with the true Z))")
     p.add_argument("--zuse-margin", type=float, default=0.1)
-    p.add_argument("--target", choices=["ema", "mel"], default="ema",
-                   help="prediction targets: EMA encoder tokens (I-JEPA) or normalised log-mel patches (MAE)")
+    p.add_argument("--target", choices=["ema", "mel", "d2v"], default="ema",
+                   help="prediction targets: EMA encoder tokens (I-JEPA), normalised log-mel patches (MAE), or "
+                        "data2vec (mean of the last --d2v-k EMA layers, instance-normalised)")
+    p.add_argument("--d2v-k", type=int, default=2, help="d2v: last layers averaged")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
     p.add_argument("--z-dim", type=int, default=64)
