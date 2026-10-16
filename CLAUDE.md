@@ -121,6 +121,13 @@ installs `tray.ps1`, a notification-area icon started at logon. The icon keeps W
 on a Windows drive he picks, capped (default 50 GB). Over the cap the running job stops and only `clean`
 jobs start (`jobs submit --cpu clean <paths>`; submit options go before the kind). `jobs status` shows the per-folder sizes, so we decide
 what to delete. Tray and agent talk only through `<cache>/.agent/{control,status,stats}.json`.
+Priorities keep the GPU busy: `jobs submit --priority background ...` queues a long training that runs only
+when nothing else is pending; a `normal` job (the default, also for specs without a priority) preempts it.
+The agent then stops it (SIGTERM to its leader, `--term-grace` 60 s to save, then its group), syncs its log
+and results, puts it back in `queue/pending/` (`jobs status` shows `preempted`, `bg`, the count), runs the
+normal jobs and restarts it. Its command must resume: `cleave-train --resume` continues from `OUT/last.pt`
+(full state, saved at each evaluation and on SIGTERM; rerunning a finished run is a no-op). Its
+`--max-minutes` counts all its runs; `jobs cancel` works on it while preempted.
 
 ### Lab philosophy: never leave a long run unwatched
 

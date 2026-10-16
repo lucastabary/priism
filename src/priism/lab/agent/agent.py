@@ -1,6 +1,8 @@
 """The agent loop on the GPU machine (``priism-lab agent``): one job at a time, watched, synced.
 
-Each pass: heartbeat, finish syncing any job that ended while offline, then take the oldest pending job.
+Each pass: heartbeat, finish syncing any job that ended while offline, then take the pending job of highest
+priority, the oldest among equals (``jobs.PRIORITIES``: a long ``background`` training waits in the queue and
+runs whenever nothing else does, so the machine is never idle).
 A job starts whatever the GPU is doing: the owner decides, with the tray's pause, when his own use comes
 first (``wait_for_free_gpu`` brings back the old rule, a GPU job waiting for low utilisation and memory).
 
@@ -9,7 +11,13 @@ unwatched (same checks as ``pod/guard.py``):
 - a ``cancel/<id>`` marker in the store: stop;
 - no new log output for ``stall_minutes``: stop;
 - a GPU job whose GPU stays at 0 % for ``gpu_idle_minutes``: stop;
-- ``max_minutes`` reached: stop.
+- ``max_minutes`` reached: stop;
+- a valid pending job of higher priority (checked at each sync): the job is preempted. It is stopped like any
+  other (SIGTERM to its leader first, so a training saves its checkpoint, then ``term_grace`` seconds, then
+  SIGTERM and SIGKILL to its group), not frozen: a SIGSTOP pause would keep its GPU memory. It goes back to
+  ``queue/pending/`` (log and results synced first, status ``preempted``) and runs again, resuming from its
+  checkpoint, once nothing of higher priority is pending. Each run has fresh stall and GPU-idle clocks;
+  ``max_minutes`` counts the active minutes of all runs (``Job.active_minutes``).
 Every ``sync_every`` seconds it uploads the log and a status (heartbeat, last line). A failed upload only
 marks the agent offline: the job goes on, and the outcome is kept in ``.agent/finished/`` until it has
 been uploaded (results included), so a lost connection loses nothing.
@@ -38,7 +46,7 @@ import sys
 import time
 from pathlib import Path
 
-from .jobs import Job, JobRejected, commands
+from .jobs import PRIORITIES, Job, JobRejected, commands, validate
 from .store import StoreError
 
 
@@ -74,25 +82,52 @@ def _signal_group(proc, sig) -> None:
         pass
 
 
-def _kill(proc) -> None:
-    """SIGTERM to the job's whole process group, SIGKILL 30 s later if it is still there."""
+def _wait(alive, seconds: float) -> bool:
+    """Poll ``alive()`` until it is False (True) or ``seconds`` have passed (False)."""
+    end = time.time() + seconds
+    while alive():
+        if time.time() >= end:
+            return False
+        time.sleep(0.2)
+    return True
+
+
+def _kill(proc, grace: float = 30.0) -> None:
+    """Stop a job: SIGTERM to its leader alone first (a training saves its checkpoint, then stops its own data
+    workers), up to ``grace`` seconds; then SIGTERM to the whole process group, and SIGKILL 30 s later to
+    whatever is left (also the leftovers of a leader that did exit)."""
     if hasattr(os, "killpg"):
         try:
             pg = os.getpgid(proc.pid)
         except OSError:
             return
         _signal_group(proc, signal.SIGCONT)  # a frozen job only acts on SIGTERM once it runs again
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        _wait(lambda: proc.poll() is None, grace)
+
+        def group_alive() -> bool:
+            if proc.poll() is None:
+                return True
+            try:
+                os.killpg(pg, 0)
+                return True
+            except OSError:
+                return False
+
+        for sig, wait in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 10.0)):
+            if not group_alive():
+                return
             try:
                 os.killpg(pg, sig)
             except OSError:
                 return
-            for _ in range(30):
-                if proc.poll() is not None:
-                    return
-                time.sleep(1)
+            _wait(group_alive, wait)
     else:  # Windows (tests only)
         proc.terminate()
+        proc.wait()
 
 
 def _log_grew(logf: Path, known: int) -> tuple[int, bool]:
@@ -114,7 +149,7 @@ class Agent:
                  bin_dir: str | Path | None = None, gpu=gpu_stats, tick: float = 10.0, sync_every: float = 30.0,
                  wait_for_free_gpu: bool = False,
                  free_util: int = 10, free_mem_mib: int = 1500, free_samples: int = 3, free_gap_s: float = 5.0,
-                 quota_gb: float = 50.0, disk_every: float = 60.0, log=print):
+                 quota_gb: float = 50.0, disk_every: float = 60.0, term_grace: float = 60.0, log=print):
         self.store, self.workdir, self.repo = store, Path(workdir), Path(repo)
         self.name = name or socket.gethostname()
         self.bin_dir = Path(bin_dir or Path(sys.executable).parent)
@@ -130,6 +165,8 @@ class Agent:
         self._disk: tuple[float, int, dict[str, int]] = (-1e18, 0, {})  # (measured at, bytes, top entries)
         self._work: dict[str, float] = {}  # job seconds per epoch hour, not yet added to stats.json
         self._job_start: float | None = None
+        self.term_grace = term_grace
+        self._specs: dict[str, tuple[int, bool]] = {}  # pending key -> (rank, valid): specs never change
 
     # --------------------------------------------------------------------------------------- store access
 
@@ -326,8 +363,19 @@ class Agent:
         if not pending:
             self.heartbeat("idle")
             return False
-        key = pending[0]
-        job = Job.from_json(self.store.get(key) or b"{}")
+        try:
+            key = max(pending, key=lambda k: self._spec(k)[0])  # max keeps the first, oldest, among equals
+        except (StoreError, OSError):
+            self.online = False
+            self._local("offline")
+            return False
+        data = self.store.get(key)
+        if data is None:  # cancelled since the listing
+            return True
+        try:
+            job = Job.from_json(data)
+        except (ValueError, TypeError) as e:
+            job = Job(kind=f"unreadable spec ({e})")
         job.id = job.id or Path(key).stem
         try:
             cmds = commands(job, self.repo, self.bin_dir)
@@ -348,6 +396,33 @@ class Agent:
         self.store.delete(key)
         self.run_job(job, cmds)
         return True
+
+    def _spec(self, key: str) -> tuple[int, bool]:
+        """(priority rank, valid) of a pending job, read once per key; an unreadable spec ranks normal (it is
+        then rejected when picked)."""
+        if key not in self._specs:
+            data = self.store.get(key)
+            if data is None:  # gone meanwhile (cancelled, taken)
+                return -1, False
+            try:
+                job = Job.from_json(data)
+                validate(job)
+                self._specs[key] = (job.rank, True)
+            except (ValueError, TypeError):
+                self._specs[key] = (PRIORITIES["normal"], False)
+        return self._specs[key]
+
+    def _preempting(self, job: Job) -> str | None:
+        """The id of a valid pending job of higher priority than ``job``, if any."""
+        if job.rank >= max(PRIORITIES.values()):
+            return None
+        pending = self.store.list("queue/pending/")
+        self._specs = {k: v for k, v in self._specs.items() if k in pending}
+        for key in pending:
+            rank, valid = self._spec(key)
+            if valid and rank > job.rank:
+                return Path(key).stem
+        return None
 
     def gpu_free(self) -> bool:
         util, mem, n, gap = self.free
@@ -449,7 +524,7 @@ class Agent:
                 pass
             elif now - max(log_grew, resumed) > job.stall_minutes * 60:
                 stop = f"no log output for {job.stall_minutes:g} min"
-            elif now - start - paused_s > job.max_minutes * 60:
+            elif job.active_minutes * 60 + now - start - paused_s > job.max_minutes * 60:
                 stop = f"time cap {job.max_minutes:g} min"
             elif job.kind != "clean" and self.cache_full():
                 stop = f"cache full ({self.disk()[0] / 1e9:.1f} GB, limit {self.quota():g} GB)"
@@ -468,6 +543,8 @@ class Agent:
                 try:
                     if self.store.get(f"cancel/{job.id}") is not None:
                         stop = "cancelled"
+                    elif not frozen and (other := self._preempting(job)):
+                        stop = f"preempted by {other}"
                 except (StoreError, OSError):
                     self.online = False
             if stop:
@@ -475,7 +552,10 @@ class Agent:
                 with logf.open("a") as f:
                     f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {stop}, stopping\n")
                 self.log(f"{job.id}: {stop}")
-                _kill(proc)
+                _kill(proc, self.term_grace)
+                if stop.startswith("preempted"):  # back to the queue: its next run carries on the counts
+                    job.preemptions += 1
+                    job.active_minutes += (time.time() - start - paused_s) / 60
                 return -1, stop
             time.sleep(self.tick)
 
@@ -483,7 +563,8 @@ class Agent:
         data = logf.read_bytes()[-2_000_000:] if logf.exists() else b""
         lines = data.decode(errors="replace").strip().splitlines()
         st = {"state": state, "time": time.time(), "minutes": (time.time() - start) / 60,
-              "last_line": lines[-1][-300:] if lines else "", "agent": self.name, **(extra or {})}
+              "last_line": lines[-1][-300:] if lines else "", "agent": self.name, "priority": job.priority,
+              "preemptions": job.preemptions, "active_minutes": round(job.active_minutes, 2), **(extra or {})}
         ok = self._try(self.store.put, f"logs/{job.id}.log", data)
         ok = ok and self._try(self.store.put, f"status/{job.id}.json", json.dumps(st).encode())
         if state in ("running", "paused"):
@@ -508,9 +589,18 @@ class Agent:
         """Upload every finished job's log, results and outcome; keep the record until all of it went up."""
         for f in sorted((self.state_dir / "finished").glob("*.json")):
             rec = json.loads(f.read_text())
-            job = Job(**rec["job"])
-            ok = self._sync(job, self.workdir / "logs" / f"{job.id}.log", rec["start"],
-                            "done" if rec["exit_code"] == 0 and rec["reason"] == "ok" else "failed",
+            job = Job.from_dict(rec["job"])
+            state = "done" if rec["exit_code"] == 0 and rec["reason"] == "ok" else "failed"
+            if rec["reason"].startswith("preempted"):
+                try:
+                    cancelled = self.store.get(f"cancel/{job.id}") is not None
+                except (StoreError, OSError):
+                    self.online = False
+                    return
+                state = "failed" if cancelled else "preempted"
+                if cancelled:
+                    rec["reason"] = "cancelled while preempted"
+            ok = self._sync(job, self.workdir / "logs" / f"{job.id}.log", rec["start"], state,
                             {"exit_code": rec["exit_code"], "reason": rec["reason"], "synced": False})
             if not ok:
                 return
@@ -524,8 +614,8 @@ class Agent:
                         key = f"results/{job.id}/{p.relative_to(self.workdir).as_posix()}"
                         if not self._try(self.store.upload_file, key, p):
                             return
-            state = "done" if rec["exit_code"] == 0 and rec["reason"] == "ok" else "failed"
-            if not (self._try(self.store.put, f"queue/{state}/{job.id}.json", job.to_json())
+            queue = "pending" if state == "preempted" else state  # preempted: waits for its next run
+            if not (self._try(self.store.put, f"queue/{queue}/{job.id}.json", job.to_json())
                     and self._try(self.store.delete, f"queue/running/{job.id}.json")
                     and self._try(self.store.delete, f"cancel/{job.id}")
                     and self._sync(job, self.workdir / "logs" / f"{job.id}.log", rec["start"], state,
@@ -538,7 +628,7 @@ class Agent:
         if not cur.exists():
             return
         d = json.loads(cur.read_text())
-        job = Job(**d["job"])
+        job = Job.from_dict(d["job"])
         proc = _Pid(d["pid"])
         logf = self.workdir / "logs" / f"{job.id}.log"
         if proc.poll() is None:

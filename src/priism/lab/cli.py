@@ -469,7 +469,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
           fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
           w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau, pool_gb=args.pool_gb,
           pool_reuse=args.pool_reuse, ema=args.ema, w_var=args.w_var, w_cov=args.w_cov,
-          w_ctx=args.w_ctx)
+          w_ctx=args.w_ctx, resume=args.resume)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -500,7 +500,8 @@ def _store(args: argparse.Namespace):
 def _agent(args: argparse.Namespace) -> None:
     from .agent.agent import Agent
 
-    Agent(_store(args), args.workdir, args.repo, name=args.name, quota_gb=args.quota_gb).run_forever(args.poll)
+    Agent(_store(args), args.workdir, args.repo, name=args.name, quota_gb=args.quota_gb,
+          term_grace=args.term_grace).run_forever(args.poll)
 
 
 def _jobs(args: argparse.Namespace) -> None:
@@ -526,12 +527,19 @@ def _jobs(args: argparse.Namespace) -> None:
         sp.add_argument("--env", action="append", default=list(args.env), help="a PRIISM_*=value setting (repeat)")
         sp.add_argument("--inputs", action="append", default=[],
                         help="a folder of the store's inputs/ fetched into the work folder first (repeat)")
+        sp.add_argument("--priority", choices=sorted(jobs.PRIORITIES), default="normal",
+                        help="background: runs only when nothing else is pending, stopped and resumed around "
+                             "the other jobs (its command must resume, e.g. cleave-train --resume)")
         sp.add_argument("kind")
         sp.add_argument("job_args", nargs=argparse.REMAINDER)
         o = sp.parse_args(([args.id] if args.id else []) + args.rest)
         env = dict(kv.split("=", 1) for kv in o.env)
         job = jobs.Job(kind=o.kind, args=o.job_args, gpu=not (o.cpu or args.cpu), max_minutes=o.max_minutes,
-                       stall_minutes=o.stall_minutes, results=o.results, env=env, inputs=o.inputs)
+                       stall_minutes=o.stall_minutes, results=o.results, env=env, inputs=o.inputs,
+                       priority=o.priority)
+        if o.priority == "background" and "--resume" not in o.job_args:
+            print("warning: a background job restarts after each preemption; without --resume it starts over",
+                  file=sys.stderr)
         print(jobs.submit(store, job))
     elif args.action == "status":
         st = jobs.status(store)
@@ -549,7 +557,9 @@ def _jobs(args: argparse.Namespace) -> None:
                 print(f"  cache {d.get('used_gb')} / {d.get('quota_gb')} GB: {top}")
         for j in st["jobs"]:
             age = f", updated {(time.time() - j['time']) / 60:.1f} min ago" if j.get("time") else ""
-            print(f"{j['state']:8} {j['id']}  {j.get('reason') or ''}{age}  {j.get('last_line') or ''}")
+            prio = "bg" if j.get("priority") == "background" else ""
+            pre = f" x{j['preemptions']}" if j.get("preemptions") else ""
+            print(f"{j['state']:9} {prio + pre:6} {j['id']}  {j.get('reason') or ''}{age}  {j.get('last_line') or ''}")
     elif args.action == "log":
         while True:
             print(jobs.log(store, args.id, args.tail))
@@ -982,6 +992,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--measure", type=int, default=0, help="only time this many steps and extrapolate")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--resume", action="store_true",
+                   help="continue from OUT/last.pt if it exists (else start): rerunning a stopped job resumes it")
     p.set_defaults(func=_cleave_train)
 
     p = sub.add_parser("cleave-probe", help="FX leakage probes of a Cleave checkpoint (Z -> FX, V-bar -> kind)")
@@ -1092,6 +1104,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--poll", type=float, default=60.0, help="seconds between looks at an empty queue")
     p.add_argument("--quota-gb", type=float, default=50.0,
                    help="size cap of the work folder (the owner's tray setting in .agent/control.json wins)")
+    p.add_argument("--term-grace", type=float, default=60.0,
+                   help="seconds a stopped or preempted job's leader gets after SIGTERM (to save) before its group is killed")
     p.set_defaults(func=_agent)
 
     p = sub.add_parser("jobs", help="remote job queue: submit, status, log, cancel, pull")

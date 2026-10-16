@@ -20,12 +20,20 @@ Every evaluation appends one JSON line to ``history.jsonl`` (flushed) and prints
 Guards: non-finite loss, Z collapse (effective rank below ``min_z_rank`` after ``warmup``), a plateau of
 ``id_auc_kind`` (or ``id_auc`` when kinds are unknown), ``max_minutes``. ``--measure`` only times steps
 (data wait vs compute, peak GPU memory) and extrapolates, the step before any long run.
+
+Preemptible: ``last.pt`` holds the whole training state (model with its EMA target, optimizer, step, best
+score and plateau counter, RNG, training minutes), written at every evaluation and on SIGTERM (the step in
+progress ends, then it saves and stops). With ``resume`` the same command continues from it, so rerunning it
+after a stop is idempotent (a finished run stays finished). ``max_minutes`` counts the minutes of all segments.
+The data stream of a resumed segment is drawn afresh (sampler seeded by the step): not bit-exact.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
+import signal
 import time
 from pathlib import Path
 
@@ -340,12 +348,16 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
           v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1,
           pool_gb: float = 0.0, pool_reuse: int = 32, w_var: float = 1.0, w_cov: float = 0.04,
-          w_ctx: float = 1.0) -> dict:
+          w_ctx: float = 1.0, resume: bool = False) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
+    state = _resume_state(out, cfg, device) if resume and not measure else None
+    if state and state.get("done"):
+        _log(json.dumps({"resume": f"already finished ({state['done']}), nothing to do"}))
+        return json.loads((out / "summary.json").read_text()) if (out / "summary.json").exists() else {}
     train_songs = find_songs(train_roots, limit_frac, seed)
     val_songs = find_songs(valid_roots)
     if not train_songs or not val_songs:
@@ -354,18 +366,31 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     model = Cleave(cfg).to(device)
     batcher = Batcher(cfg, device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.05)
+    start = 0
+    if state:
+        model.load_state_dict(state["model"])
+        opt.load_state_dict(state["opt"])
+        rng.bit_generator.state = state["np_rng"]
+        torch.set_rng_state(state["torch_rng"])
+        if state.get("cuda_rng") is not None and device.startswith("cuda"):
+            torch.cuda.set_rng_state(state["cuda_rng"], torch.device(device))
+        start = state["step"]
+        seed_data = int(np.random.SeedSequence([seed, start]).generate_state(1)[0])
+        _log(json.dumps({"resume": f"from {out / 'last.pt'} at step {start}"}))
+    else:
+        seed_data = seed
     pool = {}
     if pool_gb > 0:  # RAM song pools, one per worker (data.py): the budget sets the songs per pool
         pools = max(1, workers)
         mean_bytes = float(np.mean([song_bytes(s) for s in train_songs]))
         pool_songs = max(1, int(pool_gb * 1e9 / (pools * mean_bytes)))
         sampler = PoolBatchSampler(len(train_songs), batch, parse_schedule(k_schedule), pools, pool_songs,
-                                   pool_reuse, mono_frac, seed)
+                                   pool_reuse, mono_frac, seed_data)
         dataset = MixDataset(train_songs, n_samples, pair_frac, other_view, cache_songs=pool_songs + 1)
         loader_args = {"batch_sampler": sampler}
         pool = {"pool_songs": pool_songs, "pool_reuse": pool_reuse, "pool_gb_est": pools * (pool_songs + 1) * mean_bytes / 1e9}
     else:
-        sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed)
+        sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed_data)
         dataset = MixDataset(train_songs, n_samples, pair_frac, other_view)
         loader_args = {"batch_size": batch, "sampler": sampler}
     loader = torch.utils.data.DataLoader(dataset, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0,
@@ -426,17 +451,37 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
         _log(json.dumps(rec))
         return rec
 
-    def save(name: str, step: int) -> None:
-        torch.save({"cfg": cfg.to_dict(), "model": model.state_dict(), "step": step}, out / name)
+    def save(name: str, step: int, full: bool = False, done: str | None = None) -> None:
+        ckpt = {"cfg": cfg.to_dict(), "model": model.state_dict(), "step": step}
+        if full:  # everything --resume needs (see the module docstring)
+            ckpt.update(opt=opt.state_dict(), best=best, since=since, key=key, rec0=rec0, run=run,
+                        minutes=(time.time() - t0) / 60, np_rng=rng.bit_generator.state, torch_rng=torch.get_rng_state(),
+                        cuda_rng=torch.cuda.get_rng_state(torch.device(device)) if device.startswith("cuda") else None,
+                        done=done)
+        tmp = out / f"{name}.tmp"
+        torch.save(ckpt, tmp)
+        os.replace(tmp, out / name)  # a kill while saving leaves the previous checkpoint whole
 
-    rec0 = record(0, {"note": "random init"})
-    key = "id_auc_kind" if not math.isnan(rec0.get("id_auc_kind", float("nan"))) else "id_auc"
-    best, since, reason = -1.0, 0, f"steps: reached {steps}"
-    t0 = time.time()
     keys = ("loss", "pred", "kl", "vic_var", "ctx", "inv", "swap", "vinv")
-    run = {**dict.fromkeys(keys, 0.0), "n": 0}
-    step = 0
-    for batch_ in loader:
+    if state:
+        key, rec0, best, since = state["key"], state["rec0"], state["best"], state["since"]
+        run = {**dict.fromkeys(keys, 0.0), **state["run"]}
+        t0 = time.time() - state["minutes"] * 60
+    else:
+        rec0 = record(0, {"note": "random init"})
+        key = "id_auc_kind" if not math.isnan(rec0.get("id_auc_kind", float("nan"))) else "id_auc"
+        rec0 = {key: rec0.get(key)}
+        best, since = -1.0, 0
+        t0 = time.time()
+        run = {**dict.fromkeys(keys, 0.0), "n": 0}
+    reason = f"steps: reached {steps}"
+    terminated = []
+    try:  # SIGTERM (the agent preempting or stopping the job): end the step, save last.pt, stop
+        old_term = signal.signal(signal.SIGTERM, lambda *_: terminated.append(1))
+    except ValueError:  # not the main thread
+        old_term = None
+    step = sampler.step = start
+    for batch_ in loader if start < steps else []:
         step += 1
         sampler.step = step
         o = step_fn(batch_, step)
@@ -452,30 +497,50 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
             extra.update({"kmax": sampler.kmax(), "lr": lr_at(step), "minutes": (time.time() - t0) / 60})
             run = {**dict.fromkeys(keys, 0.0), "n": 0}
             rec = record(step, extra)
-            save("last.pt", step)
             score = rec.get(key, float("nan"))
             if score > best + plateau_delta:
                 best, since = score, 0
                 save("best.pt", step)
             else:
                 since += 1
+            save("last.pt", step, full=True)
             if step > warmup and rec.get("z_rank", 99.0) < min_z_rank:
                 reason = f"collapse: Z effective rank {rec['z_rank']:.2f} < {min_z_rank} at step {step}"
                 break
             if plateau and since >= plateau:
                 reason = f"plateau: no {key} gain of {plateau_delta} in {plateau} evaluations (step {step})"
                 break
+        if terminated:
+            reason = f"terminated (SIGTERM) at step {step}, resumable"
+            break
         if step >= steps:
             break
         if (time.time() - t0) / 60 > max_minutes:
             reason = f"max_minutes: {max_minutes} reached at step {step}"
             break
+    if old_term is not None:
+        signal.signal(signal.SIGTERM, old_term)
+    if not reason.startswith("non-finite"):  # NaN weights never replace the last good checkpoint
+        save("last.pt", step, full=True, done=None if terminated else reason)
     hist.close()
     summary = {"stop": reason, "step": step, "best_" + key: best, "random_init_" + key: rec0.get(key),
                "minutes": (time.time() - t0) / 60, **meta}
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     _log(json.dumps(summary))
     return summary
+
+
+def _resume_state(out: Path, cfg: CleaveConfig, device: str) -> dict | None:
+    """The full state in ``out/last.pt`` for ``--resume``, or None to start fresh (no checkpoint yet)."""
+    path = out / "last.pt"
+    if not path.exists():
+        return None
+    state = torch.load(path, map_location=device, weights_only=False)
+    if "opt" not in state:
+        raise SystemExit(f"{path} was saved before --resume existed (no optimizer state): use a new --out")
+    if CleaveConfig(**state["cfg"]) != cfg:
+        raise SystemExit(f"{path} has another model config than this command: use a new --out")
+    return state
 
 
 def _measure(loader, step_fn, n_steps: int, device: str, n_samples: int, batch: int, out: Path) -> dict:
