@@ -408,6 +408,10 @@ pas, parce que la prédiction depuis le contexte suffit à éviter le collapse. 
 **`ctxnv`** (`--ctx-layers 2 --w-var 0 --w-cov 0`, seeds 0 et 1), avec les mêmes critères. `ctx-s1` n'a
 pas été lancé.
 
+**Résultat de `ctxnv-s0`** (annulé au pas 800) : le collapse de novic (`target_rank` 70 → 27, `z_rank` 4).
+La seed 1 n'a pas été lancée. La suite est décidée dans [`cleave-diagnostic.md`](cleave-diagnostic.md) :
+on arrête les probes de la phase 1.
+
 ---
 
 ## 4. Ce qui vient ensuite
