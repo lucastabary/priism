@@ -321,3 +321,39 @@ de 0,71 à 0,76, à 0,25 s par pas.
 - **Go** : DC − Facet ≥ +0,5 dB en SDR moyen par morceau sur test-20 (moyenne des 3 seeds), avec un IC
   bootstrap qui exclut 0. **Stop** si le gain est sous +0,2 dB, ou si l'IC contient 0 : on n'ajuste pas la
   recette.
+
+---
+
+## 8. Les bras du diagnostic de Cleave sur Chav (16 octobre, soir)
+
+Le modèle est petit (dim 128, 2 couches, z_dim 32), entraîné 1200 pas sur `reg-train-fx` et validé sur
+MoisesDB dev2 (les 133 paires de 3.1). **Un seul seed : les seeds 1 et 2 sont en file de fond.** Toutes les
+valeurs sont au pas 1200, avec le maximum entre parenthèses quand il est ailleurs.
+
+| Bras | id_auc_kind | z_use_rel | KL (nats) | Lecture |
+|---|---|---|---|---|
+| frozen, β 10⁻³ | 0,755 (0,816) | 0,019 | 4 | le collapse de référence |
+| frozen, β 0 | 0,779 (0,827) | 0,022 | 44 | Z stocke de l'info, sans gain d'identité ici (0,866 sur les stems NI du laptop) |
+| mel, β 10⁻³ | 0,834 (0,846) | 0,000 | 2,6 | cibles stables, Z ignoré |
+| mel, β 0 | 0,837 (0,854) | 0,004 | 48 | Z porte de l'info, mais le predictor s'en sert à peine |
+| mel, β 0, hinge z_use | 0,864 | 0,056 (forcé) | 44 | monte encore |
+| d2v + ctx, β 10⁻³ | 0,837 (0,860) | 0,018 | 6 | |
+| **d2v + ctx, β 0** | **0,885**, monte encore | **0,053**, monte | 55 | le meilleur |
+| résidu mel, β 10⁻³ | 0,873 | 0,000 | 2,3 | AUC sans usage de Z : le predictor du résidu échoue (≈ 1) |
+| résidu d2v, β 10⁻³ | 0,830 | 0,000 | 1,2 | idem |
+
+**Ce que ça suggère** (un seul seed, à confirmer) :
+- **β = 0 est nécessaire** pour que Z porte de l'information (KL de 44 à 55 nats, contre 1 à 6). Mais ce
+  n'est pas suffisant : le predictor doit aussi avoir une raison de le lire.
+- **La meilleure combinaison est data2vec + branche de contexte + β = 0** : z_use_rel monte de 0 à 5 %, et
+  `id_auc_kind` de 0,73 à 0,885, encore en hausse au pas 1200. Elle reste **sous la barre des MFCC (0,939)**.
+- **Le résidu échoue tel quel.** Le predictor du résidu reste à ≈ 1 : Z n'explique rien du résidu au
+  pas 1200. g(P, L) n'a pas fini d'apprendre (perte de 0,86 à 0,37), et le KL à β = 10⁻³ écrase Z. Il
+  faudrait le retester à β = 0.
+- **`id_auc_kind` ne suffit pas comme diagnostic.** Le résidu mel monte à 0,873 avec un Z que le predictor
+  n'utilise pas : l'AUC vient ici de ce que le VICReg et le KL façonnent, pas de l'objectif de prédiction.
+- **La sonde de fuite Z → statistiques de P/L** est déjà à R² 0,72 à l'init, et reste entre 0,6 et 0,8 :
+  Z porte le registre et la loudness moyens partout. Elle ne discrimine pas les bras.
+
+**La suite, si les seeds 1 et 2 confirment :** un run plus long du bras d2v + ctx + β = 0, au même petit
+format, pour voir s'il dépasse 0,939. On ne passe au grand modèle que s'il la dépasse.
