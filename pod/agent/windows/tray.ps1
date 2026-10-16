@@ -9,8 +9,10 @@
 #   30 days and in all (<cache>\.agent\stats.json: job seconds per hour, pauses excluded);
 # - quiet mode, for the night: the agent duty-cycles the running job (2 s running, 3 s frozen by default,
 #   about 40 % of the power, quieter fans). The Quiet mode menu picks Auto (the quiet hours, 22:00 to 08:00
-#   by default, editable), Always or Never; the icon turns dark blue while a job runs quietly. The tray also
-#   writes this PC's UTC offset (utc_offset_min), so the agent's quiet hours follow Windows' clock;
+#   by default, editable), Always or Never; the icon turns dark blue while a job runs quietly. By default the
+#   agent lengthens the pauses while the GPU is above 60 C (quiet_temp_c) and shortens them below; the menu
+#   shows the GPU's temperature and power. The tray also writes this PC's UTC offset (utc_offset_min), so
+#   the agent's quiet hours follow Windows' clock;
 # - keeps the PC from going to sleep while a job runs (not while paused or idle);
 # - updates itself: the agent publishes its checkout's tray.ps1 in <cache>\.agent\ (so an `update` job
 #   reaches the tray too); when it differs from the running code and parses, it replaces this file and the
@@ -159,6 +161,7 @@ $ItemWork7 = Add-Item ''
 $ItemWork30 = Add-Item ''
 $ItemWorkAll = Add-Item ''
 [void]$Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$ItemThermal = Add-Item ''
 $ItemCache = Add-Item ''
 $ItemPause = Add-Item 'Pause' $true
 $ItemQuiet = Add-Item 'Quiet mode' $true
@@ -216,7 +219,15 @@ function Update-Tray {
     $quietNow = $s -and $s.quiet -and $age -le 240
     if ($running -and $quietNow) {
         $icon, $title = 'quiet', 'Working quietly'
-        $detail += ' (quiet mode: runs 2 s of every 5)'
+        $pause = if ($s.quiet_pause_s) { ', pauses of {0:N1} s' -f [double]$s.quiet_pause_s } else { '' }
+        $detail += " (quiet mode$pause)"
+    }
+    $last = if ($running -and $s.thermal) { $s.thermal.last } else { $null }
+    $ItemThermal.Visible = [bool]$last
+    if ($last) {
+        $temp = if ($null -ne $last.temp_c) { '{0:N0} C' -f [double]$last.temp_c } else { '? C' }
+        $power = if ($null -ne $last.power_w) { ', {0:N0} W' -f [double]$last.power_w } else { '' }
+        $ItemThermal.Text = "GPU: $temp$power"
     }
     $hours = "$($c.quiet_from) to $($c.quiet_to)"
     $ItemQuiet.Text = switch ($c.quiet) {

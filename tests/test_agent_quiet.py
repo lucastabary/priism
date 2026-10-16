@@ -60,7 +60,7 @@ def test_quiet_is_reported_to_tray_and_laptop(tmp_path):
 @pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="SIGSTOP is POSIX only")
 def test_quiet_duty_cycles_the_job_and_limits_ignore_frozen_time(tmp_path):
     store, agent = make_agent(tmp_path)
-    control(agent, quiet="on", quiet_run_s=0.2, quiet_pause_s=0.3)  # 40 % duty
+    control(agent, quiet="on", quiet_run_s=0.2, quiet_pause_s=0.3, quiet_temp_c=0)  # fixed 40 % duty
     # ~1 s of work, ~2.5 s of wall time: a 1.5 s cap and a 0.3 s stall limit (the frozen parts) would break on a wall clock
     job = Job("phase1", ["probe"], gpu=False, id="q", max_minutes=0.025, stall_minutes=0.005)
     code = "import time\nfor i in range(20):\n    print(i, flush=True); time.sleep(0.05)"

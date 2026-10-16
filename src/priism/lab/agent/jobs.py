@@ -33,7 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 # priism-lab subcommands a remote job may run.
 LAB_COMMANDS = {"gen", "cache-features", "registry-eval", "train-id", "eval-sep", "eval-stems", "cleave-train",
-                "registry-encoders", "registry-domain", "registry-dims", "registry-separate-eval"}
+                "registry-encoders", "registry-domain", "registry-dims", "registry-separate-eval", "gpu-load"}
 SCRIPTS = {"phase1": ("scripts/registry_phase1.sh", {"probe", "full"})}
 KINDS = {"priism-lab", "update", "clean", *SCRIPTS}
 _ENV_KEY = re.compile(r"^PRIISM_[A-Z0-9_]+$")
@@ -65,6 +65,7 @@ class Job:
     priority: str = "normal"
     preemptions: int = 0  # times the agent stopped it for a higher-priority job (set by the agent)
     active_minutes: float = 0.0  # minutes run before its last preemption, counted against max_minutes
+    quiet: str = ""  # "on" / "off" / "auto": quiet mode for this job while the owner's setting is auto
 
     @property
     def rank(self) -> int:
@@ -96,6 +97,8 @@ def _safe_rel(arg: str) -> None:
 def validate(job: Job) -> None:
     if job.kind not in KINDS:
         raise JobRejected(f"unknown kind {job.kind!r} (allowed: {sorted(KINDS)})")
+    if job.quiet not in ("", "auto", "on", "off"):
+        raise JobRejected(f"quiet must be on, off or auto, not {job.quiet!r}")
     if job.priority not in PRIORITIES:
         raise JobRejected(f"unknown priority {job.priority!r} (allowed: {sorted(PRIORITIES)})")
     if not all(isinstance(a, str) for a in job.args):

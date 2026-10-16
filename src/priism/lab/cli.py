@@ -513,6 +513,21 @@ def _agent(args: argparse.Namespace) -> None:
           term_grace=args.term_grace).run_forever(args.poll)
 
 
+def _gpu_load(args: argparse.Namespace) -> None:
+    from .agent.thermal import gpu_load
+
+    gpu_load(args.minutes, args.size, args.device, args.report_every)
+
+
+def _thermal_report(args: argparse.Namespace) -> None:
+    import json
+
+    from .agent.thermal import report
+
+    for row in report(args.files, args.last_minutes):
+        print(json.dumps(row))
+
+
 def _jobs(args: argparse.Namespace) -> None:
     import json
     import time
@@ -539,13 +554,15 @@ def _jobs(args: argparse.Namespace) -> None:
         sp.add_argument("--priority", choices=sorted(jobs.PRIORITIES), default="normal",
                         help="background: runs only when nothing else is pending, stopped and resumed around "
                              "the other jobs (its command must resume, e.g. cleave-train --resume)")
+        sp.add_argument("--quiet", choices=["on", "off", "auto"], default="",
+                        help="quiet mode for this job while the owner's tray says auto (e.g. thermal measurements)")
         sp.add_argument("kind")
         sp.add_argument("job_args", nargs=argparse.REMAINDER)
         o = sp.parse_args(([args.id] if args.id else []) + args.rest)
         env = dict(kv.split("=", 1) for kv in o.env)
         job = jobs.Job(kind=o.kind, args=o.job_args, gpu=not (o.cpu or args.cpu), max_minutes=o.max_minutes,
                        stall_minutes=o.stall_minutes, results=o.results, env=env, inputs=o.inputs,
-                       priority=o.priority)
+                       priority=o.priority, quiet=o.quiet)
         if o.priority == "background" and "--resume" not in o.job_args:
             print("warning: a background job restarts after each preemption; without --resume it starts over",
                   file=sys.stderr)
@@ -556,6 +573,13 @@ def _jobs(args: argparse.Namespace) -> None:
             print(f"agent {name}: {a.get('state')} (job {a.get('job')}), seen {a['age_s'] / 60:.1f} min ago, "
                   f"gpu {a.get('gpu')}, version {a.get('version')}{', PAUSED by its owner' if a.get('paused') else ''}"
                   f"{', QUIET mode (job duty-cycled)' if a.get('quiet') else ''}")
+            th = a.get("thermal")
+            if th:
+                fmt = lambda d: (f"{d.get('temp_c')} C, {d.get('power_w')} W, util {d.get('util')} %")
+                last = th["last"]
+                pause = f", quiet pause {last['pause_s']:g} s ({last.get('mode')})" if last.get("quiet") else ""
+                print(f"  GPU now {fmt(last)}{pause} ({(time.time() - last['time']) / 60:.1f} min ago); "
+                      f"10-min mean {fmt(th['mean_10min'])}")
             if a.get("hardware"):
                 h = a["hardware"]
                 gpus = ", ".join(f"{g['name']} {g['vram_mib'] / 1024:.0f} GB" for g in h.get("gpus", [])) or "no GPU"
@@ -1123,6 +1147,18 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--endpoint", help="S3 endpoint URL (default: $PRIISM_STORE_ENDPOINT)")
         p.add_argument("--region", help="S3 region (default: $PRIISM_STORE_REGION)")
         p.add_argument("--profile", help="AWS profile holding the keys (default: $PRIISM_STORE_PROFILE)")
+
+    p = sub.add_parser("gpu-load", help="keep the GPU busy with matrix products for N minutes (thermal measurements)")
+    p.add_argument("--minutes", type=float, default=10.0, help="wall time, frozen time included")
+    p.add_argument("--size", type=int, default=4096, help="matrix side")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--report-every", type=float, default=10.0, help="seconds between progress lines")
+    p.set_defaults(func=_gpu_load)
+
+    p = sub.add_parser("thermal-report", help="summarise thermal.jsonl files pulled from agent jobs")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--last-minutes", type=float, default=5.0, help="window of the steady-state means")
+    p.set_defaults(func=_thermal_report)
 
     p = sub.add_parser("agent", help="run lab jobs from a remote queue on this GPU machine (pull, offline-safe)")
     store_args(p)

@@ -122,11 +122,19 @@ on a Windows drive he picks, capped (default 50 GB). Over the cap the running jo
 jobs start (`jobs submit --cpu clean <paths>`; submit options go before the kind). `jobs status` shows the per-folder sizes, so we decide
 what to delete. Tray and agent talk only through `<cache>/.agent/{control,status,stats}.json`.
 Quiet mode (his PC is too loud at night): during quiet hours (default 22:00 → 08:00, his local time) the agent
-duty-cycles the running job, 2 s running then 3 s frozen (SIGSTOP/SIGCONT, VRAM kept; ~40 % power), so jobs
-run ~2.5x slower at night. control.json keys: `quiet` (`auto`/`on`/`off`, the tray's Quiet mode menu),
-`quiet_from`/`quiet_to`, `quiet_run_s`/`quiet_pause_s`, `utc_offset_min` (written by the tray: WSL's clock may
-not be in his time zone). Frozen time counts against no limit; his pause wins; preemption still works;
-`jobs status` shows `QUIET mode` on the agent line.
+duty-cycles the running job, 2 s bursts then frozen pauses (SIGSTOP/SIGCONT, VRAM kept), so jobs run slower
+at night. By default the pauses follow a temperature target: longer while the GPU is above `quiet_temp_c`
+(60 °C), shorter once 3 °C below, within 1-20 s; with `quiet_temp_c` 0 or no temperature reading, a fixed 3 s
+(~40 % power). control.json keys: `quiet` (`auto`/`on`/`off`, the tray's Quiet mode menu), `quiet_from`/
+`quiet_to`, `quiet_run_s`, `quiet_pause_s`, `quiet_temp_c`, `quiet_band_c`, `quiet_pause_min_s`/`_max_s`,
+`utc_offset_min` (written by the tray: WSL's clock may not be in his time zone). Frozen time counts against
+no limit; his pause wins; preemption still works. While a job runs the agent samples GPU temperature, power
+and utilisation every 10 s (`.agent/thermal.jsonl`, and `results/<id>/thermal.jsonl` for each job);
+`jobs status` shows `QUIET mode` and the last sample with its 10-min mean. Whether the fans really calm down
+is measured, not assumed, in daytime: `jobs submit --quiet off --max-minutes 20 priism-lab gpu-load --minutes 10`,
+then the same with `--quiet on --max-minutes 30`, `jobs pull` both, `priism-lab thermal-report <the two
+thermal.jsonl>` (temperature/power means, last-5-min steady state, mean pause). A job's `--quiet` applies
+only while his tray says Auto.
 Priorities keep the GPU busy: `jobs submit --priority background ...` queues a long training that runs only
 when nothing else is pending; a `normal` job (the default, also for specs without a priority) preempts it.
 The agent then stops it (SIGTERM to its leader, `--term-grace` 60 s to save, then its group), syncs its log

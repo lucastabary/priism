@@ -15,8 +15,9 @@ PY = sys.executable
 
 def make_agent(tmp_path, store=None, gpu=lambda: (0, 0)):
     store = store or LocalStore(tmp_path / "store")
+    # No quiet hours and no GPU readings unless a test asks for them.
     return store, Agent(store, tmp_path / "work", tmp_path, name="pc", gpu=gpu, tick=0.05, sync_every=0.1,
-                        free_samples=1, quiet_default="off", log=lambda *_: None)  # no quiet hours unless asked
+                        free_samples=1, quiet_default="off", thermal=lambda: None, log=lambda *_: None)
 
 
 def test_allowlist():

@@ -8,5 +8,7 @@ returns.
 - ``store``: the storage behind the queue (S3, or a local folder for tests);
 - ``jobs``: job specs, the allowlist that turns a spec into a command, and the client side (submit,
   status, log, cancel, pull);
-- ``agent``: the loop on the GPU machine (``priism-lab agent``).
+- ``agent``: the loop on the GPU machine (``priism-lab agent``);
+- ``thermal``: GPU temperature/power samples, quiet mode's temperature controller, ``gpu-load`` and
+  ``thermal-report`` (measuring what quiet mode really does to the machine).
 """

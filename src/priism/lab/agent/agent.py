@@ -34,13 +34,22 @@ is decided on our side, from the per-folder sizes in the heartbeat. For the tray
 paused time excluded).
 
 Quiet mode, for a PC that must stay bearable at night: the running job is duty-cycled, ``quiet_run_s``
-running then ``quiet_pause_s`` frozen (default 2 s / 3 s, about 40 % of the power, so fewer fans), with the
-same SIGSTOP / SIGCONT as the owner's pause: generic, no job change, its VRAM stays allocated. ``quiet`` in
-control.json is ``auto`` (on from ``quiet_from`` to ``quiet_to``, default 22:00 to 08:00, the PC's local
-time: ``utc_offset_min``, written by the tray, wins over the WSL clock's own time zone), ``on`` or ``off``.
-Frozen time counts for none of the limits (time cap, stall and GPU-idle clocks count active time only) nor
-in stats.json; the owner's pause wins over quiet mode, and a quiet job can still be preempted. status.json
-and the heartbeat carry ``quiet`` (on now or not), so the tray and ``jobs status`` show it.
+(2 s) running then a pause frozen, with the same SIGSTOP / SIGCONT as the owner's pause: generic, no job
+change, its VRAM stays allocated. The pause follows a temperature target: it grows while the GPU is above
+``quiet_temp_c`` (default 60 C) and shrinks once it is ``quiet_band_c`` (3 C) below, within
+``quiet_pause_min_s``..``quiet_pause_max_s`` (1-20 s; ``thermal.next_pause``). With ``quiet_temp_c`` = 0, or
+while the temperature cannot be read, it is the fixed ``quiet_pause_s`` (3 s, about 40 % of the power).
+``quiet`` in control.json is ``auto`` (on from ``quiet_from`` to ``quiet_to``, default 22:00 to 08:00, the
+PC's local time: ``utc_offset_min``, written by the tray, wins over the WSL clock's own time zone), ``on`` or
+``off``; a job's own ``quiet`` setting applies only while the owner leaves it on ``auto``. Frozen time counts
+for none of the limits (time cap, stall and GPU-idle clocks count active time only) nor in stats.json; the
+owner's pause wins over quiet mode, and a quiet job can still be preempted. status.json and the heartbeat
+carry ``quiet`` (on now or not), so the tray and ``jobs status`` show it.
+
+While a job runs, a thread samples the GPU's temperature, power and utilisation every ``thermal_every``
+seconds (``thermal.py``) into ``.agent/thermal.jsonl`` (capped, one rotation) and the job's
+``logs/<id>.thermal.jsonl`` (shipped as ``results/<id>/thermal.jsonl``); status.json and the heartbeat carry
+the last sample and the 10-minute mean, and the quiet pause in use.
 """
 
 from __future__ import annotations
@@ -52,11 +61,14 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from .jobs import PRIORITIES, Job, JobRejected, commands, validate
 from .store import StoreError
+from .thermal import append_jsonl, gpu_thermal, next_pause, summarize
 
 
 def gpu_stats() -> tuple[int, int] | None:
@@ -159,7 +171,7 @@ class Agent:
                  wait_for_free_gpu: bool = False,
                  free_util: int = 10, free_mem_mib: int = 1500, free_samples: int = 3, free_gap_s: float = 5.0,
                  quota_gb: float = 50.0, disk_every: float = 60.0, term_grace: float = 60.0, quiet_default: str = "auto",
-                 log=print):
+                 thermal=gpu_thermal, thermal_every: float = 10.0, log=print):
         self.store, self.workdir, self.repo = store, Path(workdir), Path(repo)
         self.name = name or socket.gethostname()
         self.bin_dir = Path(bin_dir or Path(sys.executable).parent)
@@ -178,6 +190,11 @@ class Agent:
         self.term_grace = term_grace
         self.quiet_default = quiet_default  # when control.json says nothing (tests: "off")
         self._specs: dict[str, tuple[int, bool]] = {}  # pending key -> (rank, valid): specs never change
+        self.thermal, self.thermal_every = thermal, thermal_every
+        self._samples: deque[dict] = deque()  # the last 10 minutes of GPU samples
+        self._quiet_info: tuple[bool, float, str] = (False, 0.0, "")  # (quiet now, pause s, "temp"/"ratio")
+        self._pause: float | None = None  # the temperature controller's pause, per job run
+        self._pause_sample: float | None = None  # time of the sample it last reacted to
 
     # --------------------------------------------------------------------------------------- store access
 
@@ -202,6 +219,7 @@ class Agent:
             {"time": time.time(), "state": state, "job": job, "gpu": g, "version": self._version(),
              "hardware": self.hardware(),
              "paused": self.control()["paused"], "quiet": self.quiet_now(), "quiet_mode": self.control()["quiet"],
+             "thermal": self.thermal_summary(),
              "disk": {"used_gb": round(used / 1e9, 2), "quota_gb": self.quota(),
                       "top_gb": {k: round(v / 1e9, 2) for k, v in top.items()}}}).encode())
 
@@ -271,6 +289,9 @@ class Agent:
                 "quiet": c["quiet"] if c.get("quiet") in ("auto", "on", "off") else self.quiet_default,
                 "quiet_from": str(c.get("quiet_from") or "22:00"), "quiet_to": str(c.get("quiet_to") or "08:00"),
                 "quiet_run_s": num("quiet_run_s", 2.0, 0.1), "quiet_pause_s": num("quiet_pause_s", 3.0, 0.1),
+                "quiet_temp_c": num("quiet_temp_c", 60.0, 0.0), "quiet_band_c": num("quiet_band_c", 3.0, 0.0),
+                "quiet_pause_min_s": num("quiet_pause_min_s", 1.0, 0.1),
+                "quiet_pause_max_s": num("quiet_pause_max_s", 20.0, 0.1),
                 "utc_offset_min": float(off) if isinstance(off, (int, float)) else None}
 
     def quiet_now(self, ctl: dict | None = None, now: float | None = None) -> bool:
@@ -307,7 +328,35 @@ class Agent:
         _write_json(self.state_dir / "status.json", {
             "time": time.time(), "state": state, "job": job,
             "job_start": job_start or (self._job_start if job else None), "name": self.name,
-            "online": self.online, "used_bytes": self.disk()[0], "quota_gb": self.quota(), "quiet": self.quiet_now()})
+            "online": self.online, "used_bytes": self.disk()[0], "quota_gb": self.quota(), "quiet": self.quiet_now(),
+            "quiet_pause_s": round(self._quiet_info[1], 2) if job and self._quiet_info[0] else None,
+            "thermal": self.thermal_summary()})
+
+    def thermal_summary(self) -> dict | None:
+        """The last GPU sample and the means of the last 10 minutes, or None before any sample."""
+        samples = list(self._samples)
+        if not samples:
+            return None
+        return {"last": samples[-1], "mean_10min": summarize(samples), "n_10min": len(samples)}
+
+    def _sample_thermal(self, job_id: str, stop: threading.Event) -> None:
+        """The sampling thread of one job run (it keeps going while the job is frozen)."""
+        job_log = self.workdir / "logs" / f"{job_id}.thermal.jsonl"
+        while not stop.is_set():
+            try:
+                r = self.thermal()
+                if r:
+                    quiet, pause, mode = self._quiet_info
+                    rec = {"time": round(time.time(), 1), **r, "quiet": quiet,
+                           "pause_s": round(pause, 2) if quiet else 0.0, "mode": mode if quiet else "", "job": job_id}
+                    self._samples.append(rec)
+                    while self._samples and self._samples[0]["time"] < rec["time"] - 600:
+                        self._samples.popleft()
+                    append_jsonl(self.state_dir / "thermal.jsonl", rec, cap_bytes=5_000_000)
+                    append_jsonl(job_log, rec)
+            except Exception as e:  # never let a measurement take the agent down
+                self.log(f"thermal sample failed: {e!r}")
+            stop.wait(self.thermal_every)
 
     def _count_work(self, seconds: float, flush: bool = False) -> None:
         """Add job time to the current hour; ``flush`` writes the pending hours to stats.json."""
@@ -526,6 +575,21 @@ class Agent:
         return 0, "ok"
 
     def watch(self, job: Job, proc, logf: Path, start: float) -> tuple[int, str]:
+        """``_watch`` with the GPU sampling thread running alongside."""
+        stop = threading.Event()
+        self._samples.clear()
+        self._pause = self._pause_sample = None
+        self._quiet_info = (False, 0.0, "")
+        t = threading.Thread(target=self._sample_thermal, args=(job.id, stop), daemon=True)
+        t.start()
+        try:
+            return self._watch(job, proc, logf, start)
+        finally:
+            stop.set()
+            t.join(timeout=5)
+            self._quiet_info = (False, 0.0, "")
+
+    def _watch(self, job: Job, proc, logf: Path, start: float) -> tuple[int, str]:
         """Watch a job until it ends or must stop. The owner's pauses and quiet mode's frozen parts count for
         none of the limits: the time cap, stall and GPU-idle clocks count active time only (the last two also
         restart at each owner resume)."""
@@ -555,13 +619,20 @@ class Agent:
             paused_s += dt - run_dt
             active += run_dt
             self._count_work(run_dt)
-            want = not frozen and hasattr(signal, "SIGSTOP") and self.quiet_now(ctl)
+            qctl = {**ctl, "quiet": job.quiet} if job.quiet and ctl["quiet"] == "auto" else ctl  # owner's on/off wins
+            want = not frozen and hasattr(signal, "SIGSTOP") and self.quiet_now(qctl)
             if frozen:  # the owner's pause wins; quiet mode starts again when he resumes
                 quiet = False
             elif want != quiet:
                 quiet = want
-                msg = (f"quiet mode on (runs {ctl['quiet_run_s']:g} s, frozen {ctl['quiet_pause_s']:g} s)" if quiet
-                       else "quiet mode off")
+                if not quiet:
+                    msg = "quiet mode off"
+                elif ctl["quiet_temp_c"] > 0:
+                    msg = (f"quiet mode on (runs {ctl['quiet_run_s']:g} s, pauses {ctl['quiet_pause_min_s']:g}-"
+                           f"{ctl['quiet_pause_max_s']:g} s to keep the GPU under {ctl['quiet_temp_c']:g} C; "
+                           f"{ctl['quiet_pause_s']:g} s while its temperature is unknown)")
+                else:
+                    msg = f"quiet mode on (runs {ctl['quiet_run_s']:g} s, frozen {ctl['quiet_pause_s']:g} s)"
                 self.log(f"{job.id}: {msg}")
                 with logf.open("a") as f:
                     f.write(f"### agent {time.strftime('%Y-%m-%d %H:%M:%S')}: {msg}\n")
@@ -607,14 +678,18 @@ class Agent:
                     job.preemptions += 1
                     job.active_minutes += (time.time() - start - paused_s) / 60
                 return -1, stop
-            quiet_s = self._quiet_sleep(proc, ctl) if quiet else 0.0
-            if not quiet:
+            if quiet:
+                self._quiet_info = (True, *self._quiet_pause(ctl))
+                quiet_s = self._quiet_sleep(proc, ctl)
+            else:
+                self._quiet_info = (False, 0.0, "")
+                quiet_s = 0.0
                 time.sleep(self.tick)
 
     def _quiet_sleep(self, proc, ctl: dict) -> float:
         """Quiet mode's sleep between checks: whole cycles (frozen, then running) for about ``tick`` seconds,
         ending with the job running, so the GPU is sampled while it works. Returns the seconds it was frozen."""
-        run_s, pause_s = ctl["quiet_run_s"], ctl["quiet_pause_s"]
+        run_s, pause_s = ctl["quiet_run_s"], self._quiet_info[1]
         frozen = 0.0
         for _ in range(max(1, round(self.tick / (run_s + pause_s)))):
             t = time.time()
@@ -626,6 +701,22 @@ class Agent:
             if proc.poll() is not None:
                 break
         return frozen
+
+    def _quiet_pause(self, ctl: dict) -> tuple[float, str]:
+        """(pause, "temp") from the temperature controller, one step per new sample (the temperature lags the
+        power, reacting to the same reading twice would overshoot); (``quiet_pause_s``, "ratio") with no
+        target or no recent reading."""
+        last = self._samples[-1] if self._samples else None
+        fresh = last is not None and last.get("temp_c") is not None and time.time() - last["time"] < 3 * self.thermal_every + 5
+        if ctl["quiet_temp_c"] <= 0 or not fresh:
+            return ctl["quiet_pause_s"], "ratio"
+        if self._pause is None:
+            self._pause = ctl["quiet_pause_s"]
+        if last["time"] != self._pause_sample:
+            self._pause_sample = last["time"]
+            self._pause = next_pause(self._pause, last["temp_c"], ctl["quiet_temp_c"], ctl["quiet_band_c"],
+                                     ctl["quiet_pause_min_s"], ctl["quiet_pause_max_s"])
+        return self._pause, "temp"
 
     def _sync(self, job: Job, logf: Path, start: float, state: str, extra: dict | None = None) -> bool:
         data = logf.read_bytes()[-2_000_000:] if logf.exists() else b""
@@ -671,6 +762,9 @@ class Agent:
             ok = self._sync(job, self.workdir / "logs" / f"{job.id}.log", rec["start"], state,
                             {"exit_code": rec["exit_code"], "reason": rec["reason"], "synced": False})
             if not ok:
+                return
+            therm = self.workdir / "logs" / f"{job.id}.thermal.jsonl"
+            if therm.exists() and not self._try(self.store.upload_file, f"results/{job.id}/thermal.jsonl", therm):
                 return
             for folder in job.results:
                 # A folder ships only what this job wrote (shared folders hold older runs); a file named
