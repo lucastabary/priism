@@ -251,3 +251,54 @@ def test_cpu_smoke_run_with_other_view(tmp_path):
           device="cpu", plateau=0, pair_frac=1.0, fx_tracks=0, other_view=True, v_drop=0.5, w_vinv=1.0)
     hist = [json.loads(line) for line in (tmp_path / "run" / "history.jsonl").read_text().splitlines()]
     assert hist[-1]["swap"] > 0 and hist[-1]["vinv"] > 0
+
+
+def test_pool_mix_picks_crops_where_k_stems_play(tmp_path):
+    from priism.lab.cleave.data import WIN, active_frac, load_song, pool_mix, pool_other
+
+    d = tmp_path / "song" / "sources"
+    d.mkdir(parents=True)
+    tone = _tone(57, 12.0, [1, 0.5])
+    late = np.concatenate([np.zeros(SR * 8, np.float32), tone[: SR * 4]])  # plays only in the last 4 s
+    for i, x in enumerate([tone, late, np.zeros_like(tone)]):
+        sf.write(d / f"{i:02d}_s{i}.flac", x, SR)
+    loaded = load_song(find_songs([str(tmp_path)])[0])
+    assert loaded.stems.dtype == np.float16 and loaded.active.shape == (3, 24)
+    assert loaded.active[0].all() and not loaded.active[1, :16].any() and not loaded.active[2].any()
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        wave, used, start = pool_mix(loaded, 2, rng, SR * 2)
+        assert sorted(used) == [0, 1] and start % WIN == 0 and start >= SR * 8 - 3 * WIN  # >= 1 of 4 windows
+        assert active_frac(loaded.stems[1, start:start + SR * 2].astype(np.float32)) >= 0.25
+    _, used, start = pool_mix(loaded, 3, rng, SR * 2)  # no start has 3 playing stems: the most there are
+    assert sorted(used) == [0, 1]
+    assert pool_other(loaded, [1], start, SR * 2, rng) is not None
+    assert pool_other(loaded, [0, 1], start, SR * 2, rng) is None
+
+
+def test_pool_sampler_keeps_each_batch_in_its_pool():
+    from priism.lab.cleave.data import PoolBatchSampler
+
+    s = PoolBatchSampler(20, batch=4, schedule=parse_schedule("0:1"), pools=3, pool_songs=2, reuse=5, seed=0)
+    it = iter(s)
+    seen = set()
+    for i in range(30):
+        before = [list(p) for p in s.pools]
+        items = next(it)
+        assert len(items) == 4 and all(k == 1 for _, k, _ in items)
+        assert {song for song, _, _ in items} <= set(before[i % 3]) | set(s.pools[i % 3])
+        seen |= {song for song, _, _ in items}
+    assert len(seen) > 6  # songs rotate out after `reuse` crops
+
+
+def test_cpu_smoke_run_with_pool(tmp_path):
+    from priism.lab.cleave.train import train
+
+    _songs(tmp_path / "train")
+    _songs(tmp_path / "valid", n_songs=2)
+    cfg = CleaveConfig(dim=32, heads=2, local_layers=1, global_layers=1, pred_layers=1, z_dim=8)
+    summary = train([str(tmp_path / "train")], [str(tmp_path / "valid")], tmp_path / "run", cfg, steps=20,
+                    batch=2, crop_chunks=4, warmup=5, k_schedule="0:1,10:2", eval_every=20, eval_k=2, per_k=4,
+                    id_chunks=2, min_gap_s=2.0, workers=0, device="cpu", plateau=0, pool_gb=0.01, pool_reuse=4,
+                    pair_frac=0.5, other_view=True)
+    assert summary["step"] == 20 and summary["pool_songs"] >= 1

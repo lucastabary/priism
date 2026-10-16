@@ -33,8 +33,8 @@ import numpy as np
 import torch
 from scipy import stats
 
-from .data import (FX_COLS, KSampler, MixDataset, Song, active_frac, collate, find_songs, load_mix, parse_schedule,
-                   read_crop, render_fx, sample_fx, song_frames_sr)
+from .data import (FX_COLS, KSampler, MixDataset, PoolBatchSampler, Song, active_frac, collate, find_songs, load_mix,
+                   parse_schedule, read_crop, render_fx, sample_fx, song_bytes, song_frames_sr)
 from .features import HOP, SILENCE_DB, SR, Frontend
 from .masks import sample_mask
 from .model import Cleave, CleaveConfig, effective_rank
@@ -338,7 +338,8 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
           w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
-          v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1) -> dict:
+          v_drop: float = 0.0, w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1,
+          pool_gb: float = 0.0, pool_reuse: int = 32) -> dict:
     cfg = cfg or CleaveConfig()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -352,16 +353,28 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
     model = Cleave(cfg).to(device)
     batcher = Batcher(cfg, device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.05)
-    sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed)
-    loader = torch.utils.data.DataLoader(MixDataset(train_songs, n_samples, pair_frac, other_view), batch_size=batch,
-                                         sampler=sampler, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0,
-                                         pin_memory=device.startswith("cuda"))
+    pool = {}
+    if pool_gb > 0:  # RAM song pools, one per worker (data.py): the budget sets the songs per pool
+        pools = max(1, workers)
+        mean_bytes = float(np.mean([song_bytes(s) for s in train_songs]))
+        pool_songs = max(1, int(pool_gb * 1e9 / (pools * mean_bytes)))
+        sampler = PoolBatchSampler(len(train_songs), batch, parse_schedule(k_schedule), pools, pool_songs,
+                                   pool_reuse, mono_frac, seed)
+        dataset = MixDataset(train_songs, n_samples, pair_frac, other_view, cache_songs=pool_songs + 1)
+        loader_args = {"batch_sampler": sampler}
+        pool = {"pool_songs": pool_songs, "pool_reuse": pool_reuse, "pool_gb_est": pools * (pool_songs + 1) * mean_bytes / 1e9}
+    else:
+        sampler = KSampler(len(train_songs), parse_schedule(k_schedule), mono_frac, seed)
+        dataset = MixDataset(train_songs, n_samples, pair_frac, other_view)
+        loader_args = {"batch_size": batch, "sampler": sampler}
+    loader = torch.utils.data.DataLoader(dataset, collate_fn=collate, num_workers=workers, persistent_workers=workers > 0,
+                                         pin_memory=device.startswith("cuda"), **loader_args)
     amp = device.startswith("cuda") and torch.cuda.is_bf16_supported()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     meta = {"train_songs": len(train_songs), "valid_songs": len(val_songs), "params": n_params,
             "crop_s": n_samples / SR, "cfg": cfg.to_dict(), "device": device, "amp_bf16": amp,
             "pair_frac": pair_frac, "w_inv": w_inv, "w_swap": w_swap, "other_view": other_view, "v_drop": v_drop,
-            "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau}
+            "w_vinv": w_vinv, "inv_mode": inv_mode, "inv_tau": inv_tau, **pool}
     _log(json.dumps(meta))
 
     def lr_at(step: int) -> float:

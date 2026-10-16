@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from math import gcd
 from pathlib import Path
@@ -227,31 +228,142 @@ def other_stem(song: Song, used: list[int], start: int, n: int, rng: np.random.G
     return None
 
 
+# RAM song cache. On Chav the data sits on a USB drive read through WSL: random crop reads (plus the silent
+# stems load_mix reads before finding a playing one) bound the step time, not the CPU. A cached song is read
+# once, whole and sequentially, kept mono float16, with an activity index (playing 0.5 s windows per stem)
+# that picks crops where k stems play without reading anything. ``PoolBatchSampler`` keeps each worker on a
+# few songs, so the cache stays small and each song serves many crops.
+
+WIN = SR // 2  # activity window, as in active_frac
+
+
+@dataclass
+class Loaded:
+    stems: np.ndarray  # (n_stems, frames) float16 mono at SR
+    active: np.ndarray  # (n_stems, frames // WIN) bool: the window's RMS is above ACTIVE_DB
+
+    @property
+    def nbytes(self) -> int:
+        return self.stems.nbytes + self.active.nbytes
+
+
+def song_bytes(song: Song) -> int:
+    """RAM of ``load_song(song)``, from the file headers only."""
+    return song_frames_sr(song) * len(song.stems) * 2
+
+
+def load_song(song: Song) -> Loaded:
+    song.info()
+    xs = []
+    for p in song.stems:
+        x, sr = sf.read(str(p), dtype="float32", always_2d=True)
+        x = x.mean(1)
+        if sr != SR:
+            from scipy.signal import resample_poly
+
+            g = gcd(SR, sr)
+            x = resample_poly(x, SR // g, sr // g).astype(np.float32)
+        xs.append(x)
+    n = min(len(x) for x in xs)
+    w = n // WIN
+    active = np.stack([20 * np.log10(np.sqrt(np.mean(x[: w * WIN].reshape(w, WIN) ** 2, 1) + 1e-12)) > ACTIVE_DB
+                       for x in xs])
+    return Loaded(np.stack([x[:n].astype(np.float16) for x in xs]), active)
+
+
+def _cut(loaded: Loaded, s: int, start: int, n: int) -> np.ndarray:
+    x = loaded.stems[s, start:start + n].astype(np.float32)
+    return np.pad(x, (0, n - len(x))) if len(x) < n else x
+
+
+def _crop_frac(loaded: Loaded, start: int, n: int) -> np.ndarray:
+    """Playing share of each stem over the windows of the crop (as active_frac on a window-aligned crop)."""
+    a = loaded.active[:, start // WIN:start // WIN + max(1, n // WIN)]
+    return a.mean(1) if a.shape[1] else np.zeros(len(a))
+
+
+def pool_mix(loaded: Loaded, k: int, rng: np.random.Generator, n: int, min_active: float = 0.25,
+             gain_db: float = 6.0) -> tuple[np.ndarray, list[int], int]:
+    """``load_mix`` on a cached song, without reads: the crop starts (on the 0.5 s grid) where at least k stems
+    play, or where the most stems play when no start has k. Returns the mix, the stems used and the start."""
+    S, W = loaded.active.shape
+    nw = max(1, n // WIN)
+    if W >= nw:
+        c = np.concatenate([np.zeros((S, 1)), np.cumsum(loaded.active, 1)], 1)
+        n_ok = ((c[:, nw:] - c[:, :-nw]) / nw >= min_active).sum(0)  # playing stems per window start
+        good = np.flatnonzero(n_ok >= min(k, n_ok.max()))
+        start = int(rng.choice(good)) * WIN
+    else:
+        start = 0
+    cand = np.flatnonzero(_crop_frac(loaded, start, n) >= min_active)
+    mix = np.zeros(n, np.float32)
+    used = [int(s) for s in rng.permutation(cand)[:k]]
+    for s in used:
+        mix += _cut(loaded, s, start, n) * np.float32(10 ** (rng.uniform(-gain_db, gain_db) / 20))
+    peak = float(np.abs(mix).max())
+    if peak > 0.99:
+        mix *= 0.99 / peak
+    return mix, used, start
+
+
+def pool_other(loaded: Loaded, used: list[int], start: int, n: int, rng: np.random.Generator,
+               min_active: float = 0.25) -> np.ndarray | None:
+    """``other_stem`` on a cached song."""
+    frac = _crop_frac(loaded, start, n)
+    cand = [s for s in np.flatnonzero(frac >= min_active) if int(s) not in used]
+    return _cut(loaded, int(rng.choice(cand)), start, n) if cand else None
+
+
 class MixDataset(torch.utils.data.Dataset):
     """Items are (song index, k, seed) tuples from ``KSampler``; returns a fixed-length mono crop.
 
     A ``pair_frac`` share of the k = 1 crops come as paired FX views: ``wave`` is view A, ``wave_b`` view B,
     with their chains. With ``other_view``, they also carry ``wave_o``, another playing stem through chain A
     (a crop with no other playing stem then stays unpaired). Batch them with ``collate``, which stacks the
-    paired ones apart."""
+    paired ones apart.
 
-    def __init__(self, songs: list[Song], n_samples: int, pair_frac: float = 0.0, other_view: bool = False):
+    With ``cache_songs`` > 0, each process keeps that many whole songs in RAM (least recently used out) and
+    crops them with ``pool_mix``: pair it with ``PoolBatchSampler`` so a worker sees few distinct songs."""
+
+    def __init__(self, songs: list[Song], n_samples: int, pair_frac: float = 0.0, other_view: bool = False,
+                 cache_songs: int = 0):
         self.songs = songs
         self.n = n_samples
         self.pair_frac = pair_frac
         self.other_view = other_view
+        self.cache_songs = cache_songs
+        self._cache: OrderedDict[int, Loaded] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self.songs)
+
+    def loaded(self, i: int) -> Loaded:
+        if i in self._cache:
+            self._cache.move_to_end(i)
+        else:
+            while len(self._cache) >= self.cache_songs:
+                self._cache.popitem(last=False)
+            self._cache[i] = load_song(self.songs[i])
+        return self._cache[i]
 
     def __getitem__(self, item):
         i, k, seed = item
         rng = np.random.default_rng(seed)
         song = self.songs[i]
-        start = int(rng.integers(0, max(1, song_frames_sr(song) - self.n)))  # load_mix's own first draw
-        wave, used = load_mix(song, k, rng, self.n, start)
+        if self.cache_songs:
+            loaded = self.loaded(i)
+            wave, used, start = pool_mix(loaded, k, rng, self.n)
+        else:
+            loaded = None
+            start = int(rng.integers(0, max(1, song_frames_sr(song) - self.n)))  # load_mix's own first draw
+            wave, used = load_mix(song, k, rng, self.n, start)
         if len(used) == 1 and self.pair_frac > 0 and rng.random() < self.pair_frac:
-            other = other_stem(song, used, start, self.n, rng) if self.other_view else None
+            if not self.other_view:
+                other = None
+            elif loaded is not None:
+                other = pool_other(loaded, used, start, self.n, rng)
+            else:
+                other = other_stem(song, used, start, self.n, rng)
             if not self.other_view or other is not None:
                 a, b, fa, fb = paired_views(wave, rng)
                 item = {"wave": torch.from_numpy(a), "k": 1, "wave_b": torch.from_numpy(b),
@@ -299,8 +411,49 @@ class KSampler(torch.utils.data.Sampler):
     def kmax(self) -> int:
         return max(k for s, k in self.schedule if s <= self.step)
 
+    def draw_k(self) -> int:
+        kmax = self.kmax()
+        return 1 if kmax <= 1 or self.rng.random() < self.mono_frac else int(self.rng.integers(2, kmax + 1))
+
     def __iter__(self):
         while True:
-            kmax = self.kmax()
-            k = 1 if kmax <= 1 or self.rng.random() < self.mono_frac else int(self.rng.integers(2, kmax + 1))
+            k = self.draw_k()
             yield int(self.rng.integers(self.n)), k, int(self.rng.integers(2**31))
+
+
+class PoolBatchSampler(KSampler):
+    """Endless batches of (song, k, seed) items for a ``MixDataset`` with a song cache.
+
+    The DataLoader hands batch i to worker i % workers (round robin over its live workers), so batch i draws
+    from pool i % pools: each worker only ever needs the songs of its own pool in RAM. A song leaves its pool
+    after ``reuse`` crops, replaced by a random song that is in no pool when there is one. If the round robin
+    ever differs, a worker just loads a song it lacks: slower, never wrong. Same k schedule as ``KSampler``."""
+
+    def __init__(self, n_songs: int, batch: int, schedule: list[tuple[int, int]], pools: int, pool_songs: int,
+                 reuse: int, mono_frac: float = 0.5, seed: int = 0):
+        super().__init__(n_songs, schedule, mono_frac, seed)
+        self.batch = batch
+        self.reuse = reuse
+        order = self.rng.permutation(n_songs)
+        self.pools = [[int(order[(p * pool_songs + j) % n_songs]) for j in range(pool_songs)] for p in range(pools)]
+        self.left = [[reuse] * pool_songs for _ in range(pools)]
+
+    def _replace(self, p: int, j: int) -> None:
+        busy = {s for pool in self.pools for s in pool}
+        free = [s for s in range(self.n) if s not in busy]
+        self.pools[p][j] = int(self.rng.choice(free)) if free else int(self.rng.integers(self.n))
+        self.left[p][j] = self.reuse
+
+    def __iter__(self):
+        i = 0
+        while True:
+            p = i % len(self.pools)
+            items = []
+            for _ in range(self.batch):
+                j = int(self.rng.integers(len(self.pools[p])))
+                items.append((self.pools[p][j], self.draw_k(), int(self.rng.integers(2**31))))
+                self.left[p][j] -= 1
+                if self.left[p][j] <= 0:
+                    self._replace(p, j)
+            yield items
+            i += 1

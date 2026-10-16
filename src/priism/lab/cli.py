@@ -467,7 +467,8 @@ def _cleave_train(args: argparse.Namespace) -> None:
           workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
           measure=args.measure, pair_frac=args.pair_frac, w_inv=args.w_inv, w_swap=args.w_swap,
           fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
-          w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau)
+          w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau, pool_gb=args.pool_gb,
+          pool_reuse=args.pool_reuse)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -966,6 +967,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--plateau", type=int, default=8, help="stop after this many evaluations without gain (0: never)")
     p.add_argument("--max-minutes", type=float, default=240.0)
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--pool-gb", type=float, default=0.0,
+                   help="RAM for whole training songs held by the workers (0: read every crop from disk)")
+    p.add_argument("--pool-reuse", type=int, default=32, help="crops drawn from a pooled song before it is replaced")
     p.add_argument("--limit-frac", type=float, default=1.0, help="train on this fraction of the songs (scaling)")
     p.add_argument("--measure", type=int, default=0, help="only time this many steps and extrapolate")
     p.add_argument("--seed", type=int, default=0)
