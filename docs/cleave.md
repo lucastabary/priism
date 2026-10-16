@@ -399,6 +399,15 @@ et 1 sur Chav. **Critères, écrits avant le lancement** :
 - Le risque attendu est que la branche de contexte rende les cibles prévisibles par P/L seuls, ce qui
   reproduirait le cas `frozen` (z_use ≈ 0). La parade serait alors de réduire ce qui fuit par P/L (3.3).
 
+**Résultat de `ctx-s0`** (annulé au pas 1800) : **même dérive que s0b.** Au pas 400, id_auc_kind vaut 0,829,
+puis target_rank monte de 70 à 217 et `ctx` remonte de 0,23 à 0,93. Même la branche de contexte ne prédit
+plus ses cibles : val_pred ≈ 0,99 et z_use ≈ 0. Le gradient de prédiction ne suffit donc pas.
+Ce qui reste, c'est le VICReg sur les tokens en ligne. Il impose un écart-type ≥ 1 par dimension et les
+décorrèle, ce qui pousse vers des features isotropes de haut rang, donc imprévisibles. I-JEPA n'en utilise
+pas, parce que la prédiction depuis le contexte suffit à éviter le collapse. Le probe suivant est donc
+**`ctxnv`** (`--ctx-layers 2 --w-var 0 --w-cov 0`, seeds 0 et 1), avec les mêmes critères. `ctx-s1` n'a
+pas été lancé.
+
 ---
 
 ## 4. Ce qui vient ensuite
