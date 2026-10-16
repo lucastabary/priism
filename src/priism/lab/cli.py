@@ -468,7 +468,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
           measure=args.measure, pair_frac=args.pair_frac, w_inv=args.w_inv, w_swap=args.w_swap,
           fx_tracks=args.fx_tracks, fx_chains=args.fx_chains, other_view=args.other_view, v_drop=args.v_drop,
           w_vinv=args.w_vinv, inv_mode=args.inv, inv_tau=args.inv_tau, pool_gb=args.pool_gb,
-          pool_reuse=args.pool_reuse, ema=args.ema, w_var=args.w_var, w_cov=args.w_cov)
+          pool_reuse=args.pool_reuse, ema=args.ema, w_var=args.w_var, w_cov=args.w_cov, resume=args.resume)
 
 
 def _cleave_probe(args: argparse.Namespace) -> None:
@@ -978,6 +978,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--measure", type=int, default=0, help="only time this many steps and extrapolate")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--resume", action="store_true",
+                   help="continue from OUT/last.pt if it exists (else start): rerunning a stopped job resumes it")
     p.set_defaults(func=_cleave_train)
 
     p = sub.add_parser("cleave-probe", help="FX leakage probes of a Cleave checkpoint (Z -> FX, V-bar -> kind)")
