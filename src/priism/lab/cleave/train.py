@@ -68,7 +68,7 @@ class Batcher:
     def __init__(self, cfg: CleaveConfig, device: str):
         self.cfg = cfg
         self.device = device
-        self.front = Frontend(cfg.p_mode).to(device)
+        self.front = Frontend(cfg.p_mode, cfg.l_mode, cfg.onset_mode).to(device)
 
     def __call__(self, wave: torch.Tensor, model: Cleave, rng: np.random.Generator | None):
         logmel, pl, level = self.front(wave.to(self.device))

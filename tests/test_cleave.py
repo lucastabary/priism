@@ -35,6 +35,21 @@ def test_pitch_salience_finds_the_played_note():
     assert level[0, 10:-10].min() > -30
 
 
+def test_loudness_and_onset_modes():
+    """events are 0/1 at note starts, q4 has at most 4 levels, none is zeros; P stays as it was."""
+    rng = np.random.default_rng(0)
+    wave = np.concatenate([_tone(int(m), 0.25, [1, 0.5]) * rng.uniform(0.2, 1) for m in rng.integers(50, 70, 8)])
+    w = torch.from_numpy(wave)[None]
+    _, ref, _ = Frontend()(w)
+    _, ev, _ = Frontend(l_mode="q4", onset_mode="events")(w)
+    _, no, _ = Frontend(l_mode="none", onset_mode="none")(w)
+    assert torch.equal(ev[..., :N_PITCH], ref[..., :N_PITCH])
+    onset = ev[0, :, N_PITCH + 1]
+    assert set(onset.unique().tolist()) <= {0.0, 1.0} and 4 <= onset.sum() <= 16  # about one per note
+    assert len(ev[0, :, N_PITCH].unique()) <= 4
+    assert not no[..., N_PITCH:].any()
+
+
 def test_pitch_modes_name_the_chord_notes():
     """binary keeps salience positions at 1; cancel and bp should find a triad's three notes, not partials."""
     chord = sum(_tone(m, 1.5, [1, 0.6, 0.4, 0.3, 0.2]) for m in (57, 61, 64))  # A3 major

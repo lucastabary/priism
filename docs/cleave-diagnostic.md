@@ -433,3 +433,46 @@ le CPU du laptop : 1,4 s par batch de 4 × 35,7 s, donc environ 2,2 s par pas d'
 **Le bras** : `cpu-arm-d2v-ctx-b0-long-bp`, identique au bras long de 9.1 (même seed, mêmes données, 8000 pas),
 seul P change. **Critère écrit avant** : `id_auc_kind` ≥ 0,951 (bras de 9.1 + 0,01) et `z_rank` ≥ 8 → 2 seeds
 de plus ; sinon P n'était pas le goulot, et le stop de 9.1 tient.
+
+### 9.3 Loudness et onset fuient aussi le timbre (17 octobre)
+
+**Le test** (`scripts/cleave_diagnostic/pl_leak.py`) : une même suite de notes rendue avec 16 patchs du
+générateur, pour 6 types (bass, lead, pluck, stab, pad, arp), 3 suites par type, 8 s par segment, sans FX.
+Pour le segment A d'un patch, on compare le segment B du même patch au segment B des autres patchs : ils
+jouent tous les mêmes notes. AUC 0,5 : le descripteur ne distingue pas les patchs, il ne porte pas de timbre ;
+1,0 : c'est une empreinte de timbre. Statistiques résumées (quantiles, spectre de modulation) et cosinus,
+comme `idbase.py` : c'est une borne basse de ce qu'un predictor entraîné pourrait lire. IC bootstrap sur les
+18 groupes (type × suite).
+
+| Descripteur | AUC | IC 95 % |
+|---|---|---|
+| MFCC moyenne + écart-type (référence timbre) | 0,949 | [0,923 ; 0,971] |
+| **P/L actuel (saillance + loudness + flux)** | **0,920** | [0,884 ; 0,949] |
+| onset (flux spectral) | 0,873 | [0,846 ; 0,897] |
+| pitch saillance top-4 | 0,835 | [0,790 ; 0,876] |
+| loudness par trame | 0,812 | [0,773 ; 0,848] |
+| basic-pitch + loudness + flux (bras de 9.2) | 0,892 | [0,862 ; 0,917] |
+| notes × loudness(t) (pitch flottant) | 0,791 | [0,751 ; 0,826] |
+| notes × vélocité tenue (pitch flottant) | 0,795 | [0,765 ; 0,822] |
+| basic-pitch + onsets 0/1 + loudness 4 niveaux | 0,781 | [0,742 ; 0,819] |
+| loudness lissée, 4 niveaux | 0,723 | [0,694 ; 0,754] |
+| **basic-pitch + onsets 0/1** | **0,713** | [0,674 ; 0,755] |
+| basic-pitch 0/1 seul | 0,699 | [0,661 ; 0,734] |
+| onsets 0/1 (pics du flux, sans hauteur) | 0,569 | [0,525 ; 0,617] |
+
+**Ce que ça montre.** Le P/L actuel reconnaît le patch presque aussi bien que les MFCC (0,920 contre 0,949) :
+le predictor recevait l'empreinte de timbre sans passer par Z, ce qui explique `z_use` ≈ 0 et le plafond de Z
+au niveau des MFCC. Le pire canal est l'onset en flux, puis la saillance et la loudness, qui portent l'attaque
+et l'enveloppe. Mettre la loudness dans le pitch (notes flottantes) ne règle rien (0,79) : la fuite est dans
+la valeur de niveau elle-même (le niveau à l'attaque dépend de l'attaque du patch), pas dans le canal qui la
+porte, et on perdrait le niveau des sources sans hauteur. Ce qui fuit le moins : des événements 0/1 sans
+amplitude. Basic-pitch seul garde 0,70, parce que ses erreurs dépendent du patch ; seul un oracle (les notes
+du générateur) donnerait 0,5.
+
+**Le code.** `--l-mode frame|q4|none` et `--onset-mode flux|events|none` (`cleave/features.py`) ; les canaux
+restent (PL_DIM et les checkpoints ne changent pas).
+
+**Le bras suivant** : `cpu-arm-d2v-ctx-b0-long-min`, P = notes basic-pitch + onsets 0/1, sans loudness, le
+reste identique à 9.1 et 9.2 ; il part sur le CPU quand le bras de 9.2 a fini. **Critère écrit avant**,
+le même : `id_auc_kind` ≥ 0,951 et `z_rank` ≥ 8 → 2 seeds de plus. On compare aussi les trois bras pas à
+pas (même seed, mêmes données) sur `id_auc_kind` et `z_use_rel`.

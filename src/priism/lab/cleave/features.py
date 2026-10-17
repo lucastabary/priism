@@ -33,6 +33,13 @@ SILENCE_DB = -60.0  # frames below this level carry no pitch; chunks never above
 # "bp": Basic Pitch note posteriors above its frame threshold (cleave/pitch_bp.py), the only mode that names
 # the played notes reliably on the synth bench (docs/cleave-diagnostic.md 9.2); runs on CPU with onnxruntime.
 P_MODES = ("salience", "binary", "cancel", "bp")
+# L and onset modes (docs/cleave-diagnostic.md 9.3: on one note sequence rendered with many patches, the
+# frame loudness tells patches apart at AUC 0.81 and the spectral-flux onset at 0.87, against 0.95 for MFCC:
+# both carry the attack and envelope, i.e. timbre). L: "frame" (the original), "q4" (smoothed over ~250 ms,
+# 4 levels: 0.72), "none" (zeros). Onset: "flux" (the original), "events" (0/1 at flux peaks above 0.3, no
+# height: 0.57, near chance), "none". The channels stay, so PL_DIM and checkpoints do not change.
+L_MODES = ("frame", "q4", "none")
+ONSET_MODES = ("flux", "events", "none")
 CANCEL_REL = 0.3
 PL_DIM = N_PITCH + 2  # salience, loudness, onset strength
 
@@ -91,11 +98,12 @@ class Frontend(nn.Module):
 
     T = S // HOP + 1 (centred STFT). The log-mel is scaled so -100..-10 dB maps to about -2..1."""
 
-    def __init__(self, p_mode: str = "salience"):
+    def __init__(self, p_mode: str = "salience", l_mode: str = "frame", onset_mode: str = "flux"):
         super().__init__()
-        if p_mode not in P_MODES:
-            raise ValueError(f"p_mode {p_mode!r} not in {P_MODES}")
-        self.p_mode = p_mode
+        for v, allowed in ((p_mode, P_MODES), (l_mode, L_MODES), (onset_mode, ONSET_MODES)):
+            if v not in allowed:
+                raise ValueError(f"{v!r} not in {allowed}")
+        self.p_mode, self.l_mode, self.onset_mode = p_mode, l_mode, onset_mode
         self.bp = None
         if p_mode == "bp":
             from .pitch_bp import BasicPitch
@@ -117,6 +125,16 @@ class Frontend(nn.Module):
         loud = level_db.clamp(-80, 0) / 80
         flux = F.pad(torch.relu(logmel[:, 1:] - logmel[:, :-1]).mean(-1), (1, 0))
         onset = torch.tanh(4 * flux)
+        if self.onset_mode == "events":
+            prev, nxt = F.pad(onset[:, :-1], (1, 0)), F.pad(onset[:, 1:], (0, 1))
+            onset = ((onset > nxt) & (onset >= prev) & (onset > 0.3)).float()
+        elif self.onset_mode == "none":
+            onset = torch.zeros_like(onset)
+        if self.l_mode == "q4":
+            smooth = F.avg_pool1d(F.pad(loud[:, None], (10, 10), mode="replicate"), 21, 1)[:, 0]
+            loud = torch.bucketize(smooth, torch.tensor([-0.75, -0.5, -0.25], device=loud.device)).float() / 3 - 1
+        elif self.l_mode == "none":
+            loud = torch.zeros_like(loud)
         if self.p_mode == "bp":
             pitch = self._basic_pitch(wave, mag.shape[1])
         elif self.p_mode == "cancel":

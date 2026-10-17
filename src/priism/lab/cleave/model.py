@@ -95,6 +95,8 @@ class CleaveConfig:
     d2v_k: int = 2  # d2v: layers averaged (the last ones)
     residual: bool = False  # Z predicts what a P/L-only predictor leaves (standardised)
     p_mode: str = "salience"  # P factor, features.P_MODES ("salience" for checkpoints before 9.2)
+    l_mode: str = "frame"  # loudness channel, features.L_MODES
+    onset_mode: str = "flux"  # onset channel, features.ONSET_MODES
 
     @property
     def n_tcol(self) -> int:
