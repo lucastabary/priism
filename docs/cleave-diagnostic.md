@@ -487,3 +487,16 @@ utile, Mega 53 couvre le besoin produit). File de Chav, rien d'autre :
 
 Lecture prévue : à pas égal, contre le bras minimal seed 0. Un gain ≥ 0,01 de `id_auc_kind` en fin de run, ou
 `z_rank` ≥ 8, dit quel levier suivre ; sinon le plafond vient de l'objectif, pas du modèle ni du budget.
+
+### 9.5 La file de nuit (17 octobre, 22 h)
+
+Le seed 2 à β 0 a fini en perte non finie au pas 383 (le seed 1 et le seed 0 du laptop non) : avec β 0,
+rien ne borne l'échelle de Z, et le bf16 du GPU déborde (hypothèse). Nouveau : `--free-bits` (Kingma et al.
+2016), chaque dimension de Z garde ce nombre de nats sans coût, β ne s'applique qu'au-delà. Le bras d256 (en
+cours) est à 0,84-0,86 vers le pas 4000, sous le petit modèle (0,91) : la taille n'aide pas pour l'instant.
+Le bras 20 000 pas est annulé (le seed 1 plafonne déjà entre 7000 et 8000 pas : 0,931 → 0,932).
+
+File, tout en P minimal, 8000 pas, petit modèle : `arm-min-fb` (β 10⁻³, free bits 1,5 nat par dimension,
+soit 48 nats libres, l'ordre du KL à β 0), `arm-min-b1e-4` (β 10⁻⁴), `arm-min-s2b` (seed 2 à β 0, relancé).
+Lecture contre le seed 0 à β 0 du laptop, à pas égal : stabilité (pas de NaN), `z_rank` (le free bits doit le
+monter), `id_auc_kind`. Critère du bras minimal inchangé (≥ 0,951 et `z_rank` ≥ 8).
