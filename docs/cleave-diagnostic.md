@@ -476,3 +476,14 @@ restent (PL_DIM et les checkpoints ne changent pas).
 reste identique à 9.1 et 9.2 ; il part sur le CPU quand le bras de 9.2 a fini. **Critère écrit avant**,
 le même : `id_auc_kind` ≥ 0,951 et `z_rank` ≥ 8 → 2 seeds de plus. On compare aussi les trois bras pas à
 pas (même seed, mêmes données) sur `id_auc_kind` et `z_use_rel`.
+
+### 9.4 La suite sur Chav (17 octobre, soir)
+
+Lucas : on reste sur la recherche Cleave avec P = notes basic-pitch + onsets 0/1 (l'option B n'est plus
+utile, Mega 53 couvre le besoin produit). File de Chav, rien d'autre :
+- seeds 1 et 2 du bras minimal (`arm-min-s1`, `arm-min-s2`) ; le seed 0 tourne sur le laptop ;
+- `arm-min-d256` : même bras, modèle dim 256 / 4 couches (la question « taille »), seed 0, 8000 pas ;
+- `arm-min-20k` : petit modèle, 20 000 pas (la question « durée »), seed 0.
+
+Lecture prévue : à pas égal, contre le bras minimal seed 0. Un gain ≥ 0,01 de `id_auc_kind` en fin de run, ou
+`z_rank` ≥ 8, dit quel levier suivre ; sinon le plafond vient de l'objectif, pas du modèle ni du budget.
