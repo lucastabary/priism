@@ -7,7 +7,8 @@ values leaked the harmonic profile that Z should carry.
 
 Basic Pitch reads 22.05 kHz audio with a hop of 256: 86.13 frames per second, the same rate as the front end
 (44.1 kHz, hop 512), so frame i of one is frame i of the other. The model file comes from
-``PRIISM_BASIC_PITCH_ONNX``, else ``data/models/basic-pitch/nmp.onnx``, else an installed ``basic_pitch``.
+``PRIISM_BASIC_PITCH_ONNX``, else the copy in ``cleave/models/`` (Apache 2.0, LICENSE-basic-pitch),
+else ``data/models/basic-pitch/nmp.onnx``, else an installed ``basic_pitch``.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ def model_path() -> Path:
     env = os.environ.get("PRIISM_BASIC_PITCH_ONNX")
     if env:
         return Path(env)
-    local = Path("data/models/basic-pitch/nmp.onnx")
-    if local.exists():
-        return local
+    for local in (Path(__file__).with_name("models") / "nmp.onnx", Path("data/models/basic-pitch/nmp.onnx")):
+        if local.exists():  # the copy shipped with the package (230 KB, Apache 2.0), then a local one
+            return local
     try:
         from basic_pitch import ICASSP_2022_MODEL_PATH
     except ImportError as e:

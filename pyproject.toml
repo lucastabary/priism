@@ -32,7 +32,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 priism = ["engine/profiles/*.toml", "engine/schema/*.json"]
-"priism.lab" = ["profiles/*.toml", "listen.html"]
+"priism.lab" = ["profiles/*.toml", "listen.html", "cleave/models/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
