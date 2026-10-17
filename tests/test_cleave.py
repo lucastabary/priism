@@ -35,6 +35,31 @@ def test_pitch_salience_finds_the_played_note():
     assert level[0, 10:-10].min() > -30
 
 
+def test_pitch_modes_name_the_chord_notes():
+    """binary keeps salience positions at 1; cancel and bp should find a triad's three notes, not partials."""
+    chord = sum(_tone(m, 1.5, [1, 0.6, 0.4, 0.3, 0.2]) for m in (57, 61, 64))  # A3 major
+    wave = torch.from_numpy(chord)[None]
+    _, sal, _ = Frontend("salience")(wave)
+    _, binary, _ = Frontend("binary")(wave)
+    assert torch.equal(binary[..., :N_PITCH] > 0, sal[..., :N_PITCH] > 0)
+    assert set(binary[0, 20:-20, :N_PITCH].unique().tolist()) <= {0.0, 1.0}
+    want = {57 - MIDI_LO, 61 - MIDI_LO, 64 - MIDI_LO}
+    modes = ["cancel"]
+    try:
+        import onnxruntime  # noqa: F401
+
+        from priism.lab.cleave.pitch_bp import model_path
+
+        model_path()
+        modes.append("bp")
+    except (ImportError, FileNotFoundError):
+        pass
+    for mode in modes:
+        _, pl, _ = Frontend(mode)(wave)
+        found = (pl[0, 20:-20, :N_PITCH] > 0).float().mean(0) > 0.5
+        assert want <= set(np.flatnonzero(found.numpy()).tolist()), mode
+
+
 def test_masks_skip_silence_and_keep_something_visible():
     rng = np.random.default_rng(0)
     for _ in range(50):

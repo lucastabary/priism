@@ -94,6 +94,7 @@ class CleaveConfig:
     target: str = "ema"  # "ema": EMA encoder tokens (I-JEPA); "mel": log-mel patches (MAE); "d2v": data2vec
     d2v_k: int = 2  # d2v: layers averaged (the last ones)
     residual: bool = False  # Z predicts what a P/L-only predictor leaves (standardised)
+    p_mode: str = "salience"  # P factor, features.P_MODES ("salience" for checkpoints before 9.2)
 
     @property
     def n_tcol(self) -> int:

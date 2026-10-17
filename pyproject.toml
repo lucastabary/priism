@@ -14,7 +14,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12"]
 # Demucs models (htdemucs, htdemucs_ft) run in-process through the demucs package.
 demucs = ["demucs>=4.0", "torch", "torchaudio"]
 # Research code (priism.lab): generators, attractor separator, pod tooling.
-lab = ["pedalboard>=0.9", "pyyaml", "torch"]
+lab = ["pedalboard>=0.9", "pyyaml", "torch", "onnxruntime"]  # onnxruntime: Basic Pitch P (cleave --p-mode bp)
 # Pretrained models through the UVR engine, used by the lab's legacy `separate`.
 # audioread is imported by audio-separator but not declared by it (0.47).
 lab-separate = ["audio-separator[gpu]>=0.30", "audioread"]

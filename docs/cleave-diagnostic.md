@@ -401,3 +401,35 @@ l'init, 0,7288). Les jobs Chav `1be4` et `17a6` sont annulés.
 qu'égaler un descripteur gratuit. Un seul seed, mais la décision n'en dépend pas : un deuxième seed
 favorable donnerait au mieux une égalité avec les MFCC. Cleave n'est plus entraîné. Le GPU va à l'option B
 (cascade), dont les évaluations `e430` (dev2) et `33cd` (test-20) sont en file sur Chav.
+
+### 9.2 Le facteur P ne nommait pas les notes (17 octobre)
+
+**L'hypothèse de Lucas.** P donnait les 4 pics de saillance harmonique les plus forts. Sur une note seule,
+ce sont surtout ses harmoniques (octave, quinte, sous-octave), et leurs hauteurs relatives disent l'équilibre
+des partiels (les pics à 2 f0 et f0/2 sont faits des harmoniques paires). P livrait donc au predictor une
+partie du profil harmonique, que Z devait porter.
+
+**Le banc contrôlé** (`scratchpad p_synth_bp.py`, à recopier dans le repo si on le réutilise) : notes tenues et
+accords (note seule, quinte, majeur, mineur, maj7) rendus avec les patchs du générateur (7 types, 12 tirages
+par case, sans FX, `sub` = 0 et pas de FM de ratio < 1 pour que f0/2 ne soit pas physiquement présent).
+Trames de 0,1 à 0,6 s après l'attaque.
+
+| Détecteur | précision | rappel | trames exactes | note seule : précision / rappel / exactes |
+|---|---|---|---|---|
+| saillance top-4 (P actuel) | 0,29 | 0,44 | 0,00 | 0,21 / 0,83 / 0,00 |
+| annulation itérative (`cancel`) | 0,47 | 0,36 | 0,21 | 0,60 / 0,74 / 0,60 |
+| **Basic Pitch, seuil 0,3** | **0,87** | **0,85** | **0,61** | 0,98 / 0,96 / 0,93 |
+| Basic Pitch, seuil 0,5 | 0,94 | 0,61 | 0,56 | 1,00 / 0,94 / 0,94 |
+
+Le P actuel ne sort jamais le bon ensemble de notes ; les graves (sub, basse) et le sinus sont les pires, car
+les bins de 21,5 Hz ne séparent pas les demi-tons graves. Basic Pitch (Bittner et al. 2022, ONNX via
+onnxruntime, sans TensorFlow) est juste à 93 % sur une note seule et reste correct sur les accords.
+
+**Le code.** `--p-mode salience|binary|cancel|bp` (`cleave/features.py`, `cleave/pitch_bp.py`) ; `bp` donne des
+notes 0/1 au seuil 0,3, à la même cadence de trames que le front-end (86,13 par seconde). Mon wrapper colle
+à `basic_pitch.run_inference` (accord binaire 100 %, écart max 0,003, dû au rééchantillonneur). Coût sur
+le CPU du laptop : 1,4 s par batch de 4 × 35,7 s, donc environ 2,2 s par pas d'entraînement.
+
+**Le bras** : `cpu-arm-d2v-ctx-b0-long-bp`, identique au bras long de 9.1 (même seed, mêmes données, 8000 pas),
+seul P change. **Critère écrit avant** : `id_auc_kind` ≥ 0,951 (bras de 9.1 + 0,01) et `z_rank` ≥ 8 → 2 seeds
+de plus ; sinon P n'était pas le goulot, et le stop de 9.1 tient.

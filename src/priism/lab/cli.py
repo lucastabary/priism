@@ -1,4 +1,4 @@
-"""Research command line (``priism-lab --help`` lists the commands)."""
+﻿"""Research command line (``priism-lab --help`` lists the commands)."""
 
 from __future__ import annotations
 
@@ -468,7 +468,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
 
     cfg = CleaveConfig(dim=args.dim, local_layers=args.layers, global_layers=args.layers, pred_layers=args.layers,
                        z_dim=args.z_dim, v_dim=args.v_dim, v_window=args.v_window, ctx_layers=args.ctx_layers,
-                       target=args.target, d2v_k=args.d2v_k, residual=args.residual)
+                       target=args.target, d2v_k=args.d2v_k, residual=args.residual, p_mode=args.p_mode)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
           lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
@@ -1005,6 +1005,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--d2v-k", type=int, default=2, help="d2v: last layers averaged")
     p.add_argument("--residual", action="store_true",
                    help="Z predicts the standardised residual of a P/L-only predictor")
+    p.add_argument("--p-mode", choices=["salience", "binary", "cancel", "bp"], default="salience",
+                   help="pitch factor P: top salience values, their positions only, or notes found by "
+                        "estimation and cancellation (cleave/features.py)")
     p.add_argument("--dim", type=int, default=256)
     p.add_argument("--layers", type=int, default=4, help="layers of each of the three transformers")
     p.add_argument("--z-dim", type=int, default=64)
