@@ -357,3 +357,26 @@ valeurs sont au pas 1200, avec le maximum entre parenthèses quand il est ailleu
 
 **La suite, si les seeds 1 et 2 confirment :** un run plus long du bras d2v + ctx + β = 0, au même petit
 format, pour voir s'il dépasse 0,939. On ne passe au grand modèle que s'il la dépasse.
+
+---
+
+## 9. Deux derniers bras pour Cleave (17 octobre), critères écrits avant
+
+Chav est en pause depuis le 16 à 21 h 53. Deux jobs sont en file, en priorité normale (devant le fond) :
+
+- **`arm-d2v-ctx-b0-long`** (job `1be4`) : le meilleur bras de la section 8 (d2v + ctx, β 0), même config,
+  seed 0, mais **8000 pas** au lieu de 1200. À 1200 pas, `id_auc_kind` montait encore, alors que le LR cosinus
+  était déjà au plancher : la question est de savoir s'il plafonne ou s'il passe la barre.
+- **`arm-resid-d2v-b0`** (job `17a6`) : le mode résidu de la section 8, retesté à β 0 (à β 10⁻³ le KL avait
+  écrasé Z, donc l'échec n'était pas concluant).
+
+**Critères (valeur au meilleur pas sur dev2, 133 pistes) :**
+- **Go Cleave** : le bras long atteint `id_auc_kind` ≥ 0,939 (MFCC sur les mêmes paires) **et** `z_rank` ≥ 8
+  (C1). Il faudra alors 2 seeds de plus avant de conclure.
+- **Stop définitif** : `id_auc_kind` < 0,92 au pas 8000, ou `z_rank` < 8. On ne règle plus la recette ; Cleave
+  ne garde que son critère d'arrêt (option C).
+- Entre les deux : un seul bras de plus (le modèle à dim 256), pas davantage.
+- **Résidu** : utile si `z_use_rel` > 0,05 avec `id_auc_kind` ≥ celui du bras d2v + ctx β 0 à 1200 pas (0,885).
+
+En parallèle, le laptop régénère `reg-train-fx` (seed 7100000, FX_CHAIN 0,6, BUILDUP 0,5, FX_AUTO 0,5, sans IR)
+dans `data/reg-train-fx`, pour pouvoir lancer ces bras sur CPU si Chav reste hors ligne.
