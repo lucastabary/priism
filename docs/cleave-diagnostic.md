@@ -380,3 +380,24 @@ Chav est en pause depuis le 16 à 21 h 53. Deux jobs sont en file, en priorité 
 
 En parallèle, le laptop régénère `reg-train-fx` (seed 7100000, FX_CHAIN 0,6, BUILDUP 0,5, FX_AUTO 0,5, sans IR)
 dans `data/reg-train-fx`, pour pouvoir lancer ces bras sur CPU si Chav reste hors ligne.
+
+### 9.1 Résultats (17 octobre, laptop CPU, seed 0)
+
+Chav est resté hors ligne : les deux bras ont tourné sur le CPU du laptop (i5-1235U, ~0,7 s par pas), sur le
+`reg-train-fx` régénéré en local (mêmes seeds et réglages ; le dev2 est identique : même `id_auc_kind` à
+l'init, 0,7288). Les jobs Chav `1be4` et `17a6` sont annulés.
+
+| Pas | 1000 | 2000 | 3000 | 4000 | 5000 | 6000 | 7000 | 8000 |
+|---|---|---|---|---|---|---|---|---|
+| `id_auc_kind` | 0,884 | 0,884 | 0,922 | 0,926 | 0,931 | 0,936 | 0,939 | 0,940 (max 0,941) |
+| `z_rank` | 4,8 | 4,5 | 5,6 | 6,2 | 6,5 | 7,0 | 7,4 | 7,6 |
+| `z_use_rel` | 0,04 | 0,09 | 0,11 | 0,13 | 0,16 | 0,19 | 0,21 | 0,19 |
+
+- **Bras long** : `id_auc_kind` atteint **0,941**, c'est-à-dire le niveau des MFCC (0,939), sans le dépasser.
+  `z_rank` monte jusqu'à 7,6, sous le seuil de 8. Le predictor utilise enfin Z (`z_use_rel` ≈ 0,2).
+- **Résidu à β 0** : 0,824 au pas 1200 (contre 0,885 pour le bras d2v + ctx), `z_use_rel` ≈ 0 : échec.
+
+**Verdict selon les critères écrits avant : stop.** `z_rank` < 8, et même en ignorant ce seuil, Z ne fait
+qu'égaler un descripteur gratuit. Un seul seed, mais la décision n'en dépend pas : un deuxième seed
+favorable donnerait au mieux une égalité avec les MFCC. Cleave n'est plus entraîné. Le GPU va à l'option B
+(cascade), dont les évaluations `e430` (dev2) et `33cd` (test-20) sont en file sur Chav.
