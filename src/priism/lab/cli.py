@@ -471,7 +471,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
                        target=args.target, d2v_k=args.d2v_k, residual=args.residual, p_mode=args.p_mode,
                        l_mode=args.l_mode, onset_mode=args.onset_mode)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
-          lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta,
+          lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta, free_bits=args.free_bits,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
           max_val_tracks=args.max_val_tracks, plateau=args.plateau, max_minutes=args.max_minutes,
           workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
@@ -990,6 +990,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--k-schedule", default="0:1", help="largest k per step, e.g. 0:1,20000:2,30000:4")
     p.add_argument("--mono-frac", type=float, default=0.5, help="share of k = 1 once mixes are allowed")
     p.add_argument("--beta", type=float, default=1e-3, help="weight of KL(Z || N(0, I))")
+    p.add_argument("--free-bits", type=float, default=0.0,
+                   help="nats per Z dimension the KL may hold for free (beta applies above it); 0: off")
     p.add_argument("--ema", type=float, default=0.996,
                    help="starting EMA momentum of the target encoder, cosine to 1; 1: targets frozen at the random init")
     p.add_argument("--w-var", type=float, default=1.0, help="weight of the VICReg variance hinge on the patch tokens")

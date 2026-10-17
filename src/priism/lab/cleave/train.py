@@ -352,7 +352,7 @@ def evaluate(model: Cleave, batcher: Batcher, val_songs: list[Song], pairs: list
 
 def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: CleaveConfig | None = None,
           steps: int = 50000, batch: int = 4, crop_chunks: int = 64, lr: float = 3e-4, warmup: int = 1000,
-          k_schedule: str = "0:1", mono_frac: float = 0.5, beta: float = 1e-3, ema: float = 0.996,
+          k_schedule: str = "0:1", mono_frac: float = 0.5, beta: float = 1e-3, free_bits: float = 0.0, ema: float = 0.996,
           eval_every: int = 500, eval_k: int = 4, per_k: int = 16, id_chunks: int = 8, min_gap_s: float = 20.0,
           max_val_tracks: int = 200, plateau: int = 8, plateau_delta: float = 0.002, min_z_rank: float = 2.0,
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
@@ -434,7 +434,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
                 patches_o, _, active_o, _ = batcher(b["wave_o"], model, None)
                 pair = pair + (patches_o, active_o)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            o = model(patches, plc, active, pmask, beta=beta, w_var=w_var, w_cov=w_cov, pair=pair, w_inv=w_inv,
+            o = model(patches, plc, active, pmask, beta=beta, free_bits=free_bits, w_var=w_var, w_cov=w_cov, pair=pair, w_inv=w_inv,
                       w_swap=w_swap, v_drop=v_drop, w_vinv=w_vinv, inv_mode=inv_mode, inv_tau=inv_tau,
                       w_ctx=w_ctx, w_zuse=w_zuse, zuse_margin=zuse_margin)
         opt.zero_grad(set_to_none=True)

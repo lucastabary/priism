@@ -319,7 +319,7 @@ class Cleave(nn.Module):
         return mu, logvar, tok_e[~pmask[bi, ci]], v
 
     def forward(self, patches: torch.Tensor, pl: torch.Tensor, active: torch.Tensor, pmask: torch.Tensor,
-                beta: float = 1e-3, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
+                beta: float = 1e-3, free_bits: float = 0.0, w_var: float = 1.0, w_cov: float = 0.04, shuffle_z: bool = False,
                 pair: tuple | None = None, w_inv: float = 1.0, w_swap: float = 1.0, v_drop: float = 0.0,
                 w_vinv: float = 0.0, inv_mode: str = "nce", inv_tau: float = 0.1, w_ctx: float = 1.0, w_zuse: float = 0.0,
                 zuse_margin: float = 0.1) -> dict:
@@ -358,10 +358,15 @@ class Cleave(nn.Module):
         logv = logv.float()
         loss_pred = err[m].mean()
         loss_nll = (0.5 * (logv + err.detach() / logv.exp()))[m].mean()
-        kl = (0.5 * (mu.float() ** 2 + logvar.float().exp() - 1 - logvar.float())).sum(-1).mean()
+        kl_d = (0.5 * (mu.float() ** 2 + logvar.float().exp() - 1 - logvar.float())).mean(0)  # (z_dim,) nats
+        kl = kl_d.sum()
+        # free bits (Kingma et al. 2016): each Z dimension holds free_bits nats for free, beta only bites above
+        # it. Keeps Z's scale bounded (beta = 0 let it grow, docs 9.4) without the collapse of a flat beta, and
+        # pays Z to spread over dimensions (z_rank).
+        kl_pen = kl_d.clamp(min=free_bits).sum() if free_bits > 0 else kl
         rows = tokens if tokens.shape[0] <= 4096 else tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:4096]]
         v_loss, c_loss = vicreg(rows)
-        loss = loss_pred + loss_nll + beta * kl + w_var * v_loss + w_cov * c_loss + loss_base
+        loss = loss_pred + loss_nll + beta * kl_pen + w_var * v_loss + w_cov * c_loss + loss_base
         zgap = torch.zeros((), device=loss.device)
         if w_zuse > 0 and B > 1:  # the Z of the next crop of the batch: another song (or another stem)
             ps, _ = self.pred(z.roll(1, 0)[tb], pl[tb, tc], vt)
