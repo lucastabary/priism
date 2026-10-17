@@ -355,6 +355,7 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
           k_schedule: str = "0:1", mono_frac: float = 0.5, beta: float = 1e-3, free_bits: float = 0.0, ema: float = 0.996,
           eval_every: int = 500, eval_k: int = 4, per_k: int = 16, id_chunks: int = 8, min_gap_s: float = 20.0,
           max_val_tracks: int = 200, plateau: int = 8, plateau_delta: float = 0.002, min_z_rank: float = 2.0,
+          guard_step: int = 0, min_kl: float = 0.0, min_zuse: float = 0.0,
           max_minutes: float = 240.0, workers: int = 4, device: str = "cpu", seed: int = 0,
           limit_frac: float = 1.0, measure: int = 0, pair_frac: float = 0.0, w_inv: float = 1.0,
           w_swap: float = 1.0, fx_tracks: int | None = None, fx_chains: int = 4, other_view: bool = False,
@@ -519,6 +520,15 @@ def train(train_roots: list[str], valid_roots: list[str], out: str | Path, cfg: 
             if step > warmup and rec.get("z_rank", 99.0) < min_z_rank:
                 reason = f"collapse: Z effective rank {rec['z_rank']:.2f} < {min_z_rank} at step {step}"
                 break
+            # unattended-run guards (docs/cleave-diagnostic.md 9.6): from guard_step on, a KL below min_kl nats is
+            # a collapsed Z, a z_use_rel below min_zuse a Z the predictor ignores; either way the run is wasted
+            if guard_step and step >= guard_step:
+                if min_kl and extra.get("kl", float("inf")) < min_kl:
+                    reason = f"guard: KL {extra['kl']:.1f} nats < {min_kl} at step {step} (collapsed Z)"
+                    break
+                if min_zuse and rec.get("z_use_rel", float("inf")) < min_zuse:
+                    reason = f"guard: z_use_rel {rec['z_use_rel']:.3f} < {min_zuse} at step {step} (Z unused)"
+                    break
             if plateau and since >= plateau:
                 reason = f"plateau: no {key} gain of {plateau_delta} in {plateau} evaluations (step {step})"
                 break

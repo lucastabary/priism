@@ -472,6 +472,7 @@ def _cleave_train(args: argparse.Namespace) -> None:
                        l_mode=args.l_mode, onset_mode=args.onset_mode)
     train(args.train, args.valid, args.out, cfg, steps=args.steps, batch=args.batch, crop_chunks=args.crop_chunks,
           lr=args.lr, warmup=args.warmup, k_schedule=args.k_schedule, mono_frac=args.mono_frac, beta=args.beta, free_bits=args.free_bits,
+          guard_step=args.guard_step, min_kl=args.min_kl, min_zuse=args.min_zuse,
           eval_every=args.eval_every, eval_k=args.eval_k, per_k=args.per_k, id_chunks=args.id_chunks,
           max_val_tracks=args.max_val_tracks, plateau=args.plateau, max_minutes=args.max_minutes,
           workers=args.workers, device=args.device, seed=args.seed, limit_frac=args.limit_frac,
@@ -992,6 +993,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--beta", type=float, default=1e-3, help="weight of KL(Z || N(0, I))")
     p.add_argument("--free-bits", type=float, default=0.0,
                    help="nats per Z dimension the KL may hold for free (beta applies above it); 0: off")
+    p.add_argument("--guard-step", type=int, default=0, help="step from which --min-kl / --min-zuse apply; 0: off")
+    p.add_argument("--min-kl", type=float, default=0.0, help="stop when the training KL falls below this (nats)")
+    p.add_argument("--min-zuse", type=float, default=0.0, help="stop when z_use_rel falls below this")
     p.add_argument("--ema", type=float, default=0.996,
                    help="starting EMA momentum of the target encoder, cosine to 1; 1: targets frozen at the random init")
     p.add_argument("--w-var", type=float, default=1.0, help="weight of the VICReg variance hinge on the patch tokens")

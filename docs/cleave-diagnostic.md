@@ -500,3 +500,12 @@ File, tout en P minimal, 8000 pas, petit modèle : `arm-min-fb` (β 10⁻³, fre
 soit 48 nats libres, l'ordre du KL à β 0), `arm-min-b1e-4` (β 10⁻⁴), `arm-min-s2b` (seed 2 à β 0, relancé).
 Lecture contre le seed 0 à β 0 du laptop, à pas égal : stabilité (pas de NaN), `z_rank` (le free bits doit le
 monter), `id_auc_kind`. Critère du bras minimal inchangé (≥ 0,951 et `z_rank` ≥ 8).
+
+### 9.6 Garde-fous pour la nuit
+
+Nouveaux arrêts de `cleave-train`, actifs à partir de `--guard-step` : `--min-kl` (KL d'entraînement sous ce
+nombre de nats : Z s'est vidé) et `--min-zuse` (`z_use_rel` sous ce seuil : le predictor ignore Z). Les bras de
+nuit sont resoumis avec `--guard-step 2000 --min-kl 10 --min-zuse 0.03 --plateau 8` (les seeds 0 et 1 à β 0
+étaient à `z_use_rel` ≈ 0,14 et KL ≈ 67 au pas 2000 ; le plateau coupe après 4000 pas sans gain de 0,002).
+NaN, `z_rank` < 2 et le plafond de durée restaient déjà actifs. En réserve, au bout de la file : seed 1 des
+bras free bits et β 10⁻⁴.
